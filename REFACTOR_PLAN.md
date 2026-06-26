@@ -46,6 +46,18 @@ TradingView alert ──HTTP──▶ webhook_receiver.py (127.0.0.1:8891, singl
 
 `P0` ship-blocker / money-or-safety risk · `P1` high · `P2` medium · `P3` cleanup.
 
+### 0.4 Caveat — Multi-Exchange Credential Model (cross-cutting: P2/S4·S6, P5, P6)
+
+The system must support credentials for **multiple exchanges at the same time** (OKX, KuCoin, Bybit, …), not a single hardcoded OKX key set. This is a design constraint on every phase that touches execution, secrets, or schema.
+
+1. **Per-exchange, namespaced credentials.** Each exchange has its own credential set under a stable prefix derived from the adapter id — e.g. `OKX_API_KEY` / `OKX_SECRET_KEY` / `OKX_PASSPHRASE`, `KUCOIN_API_KEY` / `KUCOIN_SECRET_KEY` / `KUCOIN_PASSPHRASE`, `BYBIT_API_KEY` / `BYBIT_SECRET_KEY`. No exchange ever shares another's keys. The prefix is a function of the exchange, not duplicated per strategy.
+2. **Strategy selects the exchange; it never carries secrets.** A strategy file picks its exchange + API endpoint (the `instrument.exchange` / endpoint config from P6) and references a credential set **by exchange/id only** — never inline keys. Many strategies on the same exchange share that exchange's single credential set.
+3. **Endpoint and credentials are separate concerns.** API base URL / demo-vs-live endpoint is config- or strategy-selectable; credentials are resolved independently by the adapter from the namespaced env. (Demo vs. live OKX may use different key sets *and* endpoints.)
+4. **Adapter-scoped resolution + least-privilege (ties S4).** `ExecutorFactory`/the adapter resolves only the **selected** exchange's credentials and passes ONLY those into that adapter's subprocess `env={...}` — never the full parent env, never another exchange's keys. Adapter X must be structurally unable to read exchange Y's secrets.
+5. **Fail closed on missing/partial credential set.** If a strategy selects an exchange whose credential set is unset or incomplete, that strategy is disarmed (no-submit) with a loud operator alert. It must NOT fall back to another exchange's keys or to an unauthenticated path.
+6. **Rotation per exchange (ties S6).** The rotation procedure is documented per-exchange; rotating one exchange's keys must not affect any other.
+7. **Env enumeration.** `.env` / `setup/env.example` enumerate the namespaced credential block for each supported exchange (empty placeholders), alongside shared non-exchange settings (`SHADOW_WEBHOOK_SECRET`, ports, Cloudflare). Live keys stay absent until explicitly provisioned.
+
 ---
 
 ## 1. Findings Inventory (consolidated)
@@ -241,10 +253,10 @@ This resolves the apparent contradiction between "the journal is the only source
 3. **Bound the queue + basic rate limiting (S3).** Cap `PROCESS_QUEUE` (`maxsize`), return `503` when full, and add a per-source request rate limit. Behind Cloudflare Tunnel, rate-limit by authenticated key id or `CF-Connecting-IP` (not tunnel source IP). Read `Content-Length` with a hard max body size before buffering.
    - **Sequencing note (maxsize stays permissive until P3 lands):** in P2 the queue is still drained by the **single serial worker** — head-of-line blocking is not removed until **P3**. A tight `maxsize` here would shed *legitimate* alerts during a transient backlog (one slow 45 s OKX call can back up four strategies firing on the same bar close). So ship P2 with a **deliberately generous `maxsize`**, sized to absorb a worst-case serial drain rather than to throttle, and rely on the **hard body-size cap + per-source rate limit** as the real DoS bound. **Tighten `maxsize` to its true enforcing value only after P3's bounded per-symbol worker pool lands**, when a full queue signals genuine overload rather than single-worker latency. Until then the bound is a safety ceiling, not an alert-dropping floor (matches the `queue maxsize default permissive` rollback default below).
    - Request-path order is explicit: `(1) Content-Length/max-body check -> 413`, `(2) rate-limit`, `(3) auth/HMAC verify`, `(4) enqueue or 503`. Every `503` emits an operator alert because it represents a dropped trading signal.
-4. **Subprocess least-privilege (S4).** Pass only the explicit vars the executor needs (`env={...}`), not `os.environ.copy()`. Redact/scrub captured `stdout/stderr` before writing to the ledger (strip anything matching key/secret patterns).
+4. **Subprocess least-privilege (S4).** Pass only the explicit vars the executor needs (`env={...}`), not `os.environ.copy()`. Redact/scrub captured `stdout/stderr` before writing to the ledger (strip anything matching key/secret patterns). **Scope the injected vars to the selected exchange's namespaced credential set only (see §0.4)** — an adapter never receives another exchange's keys.
 5. **Dashboard auth (S5).** Require a token (or HTTP basic) on `dashboard.py` and `/api`; never serve PnL/positions unauthenticated even on localhost-behind-proxy. Keep the localhost bind. Fail closed when dashboard auth token/config is missing.
 6. **Execution gate precedence table.** Document and implement explicit precedence: live submission requires **all** gates affirmative (`HERMX_SUBMIT_ENABLED=true` AND `execution.submit_orders=true` AND `risk.allow_live_execution=true` AND auth healthy). Any unset/ambiguous state defaults to dry-run/no-submit.
-7. **Secrets hygiene (S6).** Document a rotation procedure in `setup/`; confirm `.env` is git-ignored (it is) and add a pre-commit secret scan.
+7. **Secrets hygiene (S6).** Document a **per-exchange** rotation procedure in `setup/` (rotating one exchange's keys must not affect others); confirm `.env` is git-ignored (it is) and add a pre-commit secret scan. Define the namespaced per-exchange credential blocks (§0.4) in `setup/env.example` with empty placeholders, and tighten `.env` file permissions (currently world-readable `rw-r--r--`) to `600`.
 
 **Risk:** MEDIUM. The HMAC change requires coordinating the alert sender; ship header-based constant-time auth + replay window first (no sender change), then layer HMAC once the relay is ready. Keep the old secret path behind a deprecation flag for one release.
 
@@ -334,6 +346,7 @@ This resolves the apparent contradiction between "the journal is the only source
 2. **Wire the factory in (X2).** Replace the hardcoded subprocess call in `webhook_receiver.py:2024-2085` and the dashboard's direct OKX calls (`dashboard.py:442,507`) with `ExecutorFactory.create(CONFIG, ROOT)`. The OKX adapter keeps shelling out to the proven `okx_demo_executor.py` — no reimplementation.
 3. **Formalize the contract (X4).** Document the `readiness`/instruction schema and the normalized result envelope on `BaseExecutor.execute`; unify `inst_id` vs `okx_inst_id` naming behind one accessor.
 4. **Keep the OKX REST client as-is (X3)** but expose it only through the adapter, so a future Bybit/Binance adapter is ~100 lines (compose another CLI/REST client) rather than a fork of the engine.
+5. **Adapter-scoped credential resolution (X2, see §0.4).** The factory resolves the selected exchange's **namespaced** credentials (`<EXCHANGE>_API_KEY/...`) and an API endpoint, and injects only that adapter's keys into its subprocess env (composes with S4 least-privilege). Multiple exchanges' credential sets coexist; a strategy's `instrument.exchange` selects which set is used. A missing/partial set fails closed (disarms that exchange) rather than borrowing another's keys.
 
 **Risk:** MEDIUM — the factory becomes the live order path. Mitigation: behind `HERMX_EXECUTOR_BACKEND=factory|legacy`; run factory in shadow (plan-only, compare its **normalized** readiness/result against the legacy direct call) before switching live submission to it.
 
@@ -344,6 +357,7 @@ This resolves the apparent contradiction between "the journal is the only source
 - [ ] Both receiver and dashboard obtain executors only via `ExecutorFactory`; no hardcoded script paths remain.
 - [ ] Factory path produces **normalized-equivalent** readiness and equivalent fills vs legacy in shadow comparison over a soak window — compared after canonicalization (sorted keys, normalized number formatting / `Decimal` quantization, whitespace) and after dropping legitimately non-deterministic fields (timestamps, `clOrdId` nonces, request ids), **not** by byte-for-byte diff. Any residual non-normalized difference is investigated and resolved before cutover.
 - [ ] A stub `bybit` adapter can be registered and selected via config without touching receiver/dashboard code (proof-of-extensibility test).
+- [ ] Multiple exchanges' credential sets coexist; an adapter's subprocess env contains **only** its own exchange's namespaced credentials (test asserts no cross-exchange secret leakage), and a missing/partial credential set disarms that exchange (fail-closed) instead of falling back (§0.4).
 
 ---
 
@@ -352,7 +366,7 @@ This resolves the apparent contradiction between "the journal is the only source
 **Goal:** Strategies and alerts stop hardcoding OKX. Fixes M1–M3. Depends on P5's adapter contract.
 
 **Tasks**
-1. **Strategy schema v2 (M1).** Introduce `schema_version: 2`: replace `okx_inst_id` with a generic `instrument` block (e.g. `{ "exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap" }`), replace `okx_submit_orders` with `submit_orders`, relax the `asset`/quote regex beyond `*USDT`. Keep a **v1→v2 loader shim** so existing `strategies/*.json` keep working until migrated.
+1. **Strategy schema v2 (M1).** Introduce `schema_version: 2`: replace `okx_inst_id` with a generic `instrument` block (e.g. `{ "exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap" }`), replace `okx_submit_orders` with `submit_orders`, relax the `asset`/quote regex beyond `*USDT`. Keep a **v1→v2 loader shim** so existing `strategies/*.json` keep working until migrated. The `instrument.exchange` (and optional endpoint/profile) is how a strategy **selects its exchange**; credentials are NOT stored in the strategy — they are resolved by the adapter from the per-exchange namespaced env (§0.4). The schema must forbid inline credential fields.
 2. **Alert schema (M2).** Widen the `exchange` enum; keep `okx` valid. Validate alerts against the schema at intake (currently the schema file exists but enforcement should be explicit).
 3. **Generic instruction wire format (M3).** Make the readiness/instruction the exchange-agnostic shape from `ARCHITECTURE.md` (`strategy_id, asset, target_side, target_notional_usd, margin_mode, leverage`); let the adapter translate to OKX `inst_id`/`td_mode`. OKX-specific fields move *inside* the OKX adapter.
 4. **Migrate the four live strategy files** to v2 in a single reviewed change once the shim is proven.
@@ -366,6 +380,7 @@ This resolves the apparent contradiction between "the journal is the only source
 - [ ] A non-OKX (e.g. stub Bybit) strategy validates and routes to the right adapter end-to-end in dry-run.
 - [ ] Alerts are schema-validated at intake; invalid alerts are quarantined (per existing `quarantine_invalid_strategy_alerts` config).
 - [ ] All four production strategies migrated to v2 with identical resulting orders vs v1 (diff test).
+- [ ] A strategy selecting a second exchange (e.g. KuCoin) resolves that exchange's namespaced credentials + endpoint end-to-end in dry-run with **no code change**; a strategy with no/partial credentials for its selected exchange is disarmed with an operator alert and never borrows another exchange's keys (§0.4).
 
 ---
 
