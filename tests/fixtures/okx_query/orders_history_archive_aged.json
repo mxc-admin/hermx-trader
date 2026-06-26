@@ -1,0 +1,30 @@
+{
+  "code": "0",
+  "msg": "",
+  "data": [
+    {
+      "instId": "BTC-USDT-SWAP",
+      "ordId": "688500000000000001",
+      "clOrdId": "mxc9aged0ut1234567890",
+      "tag": "",
+      "px": "",
+      "sz": "2",
+      "ordType": "market",
+      "side": "sell",
+      "posSide": "long",
+      "tdMode": "cross",
+      "accFillSz": "2",
+      "fillSz": "2",
+      "fillPx": "61500.0",
+      "avgPx": "61500.0",
+      "state": "filled",
+      "lever": "5",
+      "fee": "-0.0246",
+      "feeCcy": "USDT",
+      "pnl": "120.5",
+      "reduceOnly": "true",
+      "cTime": "1717000000000",
+      "uTime": "1717000002000"
+    }
+  ]
+}

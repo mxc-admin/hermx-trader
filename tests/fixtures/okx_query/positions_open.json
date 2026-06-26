@@ -1,0 +1,23 @@
+{
+  "code": "0",
+  "msg": "",
+  "data": [
+    {
+      "instId": "BTC-USDT-SWAP",
+      "instType": "SWAP",
+      "posSide": "long",
+      "pos": "3",
+      "availPos": "3",
+      "avgPx": "63000.5",
+      "upl": "12.5",
+      "uplRatio": "0.0004",
+      "notionalUsd": "189001.5",
+      "lever": "5",
+      "mgnMode": "cross",
+      "imr": "37800.3",
+      "mmr": "945.0",
+      "cTime": "1719300001000",
+      "uTime": "1719300050000"
+    }
+  ]
+}

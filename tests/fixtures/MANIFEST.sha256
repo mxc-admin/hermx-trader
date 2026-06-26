@@ -40,3 +40,17 @@ cf8df68dd6ed3a4bc2e8a1e0d774e7d6446b20a25c31a955426544d3270ef04c  executor_outpu
 6269b6b5e6058811f42bdcaf9a771aaa2e17dad5132528bf5e06b0d754719328  strategies/ethusdt_duo_base_dev_2h.json
 123ba3e5505813122e1df97fd455dea13727bfcf3bf20a7446ad24db5b8125f2  strategies/solusdt_duo_base_dev_3h.json
 03099e5b2c86f542bfda78cf9afa87da1c33f2424ec4dcbf8982b469981199be  strategies/xrpusdt_duo_base_dev_4h.json
+
+# Phase 1 task 3 (REFACTOR_PLAN.md:207, :209-212, :237): raw OKX v5 query
+# envelopes for the observe-only reconciliation query interface. These are the
+# fixture oracle for the PURE normalizer + CLI-dispatch tests (no network):
+# success / partial / not-found / aged-out paths.
+f2a1947a147370bf7758332f1c46062ecdebc23be69e56825f8930ee3efd1b4e  okx_query/balance.json
+52b3d30fa7bb655b236c8ef559d823fe82b90fefa257a247927473e2867f9c56  okx_query/order_canceled_zero_fill.json
+c478bdfeddb6f8c9415df7dd50761b9e891105e17ef799b8a364aff6bf3e3ca1  okx_query/order_filled.json
+2f72475e50a87aa973410a6e525a3561fe41c5a5a401883b797177d21f32787e  okx_query/order_not_found.json
+6627fafaadf111953c2f2212b45b7673c8a6d54f819157482fe800b548f13cd1  okx_query/order_partially_filled.json
+dea3b69acc0340843cdc3aadb9d50d8a8a29da2f745cdb1d2ee1a62fff0e07b5  okx_query/orders_history_archive_aged.json
+9a3d5a2105b0cad89de60a284d8282c1c07b00439ded42477b755d169b19d8be  okx_query/orders_pending.json
+d42473653e4ac2ef53bdc2e3eab2f6081a255f196bf7257e8abc4232da26040f  okx_query/positions_flat.json
+bf15d063dac49c93fa40d2bc545febdecb37d24e246c35c3431d33abbe15d685  okx_query/positions_open.json

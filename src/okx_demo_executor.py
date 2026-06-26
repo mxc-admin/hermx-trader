@@ -33,6 +33,17 @@ FORCE_IPV4 = os.environ.get("OKX_FORCE_IPV4", "1") != "0"
 SUBMIT_ORDERS = os.environ.get("OKX_SUBMIT_ORDERS", "false").lower() == "true"
 ENFORCE_LEVERAGE = os.environ.get("OKX_ENFORCE_LEVERAGE", "true").lower() != "false"
 
+# Venue tag stamped onto every normalized query shape. Must match the
+# ``OkxDemoExecutor.key`` in ``src/executors/okx_demo.py`` so reconciliation can
+# treat this script's output as the OKX implementation of the venue-neutral
+# query contract (REFACTOR_PLAN.md:207).
+EXCHANGE_NAME = "okx_demo"
+
+# OKX v5 returns a non-zero ``code`` with this message/code when an order lookup
+# misses. Reconciliation (Task 4) maps not-found -> REJECTED, so the normalizer
+# must surface it as a first-class ``state`` rather than raising.
+OKX_ORDER_NOT_FOUND_CODES = {"51603"}
+
 
 def install_ipv4_resolver() -> None:
     if not FORCE_IPV4:
@@ -715,6 +726,200 @@ def order_history_snapshot(client: OkxClient, inst_ids: list[str] | None = None,
     }
 
 
+# ---------------------------------------------------------------------------
+# OBSERVE-ONLY QUERY INTERFACE (REFACTOR_PLAN.md:207, endpoints :209).
+#
+# A supported, read-only query path used (later) by reconciliation (Task 4) so it
+# never parses ``execute`` stdout. Two halves:
+#   * PURE normalizers (raw OKX v5 envelope -> venue-neutral shape). No client,
+#     no network, so they are unit-testable against fixtures (:237).
+#   * Thin network accessors that fetch the raw OKX v5 envelope via the existing
+#     HMAC signer. They GET only and never read SUBMIT_ORDERS -- reads are always
+#     allowed regardless of whether submission is enabled.
+# The CLI verbs (see main()) compose accessor + normalizer and emit normalized
+# JSON; the OKX executor adapter shells out to those verbs.
+# ---------------------------------------------------------------------------
+
+
+def _coerce_float(value, default: float | None = None) -> float | None:
+    """Best-effort float; empty/None/garbage -> ``default`` (PURE)."""
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _avg_px(value) -> float | None:
+    """OKX leaves ``avgPx`` empty until there is a fill -> normalize to None."""
+    return _coerce_float(value, None)
+
+
+def empty_normalized_order(state: str = "unknown", raw=None) -> dict:
+    """Canonical venue-neutral order shape with no fill (PURE)."""
+    return {
+        "exchange": EXCHANGE_NAME,
+        "inst_id": None,
+        "ord_id": None,
+        "cl_ord_id": None,
+        "state": state,
+        "acc_fill_sz": 0.0,
+        "avg_px": None,
+        "ord_type": None,
+        "side": None,
+        "pos_side": None,
+        "ts": None,
+        "raw": raw,
+    }
+
+
+def _normalize_order_row(row: dict, raw=None) -> dict:
+    """Map one raw OKX v5 order data row to the normalized order shape (PURE)."""
+    return {
+        "exchange": EXCHANGE_NAME,
+        "inst_id": row.get("instId"),
+        "ord_id": row.get("ordId") or None,
+        "cl_ord_id": row.get("clOrdId") or None,
+        "state": row.get("state"),
+        "acc_fill_sz": _coerce_float(row.get("accFillSz"), 0.0),
+        "avg_px": _avg_px(row.get("avgPx")),
+        "ord_type": row.get("ordType"),
+        "side": row.get("side"),
+        "pos_side": row.get("posSide"),
+        "ts": row.get("uTime") or row.get("cTime"),
+        "raw": raw if raw is not None else row,
+    }
+
+
+def normalize_order(envelope: dict) -> dict:
+    """Raw ``/api/v5/trade/order`` envelope -> normalized order (PURE).
+
+    A not-found lookup (non-zero code "order does not exist", or a clean envelope
+    with empty data) becomes ``state="not_found"`` carrying the raw error, never
+    an exception, so reconciliation can map it deterministically (:212).
+    """
+    envelope = envelope or {}
+    code = str(envelope.get("code", ""))
+    data = envelope.get("data") or []
+    if code != "0":
+        msg = str(envelope.get("msg", "")).lower()
+        is_not_found = code in OKX_ORDER_NOT_FOUND_CODES or "does not exist" in msg
+        return empty_normalized_order(state="not_found" if is_not_found else "error", raw=envelope)
+    if not data:
+        return empty_normalized_order(state="not_found", raw=envelope)
+    return _normalize_order_row(data[0])
+
+
+def normalize_orders(envelope: dict) -> list[dict]:
+    """Raw orders-pending / orders-history-archive envelope -> normalized list (PURE)."""
+    envelope = envelope or {}
+    if str(envelope.get("code", "")) != "0":
+        return []
+    return [_normalize_order_row(row) for row in (envelope.get("data") or [])]
+
+
+def normalize_position_row(row: dict) -> dict:
+    """Map one raw OKX v5 position row to the normalized position shape (PURE)."""
+    return {
+        "exchange": EXCHANGE_NAME,
+        "inst_id": row.get("instId"),
+        "pos": signed_position_contracts(row),
+        "pos_side": (row.get("posSide") or "net"),
+        "avg_px": _avg_px(row.get("avgPx")),
+        "upl": _coerce_float(row.get("upl"), None),
+        "raw": row,
+    }
+
+
+def normalize_positions(envelope: dict) -> list[dict]:
+    """Raw ``/api/v5/account/positions`` envelope -> normalized list (PURE)."""
+    envelope = envelope or {}
+    if str(envelope.get("code", "")) != "0":
+        return []
+    return [normalize_position_row(row) for row in (envelope.get("data") or []) if row.get("instId")]
+
+
+def normalize_balances(envelope: dict, ccy: str | None = None) -> list[dict]:
+    """Raw ``/api/v5/account/balance`` envelope -> normalized per-ccy list (PURE)."""
+    envelope = envelope or {}
+    if str(envelope.get("code", "")) != "0":
+        return []
+    data = envelope.get("data") or []
+    if not data:
+        return []
+    out: list[dict] = []
+    for detail in (data[0].get("details") or []):
+        this_ccy = detail.get("ccy")
+        if ccy and this_ccy != ccy:
+            continue
+        out.append(
+            {
+                "exchange": EXCHANGE_NAME,
+                "ccy": this_ccy,
+                "eq": _coerce_float(detail.get("eq"), 0.0),
+                "avail": _coerce_float(
+                    detail.get("availEq") or detail.get("availBal") or detail.get("avail"), 0.0
+                ),
+                "raw": detail,
+            }
+        )
+    return out
+
+
+# -- network accessors (GET only; submission-independent) --------------------
+
+
+def query_order_raw(client: OkxClient, inst_id: str, ord_id: str | None = None, cl_ord_id: str | None = None) -> dict:
+    query = {"instId": inst_id}
+    if ord_id:
+        query["ordId"] = ord_id
+    elif cl_ord_id:
+        query["clOrdId"] = cl_ord_id
+    path = "/api/v5/trade/order?" + urllib.parse.urlencode(query)
+    return client.get(path).get("payload") or {}
+
+
+def query_orders_pending_raw(client: OkxClient, inst_id: str | None = None) -> dict:
+    query = {"instType": "SWAP"}
+    if inst_id:
+        query["instId"] = inst_id
+    path = "/api/v5/trade/orders-pending?" + urllib.parse.urlencode(query)
+    return client.get(path).get("payload") or {}
+
+
+def query_orders_history_archive_raw(client: OkxClient, inst_id: str | None = None, limit: int = 100) -> dict:
+    query = {"instType": "SWAP", "limit": str(limit)}
+    if inst_id:
+        query["instId"] = inst_id
+    path = "/api/v5/trade/orders-history-archive?" + urllib.parse.urlencode(query)
+    return client.get(path).get("payload") or {}
+
+
+def query_positions_raw(client: OkxClient, inst_id: str | None = None) -> dict:
+    query = {"instType": "SWAP"}
+    if inst_id:
+        query["instId"] = inst_id
+    path = "/api/v5/account/positions?" + urllib.parse.urlencode(query)
+    return client.get(path).get("payload") or {}
+
+
+def query_balance_raw(client: OkxClient, ccy: str | None = None) -> dict:
+    path = "/api/v5/account/balance"
+    if ccy:
+        path += "?" + urllib.parse.urlencode({"ccy": ccy})
+    return client.get(path).get("payload") or {}
+
+
+def _query_list_envelope(items: list[dict], key: str) -> dict:
+    """Wrap a normalized list with venue/timestamp metadata for CLI output."""
+    return {"exchange": EXCHANGE_NAME, "generated_at": utc_ts(), key: items}
+
+
+def _first(values: list | None):
+    return values[0] if values else None
+
+
 def load_readiness(path: str | None) -> dict:
     if path:
         obj = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -727,10 +932,28 @@ def load_readiness(path: str | None) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="OKX demo execution planner")
-    parser.add_argument("command", choices=["health", "plan", "execute", "orders-history"], help="health reads account state; plan builds order intents; execute can submit demo orders when enabled")
+    parser.add_argument(
+        "command",
+        choices=[
+            "health",
+            "plan",
+            "execute",
+            "orders-history",
+            # Observe-only query verbs (read-only; never arm submission). :207/:209
+            "query-order",
+            "orders-pending",
+            "orders-history-archive",
+            "positions",
+            "balance",
+        ],
+        help="health reads account state; plan builds order intents; execute can submit demo orders when enabled; query-*/orders-*/positions/balance are read-only reconciliation queries",
+    )
     parser.add_argument("--readiness-file", help="JSON file containing execution_readiness")
-    parser.add_argument("--inst-id", action="append", help="Optional OKX instrument id for orders-history. Can be repeated.")
-    parser.add_argument("--limit", type=int, default=100, help="Per-instrument order-history limit.")
+    parser.add_argument("--inst-id", action="append", help="OKX instrument id (orders-history may repeat; query verbs use the first).")
+    parser.add_argument("--limit", type=int, default=100, help="Per-instrument order-history/archive limit.")
+    parser.add_argument("--ord-id", help="OKX order id for query-order (preferred over --cl-ord-id).")
+    parser.add_argument("--cl-ord-id", help="Client order id for query-order (fallback when --ord-id is absent).")
+    parser.add_argument("--ccy", help="Optional currency filter for balance.")
     args = parser.parse_args()
     client = OkxClient()
     if args.command == "health":
@@ -738,6 +961,32 @@ def main() -> int:
         return 0
     if args.command == "orders-history":
         print(json.dumps(order_history_snapshot(client, args.inst_id, args.limit), ensure_ascii=False, indent=2))
+        return 0
+    # -- read-only query verbs: compose network accessor + pure normalizer ----
+    if args.command == "query-order":
+        inst_id = _first(args.inst_id)
+        if not inst_id:
+            parser.error("query-order requires --inst-id")
+        if not args.ord_id and not args.cl_ord_id:
+            parser.error("query-order requires --ord-id or --cl-ord-id")
+        raw = query_order_raw(client, inst_id, args.ord_id, args.cl_ord_id)
+        print(json.dumps(normalize_order(raw), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "orders-pending":
+        raw = query_orders_pending_raw(client, _first(args.inst_id))
+        print(json.dumps(_query_list_envelope(normalize_orders(raw), "orders"), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "orders-history-archive":
+        raw = query_orders_history_archive_raw(client, _first(args.inst_id), args.limit)
+        print(json.dumps(_query_list_envelope(normalize_orders(raw), "orders"), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "positions":
+        raw = query_positions_raw(client, _first(args.inst_id))
+        print(json.dumps(_query_list_envelope(normalize_positions(raw), "positions"), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "balance":
+        raw = query_balance_raw(client, args.ccy)
+        print(json.dumps(_query_list_envelope(normalize_balances(raw, args.ccy), "balances"), ensure_ascii=False, indent=2))
         return 0
     readiness = load_readiness(args.readiness_file)
     if args.command == "plan":

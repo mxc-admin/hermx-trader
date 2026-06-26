@@ -1,0 +1,30 @@
+{
+  "code": "0",
+  "msg": "",
+  "data": [
+    {
+      "instId": "XRP-USDT-SWAP",
+      "ordId": "688577747503788333",
+      "clOrdId": "mxc4d4e5f6a7b8c9d0e1f2",
+      "tag": "",
+      "px": "",
+      "sz": "10",
+      "ordType": "market",
+      "side": "buy",
+      "posSide": "long",
+      "tdMode": "cross",
+      "accFillSz": "0",
+      "fillSz": "0",
+      "fillPx": "",
+      "avgPx": "",
+      "state": "live",
+      "lever": "5",
+      "fee": "0",
+      "feeCcy": "USDT",
+      "pnl": "0",
+      "reduceOnly": "false",
+      "cTime": "1719300300000",
+      "uTime": "1719300300000"
+    }
+  ]
+}

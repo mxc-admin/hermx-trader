@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 
-from .base import BaseExecutor, empty_fill_summary
+from .base import BaseExecutor, empty_fill_summary, empty_normalized_order
 
 
 class OkxDemoExecutor(BaseExecutor):
@@ -24,6 +24,7 @@ class OkxDemoExecutor(BaseExecutor):
     SCRIPT_RELPATH = ("src", "okx_demo_executor.py")
     EXECUTE_TIMEOUT_SECONDS = 45
     HEALTH_TIMEOUT_SECONDS = 12
+    QUERY_TIMEOUT_SECONDS = 12
 
     def _script_path(self):
         return self.root.joinpath(*self.SCRIPT_RELPATH)
@@ -88,6 +89,68 @@ class OkxDemoExecutor(BaseExecutor):
                 fill_summary=empty_fill_summary(client_order_id),
                 payload={"error": str(exc)},
             )
+
+    # -- observe-only queries ------------------------------------------------
+    # Same subprocess+env pattern as execute()/health(), but shelling out to the
+    # read-only CLI verbs and parsing their NORMALIZED JSON. The child env forces
+    # OKX_SUBMIT_ORDERS=false: reads never depend on, and never arm, submission.
+    def _query_env(self) -> dict:
+        env = os.environ.copy()
+        env["OKX_SIMULATED_TRADING"] = "1" if bool(self.execution_cfg.get("simulated_trading", True)) else "0"
+        env["OKX_FORCE_IPV4"] = "1" if bool(self.execution_cfg.get("force_ipv4", True)) else "0"
+        env["OKX_SUBMIT_ORDERS"] = "false"
+        return env
+
+    def _run_query(self, argv: list):
+        """Run a read-only CLI verb; return parsed JSON or None on any failure."""
+        script = self._script_path()
+        if not script.exists():
+            return None
+        try:
+            completed = subprocess.run(
+                [sys.executable, str(script), *argv],
+                cwd=str(self.root),
+                text=True,
+                capture_output=True,
+                timeout=self.QUERY_TIMEOUT_SECONDS,
+                env=self._query_env(),
+            )
+            if completed.returncode != 0:
+                return None
+            return json.loads(completed.stdout)
+        except Exception:
+            return None
+
+    def get_order(self, inst_id: str, ord_id: str | None = None, cl_ord_id: str | None = None) -> dict:
+        argv = ["query-order", "--inst-id", inst_id]
+        if ord_id:
+            argv += ["--ord-id", ord_id]
+        elif cl_ord_id:
+            argv += ["--cl-ord-id", cl_ord_id]
+        parsed = self._run_query(argv)
+        if not isinstance(parsed, dict):
+            return empty_normalized_order(self.key, state="error", raw={"error": "okx_query_failed"})
+        return parsed
+
+    def get_open_orders(self, inst_id: str | None = None) -> list:
+        argv = ["orders-pending"] + (["--inst-id", inst_id] if inst_id else [])
+        parsed = self._run_query(argv)
+        return (parsed or {}).get("orders", []) if isinstance(parsed, dict) else []
+
+    def get_order_history_archive(self, inst_id: str | None = None, limit: int = 100) -> list:
+        argv = ["orders-history-archive", "--limit", str(limit)] + (["--inst-id", inst_id] if inst_id else [])
+        parsed = self._run_query(argv)
+        return (parsed or {}).get("orders", []) if isinstance(parsed, dict) else []
+
+    def get_positions(self, inst_id: str | None = None) -> list:
+        argv = ["positions"] + (["--inst-id", inst_id] if inst_id else [])
+        parsed = self._run_query(argv)
+        return (parsed or {}).get("positions", []) if isinstance(parsed, dict) else []
+
+    def get_balance(self, ccy: str | None = None) -> list:
+        argv = ["balance"] + (["--ccy", ccy] if ccy else [])
+        parsed = self._run_query(argv)
+        return (parsed or {}).get("balances", []) if isinstance(parsed, dict) else []
 
     def health(self) -> dict:
         script = self._script_path()

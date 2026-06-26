@@ -1,0 +1,30 @@
+{
+  "code": "0",
+  "msg": "",
+  "data": [
+    {
+      "instId": "ETH-USDT-SWAP",
+      "ordId": "688577747503788111",
+      "clOrdId": "mxc2b2c3d4e5f6a7b8c9d0",
+      "tag": "",
+      "px": "",
+      "sz": "3",
+      "ordType": "market",
+      "side": "buy",
+      "posSide": "long",
+      "tdMode": "cross",
+      "accFillSz": "1",
+      "fillSz": "1",
+      "fillPx": "3010.25",
+      "avgPx": "3010.25",
+      "state": "partially_filled",
+      "lever": "5",
+      "fee": "-0.0021",
+      "feeCcy": "USDT",
+      "pnl": "0",
+      "reduceOnly": "false",
+      "cTime": "1719300100000",
+      "uTime": "1719300101500"
+    }
+  ]
+}
