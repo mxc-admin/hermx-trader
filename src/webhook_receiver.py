@@ -32,6 +32,26 @@ DECISION_LEDGER = LOG_DIR / "shadow-decisions.jsonl"
 PAPER_STATE_FILE = ROOT / "paper-state.json"
 CONTROL_STATE_FILE = ROOT / "control-state.json"
 PAPER_TRADES_LEDGER = LOG_DIR / "paper-trades.jsonl"
+# Phase 1 task 1/2 (REFACTOR_PLAN.md:202-206): durable, append-only position
+# journal. Every paper-state transition is journaled (write-ahead, fsync'd) and,
+# under the "journal" backend, in-memory state is *derived* by replaying it so a
+# missing/corrupt snapshot rebuilds rather than silently resetting to empty (E5).
+POSITION_JOURNAL_LEDGER = LOG_DIR / "position-journal.jsonl"
+# schema_version on every record. Replay compatibility rule:
+#   * A record with schema_version <= POSITION_JOURNAL_SCHEMA_VERSION is applied
+#     by apply_effect (older shapes get version-dispatched here as they appear).
+#   * A record with schema_version > POSITION_JOURNAL_SCHEMA_VERSION is a hard
+#     error (loud log + raise): a newer writer produced a shape this reader does
+#     not understand; refuse to misinterpret it. Forward migrations bump this
+#     constant and add an explicit upgrade shim before changing the effect shape
+#     (e.g. Decimal serialization, idempotency metadata).
+POSITION_JOURNAL_SCHEMA_VERSION = 1
+# State backend selector (REFACTOR_PLAN.md:225 rollback flag). Read once at import,
+# like the other env-driven config. "legacy" (DEFAULT) = paper-state.json snapshot
+# is authoritative, byte-identical to pre-Phase-1 behavior. "journal" = the
+# position journal is authoritative and load_paper_state() rebuilds via replay.
+# The journal is written in BOTH modes (forward-compatible soak data).
+HERMX_STATE_BACKEND = (os.environ.get("HERMX_STATE_BACKEND") or "legacy").strip().lower() or "legacy"
 # Generic, exchange-agnostic execution ledgers. The legacy OKX-named files are
 # kept as compatibility mirrors so older dashboards/tools keep reading history.
 EXECUTION_PLAN_LEDGER = LOG_DIR / "execution-plan.jsonl"
@@ -306,6 +326,72 @@ def check_and_mark_signal(normalized: dict, received_at: str) -> tuple[bool, dic
 def append_jsonl(path: Path, obj: dict) -> None:
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n")
+
+
+def append_jsonl_durable(path: Path, obj: dict) -> None:
+    """append_jsonl + flush()/os.fsync() so the record survives a power loss /
+    kill -9 the instant it returns (REFACTOR_PLAN.md:206 E4). Used for the
+    position journal write-ahead log."""
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def read_jsonl_tolerant(path: Path) -> list[dict]:
+    """Parse a JSONL file, tolerating a truncated/partial *trailing* line
+    (REFACTOR_PLAN.md:206, :234). A crash mid-append can leave a half-written
+    final line; that line is dropped (and copied to ``<path>.corrupt`` for
+    forensics) and reading continues — never raises. An invalid line that is NOT
+    the last non-empty line is genuine mid-file corruption: log loudly and raise,
+    because silently skipping it would fabricate state."""
+    if not path.exists():
+        return []
+    raw = path.read_text(encoding="utf-8")
+    if not raw:
+        return []
+    lines = raw.split("\n")
+    last_idx = -1
+    for i, ln in enumerate(lines):
+        if ln.strip():
+            last_idx = i
+    out: list[dict] = []
+    for i, ln in enumerate(lines):
+        if not ln.strip():
+            continue
+        try:
+            out.append(json.loads(ln))
+        except (json.JSONDecodeError, ValueError):
+            if i == last_idx:
+                try:
+                    (path.parent / (path.name + ".corrupt")).write_text(ln, encoding="utf-8")
+                except Exception:
+                    pass
+                logging.warning("read_jsonl_tolerant: quarantined truncated trailing line in %s", path)
+                break
+            logging.error("read_jsonl_tolerant: corrupt non-trailing line %d in %s (mid-file corruption)", i, path)
+            raise
+    return out
+
+
+# Monotonic journal sequence: derived once from the journal's last seq at first
+# use (REFACTOR_PLAN.md:202 "seq derived from current journal length/last seq at
+# load"), then incremented in-process. Reset to None on module (re)load. Matches
+# the existing single-threaded request handling; no cross-process locking.
+_journal_seq_cache: "int | None" = None
+
+
+def _journal_next_seq() -> int:
+    global _journal_seq_cache
+    if _journal_seq_cache is None:
+        last = -1
+        for rec in read_jsonl_tolerant(POSITION_JOURNAL_LEDGER):
+            s = rec.get("seq")
+            if isinstance(s, int) and s > last:
+                last = s
+        _journal_seq_cache = last
+    _journal_seq_cache += 1
+    return _journal_seq_cache
 
 
 def as_float(value):
@@ -1531,8 +1617,22 @@ def build_policies(normalized: dict, values: dict | None, mtf_values: dict | Non
     return out
 
 
+def empty_paper_state() -> dict:
+    return {"version": 3, "updated_at": None, "policies": {}, "realistic_policies": {}, "compound_policies": {}}
+
+
 def load_paper_state() -> dict:
-    empty = {"version": 3, "updated_at": None, "policies": {}, "realistic_policies": {}, "compound_policies": {}}
+    # journal backend: the journal is authoritative. Derive state by replaying it
+    # from empty (REFACTOR_PLAN.md:202-203). The snapshot is only a cache; a
+    # missing/corrupt snapshot therefore rebuilds from the journal instead of
+    # silently resetting to empty (kills E5). (A snapshot/checkpoint fast-path to
+    # bound replay cost is Phase 1 task 7, deliberately out of scope here.)
+    if HERMX_STATE_BACKEND == "journal":
+        return replay_position_journal()
+    # legacy backend: byte-identical to pre-Phase-1 behavior — snapshot is the
+    # source of truth, and ANY read error returns empty (the E5 footgun we keep
+    # ONLY in legacy mode for behavioral compatibility during the soak).
+    empty = empty_paper_state()
     if not PAPER_STATE_FILE.exists():
         return empty
     try:
@@ -1547,9 +1647,24 @@ def load_paper_state() -> dict:
 
 
 def save_paper_state(state: dict) -> None:
+    # Atomic + durable (REFACTOR_PLAN.md:206 E4): write tmp, fsync the tmp file,
+    # then atomic-rename. Best-effort fsync of the directory so the rename itself
+    # is durable. Content is byte-identical to the previous writer (indent=2, no
+    # trailing newline) so the legacy golden snapshot is unchanged.
     tmp = PAPER_STATE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+    with tmp.open("w", encoding="utf-8") as f:
+        f.write(json.dumps(state, indent=2, ensure_ascii=False))
+        f.flush()
+        os.fsync(f.fileno())
     tmp.replace(PAPER_STATE_FILE)
+    try:
+        dir_fd = os.open(str(PAPER_STATE_FILE.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except (OSError, AttributeError):
+        pass
 
 def default_control_state() -> dict:
     return {
@@ -1687,6 +1802,129 @@ def executed_price_from_signal(signal_price: float, payload: dict | None = None)
     return float(execution_price), round(diff_pct, 6)
 
 
+# ---------------------------------------------------------------------------
+# Event-sourced position state (REFACTOR_PLAN.md:202 Phase 1 task 1).
+#
+# ONE mutation routine, apply_effect(), is the *only* code that mutates paper
+# state. Both the live path (paper_apply_policy, via _record_transition) and
+# replay (replay_position_journal) drive state exclusively through it, so a
+# replay of the journal is identical to the live run that produced it — the math
+# is written once. An "effect" is a fully-resolved description of a single
+# transition: it carries the already-computed numbers (stat deltas, the new
+# position dict, the close result, the new equity), so apply_effect performs NO
+# business math — only assignment/accumulation. paper_apply_policy still computes
+# those numbers exactly as before and packages them into the effect.
+#
+# effect shape (schema_version 1):
+#   {"op": "skip"}                                   # stats.skips += 1
+#   {"op": "adjust", "fields": {...}}                # pos.update(fields) (same dir)
+#   {"op": "close",  "gross_usd","net_usd","weighted_pct","net_weighted_pct",
+#                    "exit_fee","funding_usd","win": bool,
+#                    "equity_set": <float, compound only>}    # close + stat deltas
+#   {"op": "open",   "position": {...}, "entry_fee": <float>} # open + entries/fees
+# Any effect may also carry "compound": true and "initial_equity_seed": <float> so
+# apply_effect can (idempotently) seed initial_equity/equity for the symbol the
+# same way the live path's compound preamble does.
+# ---------------------------------------------------------------------------
+
+def _ensure_policy_bucket(state: dict, account_key: str, policy_key: str) -> dict:
+    policies_state = state.setdefault(account_key, {})
+    ps = policies_state.setdefault(policy_key, {"label": POLICY_LABELS.get(policy_key, policy_key), "symbols": {}, "stats": empty_policy_stats()})
+    ps.setdefault("stats", empty_policy_stats())
+    ps.setdefault("symbols", {})
+    return ps
+
+
+def apply_effect(state: dict, account: str, policy: str, symbol: str, effect: dict) -> None:
+    """The single, shared state-mutation routine. Live and replay both call this."""
+    ps = _ensure_policy_bucket(state, account, policy)
+    if effect.get("compound"):
+        initial = ps.setdefault("initial_equity", {})
+        equity = ps.setdefault("equity", {})
+        initial.setdefault(symbol, effect.get("initial_equity_seed"))
+        equity.setdefault(symbol, initial[symbol])
+    stats = ps["stats"]
+    symbols = ps["symbols"]
+    op = effect.get("op")
+    if op == "skip":
+        stats["skips"] = int(stats.get("skips", 0)) + 1
+        return
+    if op == "adjust":
+        pos = symbols.get(symbol)
+        if pos is not None:
+            pos.update(effect.get("fields") or {})
+        return
+    if op == "close":
+        symbols.pop(symbol, None)
+        stats["closed_trades"] = int(stats.get("closed_trades", 0)) + 1
+        stats["realized_gross_pnl_usd"] = round(float(stats.get("realized_gross_pnl_usd", 0)) + effect["gross_usd"], 4)
+        stats["realized_net_pnl_usd"] = round(float(stats.get("realized_net_pnl_usd", 0)) + effect["net_usd"], 4)
+        stats["realized_pnl_usd"] = stats["realized_net_pnl_usd"]
+        stats["realized_gross_pnl_pct_weighted"] = round(float(stats.get("realized_gross_pnl_pct_weighted", 0)) + effect["weighted_pct"], 6)
+        stats["realized_net_pnl_pct_weighted"] = round(float(stats.get("realized_net_pnl_pct_weighted", 0)) + effect["net_weighted_pct"], 6)
+        stats["realized_pnl_pct_weighted"] = stats["realized_net_pnl_pct_weighted"]
+        stats["total_fees_usd"] = round(float(stats.get("total_fees_usd", 0)) + effect["exit_fee"], 4)
+        stats["total_funding_usd"] = round(float(stats.get("total_funding_usd", 0)) + effect["funding_usd"], 4)
+        if effect.get("compound"):
+            equity = ps.setdefault("equity", {})
+            equity[symbol] = effect["equity_set"]
+            refresh_compound_stats(ps)
+        if effect["win"]:
+            stats["wins"] = int(stats.get("wins", 0)) + 1
+        else:
+            stats["losses"] = int(stats.get("losses", 0)) + 1
+        return
+    if op == "open":
+        entry_fee = effect["entry_fee"]
+        stats["total_fees_usd"] = round(float(stats.get("total_fees_usd", 0)) + entry_fee, 4)
+        symbols[symbol] = effect["position"]
+        stats["entries"] = int(stats.get("entries", 0)) + 1
+        if effect.get("compound"):
+            refresh_compound_stats(ps)
+        return
+    raise ValueError(f"apply_effect: unknown op {op!r}")
+
+
+def _record_transition(state: dict, account: str, policy: str, symbol: str, effect: dict, received_at) -> None:
+    """LIVE path: write-ahead-journal the effect (durable fsync) BEFORE applying it
+    to in-memory state, then apply via the shared apply_effect. The journal is
+    written in BOTH backends (REFACTOR_PLAN.md:225 parallel soak data); only the
+    load/authority path differs by backend."""
+    record = {
+        "schema_version": POSITION_JOURNAL_SCHEMA_VERSION,
+        "seq": _journal_next_seq(),
+        "ts": received_at,
+        "kind": "transition",
+        "account": account,
+        "policy": policy,
+        "symbol": symbol,
+        "effect": effect,
+    }
+    append_jsonl_durable(POSITION_JOURNAL_LEDGER, record)
+    apply_effect(state, account, policy, symbol, effect)
+
+
+def replay_position_journal() -> dict:
+    """Rebuild paper state from the position journal via the SAME apply_effect the
+    live path uses (this is what guarantees replay == live). Tolerates a truncated
+    trailing record. Authoritative under the journal backend (REFACTOR_PLAN.md:202,
+    :233)."""
+    state = empty_paper_state()
+    last_ts = None
+    for rec in read_jsonl_tolerant(POSITION_JOURNAL_LEDGER):
+        sv = rec.get("schema_version")
+        if not isinstance(sv, int) or sv > POSITION_JOURNAL_SCHEMA_VERSION:
+            logging.error("replay_position_journal: unsupported schema_version %r (reader=%d) at seq %r", sv, POSITION_JOURNAL_SCHEMA_VERSION, rec.get("seq"))
+            raise ValueError(f"position journal schema_version {sv!r} > reader {POSITION_JOURNAL_SCHEMA_VERSION}")
+        if rec.get("kind") != "transition":
+            continue
+        apply_effect(state, rec["account"], rec["policy"], rec["symbol"], rec["effect"])
+        if rec.get("ts") is not None:
+            last_ts = rec["ts"]
+    state["updated_at"] = last_ts
+    return state
+
+
 def paper_apply_policy(state: dict, normalized: dict, payload: dict, policy_key: str, policy: dict, price: float, received_at: str, base_notional_usd: float, account_key: str, account_label: str, *, compound: bool = False) -> dict:
     policies_state = state.setdefault(account_key, {})
     ps = policies_state.setdefault(policy_key, {"label": POLICY_LABELS.get(policy_key, policy_key), "symbols": {}, "stats": empty_policy_stats()})
@@ -1731,23 +1969,40 @@ def paper_apply_policy(state: dict, normalized: dict, payload: dict, policy_key:
     event["alert_execution_diff_pct"] = alert_diff_pct
     liquidity = str(first(payload or {}, "liquidity", "execution_liquidity", default=PAPER_DEFAULT_LIQUIDITY)).lower()
     entry_fee_rate = fee_rate_for(liquidity)
+    # Phase 1 task 1: state mutations below are packaged as `effect`s and applied
+    # via the shared apply_effect (through _record_transition, which also journals
+    # write-ahead). The compound preamble above already seeded equity/initial_equity
+    # in-place; carrying the seed lets apply_effect reproduce that seeding on replay.
+    seed = asset_budget_usd(sym) if compound else None
+
+    def _eff(op, **extra):
+        e = {"op": op}
+        if compound:
+            e["compound"] = True
+            e["initial_equity_seed"] = seed
+        e.update(extra)
+        return e
+
     if price is None:
-        stats["skips"] = int(stats.get("skips", 0)) + 1
+        _record_transition(state, account_key, policy_key, sym, _eff("skip"), received_at)
         event["actions"].append("SKIP_NO_NEW_ENTRY")
         return event
 
     if (decision == "SKIP" or weight <= 0) and not (pos and pos.get("side") != target_side):
-        stats["skips"] = int(stats.get("skips", 0)) + 1
+        _record_transition(state, account_key, policy_key, sym, _eff("skip"), received_at)
         event["actions"].append("SKIP_NO_NEW_ENTRY")
         return event
 
     if pos and pos.get("side") == target_side:
         # Duo should not duplicate often, but keep the state stable if it happens.
         old_weight = float(pos.get("weight") or 0)
-        pos["weight"] = weight
-        pos["last_signal_at"] = received_at
-        pos["last_signal_price"] = price
-        pos["last_execution_price"] = exec_price
+        fields = {
+            "weight": weight,
+            "last_signal_at": received_at,
+            "last_signal_price": price,
+            "last_execution_price": exec_price,
+        }
+        _record_transition(state, account_key, policy_key, sym, _eff("adjust", fields=fields), received_at)
         event["actions"].append(f"UPDATE_SAME_DIRECTION {old_weight:.2f}->{weight:.2f}")
         return event
 
@@ -1800,23 +2055,24 @@ def paper_apply_policy(state: dict, normalized: dict, payload: dict, policy_key:
             "exit_signal_side": normalized["side"],
         }
         append_jsonl(PAPER_TRADES_LEDGER, trade)
-        stats["closed_trades"] = int(stats.get("closed_trades", 0)) + 1
-        stats["realized_gross_pnl_usd"] = round(float(stats.get("realized_gross_pnl_usd", 0)) + gross_usd, 4)
-        stats["realized_net_pnl_usd"] = round(float(stats.get("realized_net_pnl_usd", 0)) + net_usd, 4)
-        stats["realized_pnl_usd"] = stats["realized_net_pnl_usd"]
-        stats["realized_gross_pnl_pct_weighted"] = round(float(stats.get("realized_gross_pnl_pct_weighted", 0)) + weighted_pct, 6)
-        stats["realized_net_pnl_pct_weighted"] = round(float(stats.get("realized_net_pnl_pct_weighted", 0)) + net_weighted_pct, 6)
-        stats["realized_pnl_pct_weighted"] = stats["realized_net_pnl_pct_weighted"]
-        stats["total_fees_usd"] = round(float(stats.get("total_fees_usd", 0)) + exit_fee, 4)
-        stats["total_funding_usd"] = round(float(stats.get("total_funding_usd", 0)) + funding_usd, 4)
+        # The PAPER_TRADES_LEDGER append above is an OUTPUT ledger, not state, so it
+        # stays in the live path and is NOT replayed. State changes below go through
+        # the effect/apply_effect path. Compute the post-close equity here (reusing
+        # the numbers above) so apply_effect just assigns it.
+        close_eff = _eff(
+            "close",
+            gross_usd=gross_usd,
+            net_usd=net_usd,
+            weighted_pct=weighted_pct,
+            net_weighted_pct=net_weighted_pct,
+            exit_fee=exit_fee,
+            funding_usd=funding_usd,
+            win=net_usd > 0,
+        )
         if compound:
-            equity = ps.setdefault("equity", {})
-            equity[sym] = round(float(equity.get(sym, asset_budget_usd(sym))) + net_usd, 4)
-            refresh_compound_stats(ps)
-        if net_usd > 0:
-            stats["wins"] = int(stats.get("wins", 0)) + 1
-        else:
-            stats["losses"] = int(stats.get("losses", 0)) + 1
+            cur_equity = ps.setdefault("equity", {})
+            close_eff["equity_set"] = round(float(cur_equity.get(sym, asset_budget_usd(sym))) + net_usd, 4)
+        _record_transition(state, account_key, policy_key, sym, close_eff, received_at)
         event["actions"].append("CLOSE_" + str(pos.get("side", "")).upper())
         event["closed_trade"] = trade
         event["realized_pnl_pct"] = round(net_weighted_pct, 6)
@@ -1824,10 +2080,10 @@ def paper_apply_policy(state: dict, normalized: dict, payload: dict, policy_key:
         event["gross_pnl_usd"] = round(gross_usd, 4)
         event["fees_usd"] = round(total_trade_fees, 4)
         event["funding_usd"] = round(funding_usd, 4)
-        symbols.pop(sym, None)
+        # (symbol pop is performed by apply_effect for the close effect above.)
 
     if decision == "SKIP" or weight <= 0:
-        stats["skips"] = int(stats.get("skips", 0)) + 1
+        _record_transition(state, account_key, policy_key, sym, _eff("skip"), received_at)
         event["actions"].append("SKIP_NO_NEW_ENTRY")
         return event
 
@@ -1838,8 +2094,7 @@ def paper_apply_policy(state: dict, normalized: dict, payload: dict, policy_key:
     notional = base_notional_usd * weight
     qty_units = notional / exec_price if exec_price else 0.0
     entry_fee = fee_usd(notional, liquidity)
-    stats["total_fees_usd"] = round(float(stats.get("total_fees_usd", 0)) + entry_fee, 4)
-    symbols[sym] = {
+    position = {
         "side": target_side,
         "entry_price": price,
         "entry_execution_price": exec_price,
@@ -1861,9 +2116,7 @@ def paper_apply_policy(state: dict, normalized: dict, payload: dict, policy_key:
         "mtf_status": policy.get("mtf_status"),
         "equity_usd": round(float((ps.get("equity") or {}).get(sym, 0.0)), 4) if compound else None,
     }
-    stats["entries"] = int(stats.get("entries", 0)) + 1
-    if compound:
-        refresh_compound_stats(ps)
+    _record_transition(state, account_key, policy_key, sym, _eff("open", position=position, entry_fee=entry_fee), received_at)
     event["entry_fee_usd"] = round(entry_fee, 4)
     event["actions"].append("OPEN_" + target_side.upper())
     return event

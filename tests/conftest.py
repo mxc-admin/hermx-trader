@@ -132,6 +132,46 @@ def seed_paper_state(wr_root):
     return dst
 
 
+@pytest.fixture
+def reload_wr():
+    """Loader for webhook_receiver bound to an arbitrary populated SHADOW_ROOT and
+    HERMX_STATE_BACKEND (Phase 1 task 1 tests). Unlike `wr`, the returned callable
+    can be invoked multiple times in one test to bind different roots/backends
+    (e.g. a legacy run and a journal run, or a "crash" reload of the same root).
+
+    webhook_receiver resolves SHADOW_ROOT and reads HERMX_STATE_BACKEND at import
+    time, so each call sets the env then importlib.reload()s the module. Teardown
+    restores SHADOW_ROOT to the live session root and clears HERMX_STATE_BACKEND so
+    unrelated tests keep a module bound to a non-deleted directory in legacy mode.
+    """
+    import webhook_receiver as module  # noqa: WPS433
+
+    orig_root = os.environ.get("SHADOW_ROOT")
+    orig_backend = os.environ.get("HERMX_STATE_BACKEND")
+
+    def _load(root, backend="legacy"):
+        root = Path(root)
+        _build_populated_root(root)
+        os.environ["SHADOW_ROOT"] = str(root)
+        if backend:
+            os.environ["HERMX_STATE_BACKEND"] = backend
+        else:
+            os.environ.pop("HERMX_STATE_BACKEND", None)
+        os.environ.pop("HERMX_SUBMIT_ENABLED", None)
+        importlib.reload(module)
+        return module
+
+    try:
+        yield _load
+    finally:
+        os.environ["SHADOW_ROOT"] = orig_root if orig_root is not None else str(_SHADOW_ROOT)
+        if orig_backend is not None:
+            os.environ["HERMX_STATE_BACKEND"] = orig_backend
+        else:
+            os.environ.pop("HERMX_STATE_BACKEND", None)
+        importlib.reload(module)
+
+
 # ---------------------------------------------------------------------------
 # Snapshot (golden) helper.
 #
