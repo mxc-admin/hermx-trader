@@ -1,0 +1,7 @@
+# HermX fixture corpus manifest (Phase 0).
+# Format: one entry per line -> "<sha256>  <relative/path/under/fixtures>"
+# (compatible with `sha256sum`/`shasum -a 256` output).
+#
+# PLACEHOLDER: the full fixture corpus is built later in Phase 0 (REFACTOR_PLAN.md:162).
+# The verifier test (test_fixture_manifest.py) already enforces this manifest and
+# will fail on drift once entries are added. While no entries exist it skips gracefully.

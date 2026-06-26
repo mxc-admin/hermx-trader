@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "strategy_id": "xrpusdt_duo_base_dev_4h",
+  "name": "XRPUSDT Duo Base Dev 4H",
+  "asset": "XRPUSDT",
+  "okx_inst_id": "XRP-USDT-SWAP",
+  "timeframe": "4h",
+  "chart_type": "heikin_ashi",
+  "indicator": "mxc duo-base",
+  "indicator_version": "duo-base-2.5",
+  "upper_band_mult": 1.20,
+  "lower_band_mult": 0.95,
+  "auto_alpha": false,
+  "budget_usd": 1500,
+  "leverage": 2,
+  "margin_mode": "isolated",
+  "execution_mode": "demo",
+  "okx_submit_orders": true,
+  "status": "active_demo",
+  "validation_source": "research/branches/tv-opt-founder-2026-06-23-current-duobase25/TRUTH_TEST_XRP_FIXED_CANDIDATES_REPORT.md",
+  "notes": "Active OKX sandbox/demo candidate when deployed with the Duo Base Dev VPS demo config. It remains inert under configs where strategy_engine.submit_orders=false."
+}

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kftradingsystem.local/schemas/tradingview-alert.schema.json",
+  "title": "TradingView Strategy Alert",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "strategy_id",
+    "symbol",
+    "timeframe",
+    "side",
+    "tv_signal_price",
+    "tv_time",
+    "exchange",
+    "source"
+  ],
+  "properties": {
+    "strategy_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:_[a-z0-9]+)*$"
+    },
+    "strategy_name": { "type": "string" },
+    "indicator": { "type": "string" },
+    "symbol": {
+      "type": "string",
+      "pattern": "^[A-Z0-9]+USDT$"
+    },
+    "timeframe": {
+      "type": "string",
+      "enum": ["30m", "1h", "2h", "3h", "4h"]
+    },
+    "side": {
+      "type": "string",
+      "enum": ["buy", "sell"]
+    },
+    "tv_signal_price": {
+      "oneOf": [
+        { "type": "number" },
+        { "type": "string", "minLength": 1 }
+      ]
+    },
+    "tv_time": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "number" }
+      ]
+    },
+    "exchange": {
+      "type": "string",
+      "enum": ["okx"]
+    },
+    "source": {
+      "type": "string",
+      "enum": ["tradingview"]
+    },
+    "signal_id": { "type": "string" }
+  }
+}

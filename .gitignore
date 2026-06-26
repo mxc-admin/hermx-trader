@@ -1,0 +1,24 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+shadow-config.json
+latest.json
+seen-signals.json
+paper-state.json
+control-state.json
+
+logs/
+runtime/
+exports/
+*.zip
+
+.DS_Store
+Thumbs.db
+
+# runtime/backup artifacts
+.pytest_cache/
+shadow-config.json.bak*
+

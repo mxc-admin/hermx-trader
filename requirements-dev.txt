@@ -1,0 +1,6 @@
+# Development / test dependencies for the HermX refactor harness (Phase 0 setup).
+# Pinned for reproducibility; runtime code remains stdlib-heavy (see requirements.txt).
+pytest==8.3.4
+# jsonschema is used by later-phase schema-validation tests (Phase 6 / P7);
+# pinned now so the dev environment is stable as those tests land.
+jsonschema==4.23.0

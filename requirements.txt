@@ -1,0 +1,3 @@
+# Core uses pure stdlib for OKX executor
+# KuCoin paper trading support via official SDK
+kucoin-python>=1.0.0

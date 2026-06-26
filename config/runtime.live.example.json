@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "profile": "live-example",
+  "real_money_enabled": false,
+  "require_strategy_id": true,
+  "submit_orders": false,
+  "exchange": "okx",
+  "exchange_environment": "live",
+  "default_margin_mode": "isolated",
+  "default_leverage": 2,
+  "dashboard_enabled": true,
+  "health_checks_enabled": true,
+  "notes": "Example only. Real live config must be created deliberately and approved."
+}
+
