@@ -80,6 +80,24 @@ EXECUTION_PLAN_LEDGER = LOG_DIR / "execution-plan.jsonl"
 EXECUTION_LEDGER = LOG_DIR / "executions.jsonl"
 LEGACY_EXECUTION_PLAN_LEDGER = LOG_DIR / "okx-execution-plan.jsonl"
 LEGACY_EXECUTION_LEDGER = LOG_DIR / "okx-executions.jsonl"
+# Submission-outcome state machine + write-ahead order journal (REFACTOR_PLAN.md:204,
+# :216 -- Phase 1 task 5). Append-only, durable (fsync) log of the lifecycle
+# PLANNED -> SUBMITTED -> (FILLED | REJECTED | UNKNOWN). The PLANNED/SUBMITTED records
+# are persisted BEFORE the submit subprocess so restart reconciliation (Task 4) has
+# authoritative clOrdId keys even after a crash mid-send. UNKNOWN (timeout/crash) is a
+# first-class state that triggers reconciliation, NOT a failure. This journal uses a
+# SEPARATE monotonic seq counter from the position journal (the two must not collide).
+ORDER_JOURNAL_LEDGER = LOG_DIR / "order-journal.jsonl"
+ORDER_JOURNAL_SCHEMA_VERSION = 1
+ORDER_STATE_PLANNED = "PLANNED"
+ORDER_STATE_SUBMITTED = "SUBMITTED"
+ORDER_STATE_FILLED = "FILLED"
+ORDER_STATE_REJECTED = "REJECTED"
+ORDER_STATE_UNKNOWN = "UNKNOWN"
+# Terminal states accept no further transitions; the rest are "open" and are what
+# load_open_orders() surfaces to startup reconciliation.
+ORDER_TERMINAL_STATES = frozenset({ORDER_STATE_FILLED, ORDER_STATE_REJECTED})
+ORDER_NON_TERMINAL_STATES = frozenset({ORDER_STATE_PLANNED, ORDER_STATE_SUBMITTED, ORDER_STATE_UNKNOWN})
 SIGNAL_STATE_FILE = ROOT / "seen-signals.json"
 DUPLICATE_LEDGER = LOG_DIR / "shadow-duplicates.jsonl"
 TAB_HEALTH_LEDGER = LOG_DIR / "tab-health.jsonl"
@@ -2630,6 +2648,113 @@ def submit_kill_switch_armed() -> tuple[bool, str]:
     return True, raw
 
 
+# ---------------------------------------------------------------------------
+# Submission-outcome state machine + write-ahead order journal
+# (REFACTOR_PLAN.md:204 write-ahead ordering, :216 state machine -- Phase 1 task 5).
+# ---------------------------------------------------------------------------
+
+# Legal transitions. None is the implicit pre-existence state (a brand-new clOrdId).
+# PLANNED -> REJECTED covers an order aborted *before* it is ever sent. SUBMITTED and
+# UNKNOWN may both still resolve to any terminal outcome (or re-UNKNOWN, so a resolver
+# can re-reconcile). Terminal states {FILLED, REJECTED} are frozen: no transitions.
+_ORDER_STATE_TRANSITIONS: "dict[str | None, frozenset[str]]" = {
+    None: frozenset({ORDER_STATE_PLANNED}),
+    ORDER_STATE_PLANNED: frozenset({ORDER_STATE_SUBMITTED, ORDER_STATE_REJECTED}),
+    ORDER_STATE_SUBMITTED: frozenset({ORDER_STATE_FILLED, ORDER_STATE_REJECTED, ORDER_STATE_UNKNOWN}),
+    ORDER_STATE_UNKNOWN: frozenset({ORDER_STATE_FILLED, ORDER_STATE_REJECTED, ORDER_STATE_UNKNOWN}),
+    ORDER_STATE_FILLED: frozenset(),
+    ORDER_STATE_REJECTED: frozenset(),
+}
+
+
+def order_state_can_transition(old: "str | None", new: str) -> bool:
+    """PURE predicate: is ``old -> new`` a legal order-state transition? Unknown
+    ``old`` states and any ``new`` that is not reachable return False (fail closed)."""
+    return new in _ORDER_STATE_TRANSITIONS.get(old, frozenset())
+
+
+# Monotonic seq for the ORDER journal -- a SEPARATE counter from _journal_next_seq
+# (the position journal). Derived once from the order journal's last seq at first use,
+# then incremented in-process; reset to None on module (re)load.
+_order_journal_seq_cache: "int | None" = None
+
+
+def _order_journal_next_seq() -> int:
+    global _order_journal_seq_cache
+    if _order_journal_seq_cache is None:
+        last = -1
+        for rec in read_jsonl_tolerant(ORDER_JOURNAL_LEDGER):
+            s = rec.get("seq")
+            if isinstance(s, int) and s > last:
+                last = s
+        _order_journal_seq_cache = last
+    _order_journal_seq_cache += 1
+    return _order_journal_seq_cache
+
+
+def record_order_state(
+    cl_ord_id: "str | None",
+    new_state: str,
+    intent: "dict | None" = None,
+    detail: "dict | None" = None,
+    prev_state: "str | None" = None,
+) -> dict:
+    """Validate ``prev_state -> new_state`` and durably (fsync) append one order-journal
+    record. Raises ValueError on an illegal transition (the caller must not persist a
+    state the machine forbids). OSError from the durable append propagates to the caller,
+    which fail-closes the money path (see execute_okx_if_enabled write-ahead)."""
+    if not order_state_can_transition(prev_state, new_state):
+        logging.error("ILLEGAL order-state transition for %s: %s -> %s", cl_ord_id, prev_state, new_state)
+        raise ValueError(f"illegal order-state transition {prev_state} -> {new_state} for {cl_ord_id}")
+    record = {
+        "schema_version": ORDER_JOURNAL_SCHEMA_VERSION,
+        "seq": _order_journal_next_seq(),
+        "ts": now_iso(),
+        "cl_ord_id": cl_ord_id,
+        "state": new_state,
+        "prev_state": prev_state,
+        "intent": intent or {},
+        "detail": detail or {},
+    }
+    append_jsonl_durable(ORDER_JOURNAL_LEDGER, record)
+    return record
+
+
+def _order_intent_from_readiness(readiness: dict) -> dict:
+    """The minimal, exchange-agnostic intent persisted on each order-journal record."""
+    exec_intent = readiness.get("execution_intent") or {}
+    return {
+        "symbol": readiness.get("symbol"),
+        "side": readiness.get("signal_side"),
+        "inst_id": readiness.get("okx_inst_id"),
+        "planned_notional_usd": exec_intent.get("planned_notional_usd"),
+        "policy": exec_intent.get("policy"),
+    }
+
+
+def _cl_ord_id_from_readiness(readiness: dict) -> "str | None":
+    exec_intent = readiness.get("execution_intent") or {}
+    fill = readiness.get("okx_fill") or {}
+    return exec_intent.get("client_order_id") or fill.get("client_order_id")
+
+
+def load_open_orders() -> list[dict]:
+    """Restart-recovery reader consumed by Task 4 reconciliation: the LATEST record
+    (highest seq) per cl_ord_id whose state is still non-terminal
+    (PLANNED/SUBMITTED/UNKNOWN). Folds read_jsonl_tolerant(ORDER_JOURNAL_LEDGER), so a
+    truncated trailing line is tolerated. Terminal (FILLED/REJECTED) orders are omitted."""
+    latest: dict = {}
+    for rec in read_jsonl_tolerant(ORDER_JOURNAL_LEDGER):
+        seq = rec.get("seq")
+        if not isinstance(seq, int):
+            continue
+        cl = rec.get("cl_ord_id")
+        cur = latest.get(cl)
+        if cur is None or seq > cur.get("seq", -1):
+            latest[cl] = rec
+    return [r for r in latest.values() if r.get("state") in ORDER_NON_TERMINAL_STATES]
+
+
 def execute_okx_if_enabled(record: dict) -> dict:
     armed, kill_switch_raw = submit_kill_switch_armed()
     if not armed:
@@ -2658,11 +2783,35 @@ def execute_okx_if_enabled(record: dict) -> dict:
         }
         append_jsonl(EXECUTION_LEDGER, {"received_at": record.get("received_at"), "okx_execution": result})
         return result
+    # --- WRITE-AHEAD ORDER JOURNAL (REFACTOR_PLAN.md:204, :216) -------------------
+    # Reached ONLY when every gate above passed -- i.e. NEVER in the disabled
+    # production config (which returns via a not_submitted branch above, writing zero
+    # order-journal records). PLANNED is fsync'd to disk BEFORE the submit subprocess so
+    # restart reconciliation (Task 4) has an authoritative clOrdId key even if we crash
+    # mid-send. If the durable append fails (e.g. ENOSPC) we fail closed and re-raise:
+    # we must never submit without a durable PLANNED record.
+    order_intent = _order_intent_from_readiness(readiness)
+    cl_ord_id = _cl_ord_id_from_readiness(readiness)
+    try:
+        record_order_state(cl_ord_id, ORDER_STATE_PLANNED, intent=order_intent, prev_state=None)
+    except OSError as exc:
+        _fail_closed_state_write("order-journal-planned", exc, context={"cl_ord_id": cl_ord_id})
+        raise
+
     script = ROOT / "src" / "okx_demo_executor.py"
     env = os.environ.copy()
     env["OKX_SIMULATED_TRADING"] = "1" if bool(execution_cfg.get("simulated_trading", True)) else "0"
     env["OKX_FORCE_IPV4"] = "1" if bool(execution_cfg.get("force_ipv4", True)) else "0"
     env["OKX_SUBMIT_ORDERS"] = "true"
+
+    # SUBMITTED is fsync'd immediately BEFORE subprocess.run: the order may now be in
+    # flight, so persist that fact first. Same fail-closed contract as PLANNED.
+    try:
+        record_order_state(cl_ord_id, ORDER_STATE_SUBMITTED, intent=order_intent, prev_state=ORDER_STATE_PLANNED)
+    except OSError as exc:
+        _fail_closed_state_write("order-journal-submitted", exc, context={"cl_ord_id": cl_ord_id})
+        raise
+
     started = time.time()
     try:
         completed = subprocess.run(
@@ -2683,6 +2832,9 @@ def execute_okx_if_enabled(record: dict) -> dict:
                 "stderr": completed.stderr[-2000:],
                 "stdout": completed.stdout[-2000:],
             }
+            # Non-zero return = explicit reject from the executor.
+            outcome_state = ORDER_STATE_REJECTED
+            outcome_detail = {"returncode": completed.returncode, "stderr": completed.stderr[-2000:]}
         else:
             payload = json.loads(completed.stdout)
             result = {
@@ -2693,13 +2845,30 @@ def execute_okx_if_enabled(record: dict) -> dict:
             }
             if isinstance(readiness.get("okx_fill"), dict):
                 readiness["okx_fill"].update(payload.get("okx_fill_summary") or {})
+            # TENTATIVE fill: stdout is not authoritative -- Task 4 reconciliation drives
+            # the confirmed terminal outcome (and may flip this to REJECTED/UNKNOWN).
+            outcome_state = ORDER_STATE_FILLED
+            outcome_detail = {"returncode": 0, "payload_mode": payload.get("mode")}
     except Exception as exc:
+        # TimeoutExpired or any other exception => UNKNOWN (the order may have reached the
+        # exchange). UNKNOWN is first-class and triggers reconciliation, NOT a failure.
         result = {
             "ok": False,
             "mode": "submit_exception",
             "elapsed_ms": round((time.time() - started) * 1000),
             "error": str(exc),
         }
+        outcome_state = ORDER_STATE_UNKNOWN
+        outcome_detail = {"error": str(exc), "exception_type": type(exc).__name__}
+
+    # Persist the (tentative) outcome. Best-effort: the order is already out of our hands,
+    # so a write failure here is logged via the fail-closed alert but must not mask the
+    # result the caller needs to ledger.
+    try:
+        record_order_state(cl_ord_id, outcome_state, intent=order_intent, detail=outcome_detail, prev_state=ORDER_STATE_SUBMITTED)
+    except OSError as exc:
+        _fail_closed_state_write("order-journal-outcome", exc, context={"cl_ord_id": cl_ord_id, "outcome_state": outcome_state})
+
     append_jsonl(EXECUTION_LEDGER, {"received_at": record.get("received_at"), "okx_execution": result})
     return result
 
