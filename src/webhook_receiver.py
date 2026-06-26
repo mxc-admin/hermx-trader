@@ -7,6 +7,7 @@ active config explicitly enables sandbox/demo execution.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -52,6 +53,27 @@ POSITION_JOURNAL_SCHEMA_VERSION = 1
 # position journal is authoritative and load_paper_state() rebuilds via replay.
 # The journal is written in BOTH modes (forward-compatible soak data).
 HERMX_STATE_BACKEND = (os.environ.get("HERMX_STATE_BACKEND") or "legacy").strip().lower() or "legacy"
+# Phase 1 task 7 (REFACTOR_PLAN.md:218-221): journal lifecycle = verified
+# checkpoint + segment rotation so journal-mode startup replay stays bounded and
+# disk does not grow without limit. The checkpoint stores the full paper-state
+# plus the last applied seq + a sha256 of the canonical state; on load it is only
+# trusted if that hash recomputes (verify-before-trust) and its versions are not
+# from a newer writer, otherwise it is discarded and we fall back to full replay.
+POSITION_JOURNAL_CHECKPOINT_FILE = LOG_DIR / "position-journal.checkpoint.json"
+POSITION_JOURNAL_CHECKPOINT_VERSION = 1
+# Operator-visible alert transport for fail-closed state-write errors (:221). A
+# journal append or checkpoint write that fails (e.g. ENOSPC) surfaces here AND
+# re-raises so the money path is blocked rather than proceeding on lost state.
+STATE_ALERT_LEDGER = LOG_DIR / "state-alerts.jsonl"
+# Rotate the live journal segment into a sealed file once it reaches this many
+# records, AFTER writing a verified checkpoint that subsumes them. Module constant
+# (env-overridable) so a test can force a checkpoint+rotation without writing
+# thousands of records; an internal _checkpoint_and_rotate() helper also forces it.
+HERMX_JOURNAL_SEGMENT_MAX_RECORDS = int(os.environ.get("HERMX_JOURNAL_SEGMENT_MAX_RECORDS", "1000") or "1000")
+# Retention: keep the last K sealed segments for forensic replay. The verified
+# checkpoint already subsumes every sealed segment (older sealed files are
+# replay-unnecessary), so they are pruned beyond K. Set < 0 to keep all.
+HERMX_JOURNAL_SEGMENT_RETENTION = int(os.environ.get("HERMX_JOURNAL_SEGMENT_RETENTION", "5") or "5")
 # Generic, exchange-agnostic execution ledgers. The legacy OKX-named files are
 # kept as compatibility mirrors so older dashboards/tools keep reading history.
 EXECUTION_PLAN_LEDGER = LOG_DIR / "execution-plan.jsonl"
@@ -384,7 +406,18 @@ _journal_seq_cache: "int | None" = None
 def _journal_next_seq() -> int:
     global _journal_seq_cache
     if _journal_seq_cache is None:
+        # After a rotation the live segment is fresh/empty, so its records alone no
+        # longer reveal the true high-water mark. Derive the floor from the
+        # checkpoint's last_seq and the sealed segment seqs (encoded cheaply in the
+        # filenames, no file read) PLUS any live records, so seq stays monotonic
+        # across rotation and restart (REFACTOR_PLAN.md:220 task 7).
         last = -1
+        cl = _checkpoint_last_seq_floor()
+        if cl is not None and cl > last:
+            last = cl
+        for seq, _path in _sealed_segment_paths():
+            if seq > last:
+                last = seq
         for rec in read_jsonl_tolerant(POSITION_JOURNAL_LEDGER):
             s = rec.get("seq")
             if isinstance(s, int) and s > last:
@@ -1622,12 +1655,16 @@ def empty_paper_state() -> dict:
 
 
 def load_paper_state() -> dict:
-    # journal backend: the journal is authoritative. Derive state by replaying it
-    # from empty (REFACTOR_PLAN.md:202-203). The snapshot is only a cache; a
-    # missing/corrupt snapshot therefore rebuilds from the journal instead of
-    # silently resetting to empty (kills E5). (A snapshot/checkpoint fast-path to
-    # bound replay cost is Phase 1 task 7, deliberately out of scope here.)
+    # journal backend: the journal is authoritative. Derive state from the latest
+    # VERIFIED checkpoint + only the newer live records, keeping replay bounded
+    # (REFACTOR_PLAN.md:220, :239). With no trustworthy checkpoint this falls back
+    # to a full from-empty replay -- which is byte-identical in RESULT, the core
+    # invariant (E5: a missing/corrupt snapshot rebuilds from the journal instead
+    # of silently resetting to empty).
     if HERMX_STATE_BACKEND == "journal":
+        state = _load_from_checkpoint()
+        if state is not None:
+            return state
         return replay_position_journal()
     # legacy backend: byte-identical to pre-Phase-1 behavior — snapshot is the
     # source of truth, and ANY read error returns empty (the E5 footgun we keep
@@ -1900,29 +1937,322 @@ def _record_transition(state: dict, account: str, policy: str, symbol: str, effe
         "symbol": symbol,
         "effect": effect,
     }
-    append_jsonl_durable(POSITION_JOURNAL_LEDGER, record)
+    # Write-ahead, fail-closed (REFACTOR_PLAN.md:221): the durable journal append
+    # must succeed BEFORE in-memory state is mutated. If it fails (e.g. ENOSPC) we
+    # surface an operator alert and re-raise so submission is blocked and state is
+    # NOT silently advanced past an unpersisted transition.
+    try:
+        append_jsonl_durable(POSITION_JOURNAL_LEDGER, record)
+    except OSError as exc:
+        _fail_closed_state_write("journal-append", exc, context={"account": account, "policy": policy, "symbol": symbol, "seq": record.get("seq")})
+        raise
     apply_effect(state, account, policy, symbol, effect)
 
 
-def replay_position_journal() -> dict:
-    """Rebuild paper state from the position journal via the SAME apply_effect the
-    live path uses (this is what guarantees replay == live). Tolerates a truncated
-    trailing record. Authoritative under the journal backend (REFACTOR_PLAN.md:202,
-    :233)."""
-    state = empty_paper_state()
+def _apply_records(state: dict, records: list) -> tuple:
+    """Apply an ordered list of journal records to ``state`` via the shared
+    apply_effect. Returns (last_ts, records_consumed, last_seq). Enforces the
+    schema_version forward-compat rule (a newer writer's record is a hard error,
+    never silently misread)."""
     last_ts = None
-    for rec in read_jsonl_tolerant(POSITION_JOURNAL_LEDGER):
+    consumed = 0
+    last_seq = -1
+    for rec in records:
         sv = rec.get("schema_version")
         if not isinstance(sv, int) or sv > POSITION_JOURNAL_SCHEMA_VERSION:
-            logging.error("replay_position_journal: unsupported schema_version %r (reader=%d) at seq %r", sv, POSITION_JOURNAL_SCHEMA_VERSION, rec.get("seq"))
+            logging.error("position journal: unsupported schema_version %r (reader=%d) at seq %r", sv, POSITION_JOURNAL_SCHEMA_VERSION, rec.get("seq"))
             raise ValueError(f"position journal schema_version {sv!r} > reader {POSITION_JOURNAL_SCHEMA_VERSION}")
+        s = rec.get("seq")
+        if isinstance(s, int) and s > last_seq:
+            last_seq = s
         if rec.get("kind") != "transition":
             continue
         apply_effect(state, rec["account"], rec["policy"], rec["symbol"], rec["effect"])
+        consumed += 1
         if rec.get("ts") is not None:
             last_ts = rec["ts"]
+    return last_ts, consumed, last_seq
+
+
+def _parse_sealed_seq(name: str):
+    """The sealed-segment seq encoded in a filename ``position-journal.<seq>.jsonl``
+    (the last seq that segment covers), or None if the name is not a sealed
+    segment. Reads the seq from the NAME so seq derivation needs no file read."""
+    prefix, suffix = "position-journal.", ".jsonl"
+    if name.startswith(prefix) and name.endswith(suffix):
+        mid = name[len(prefix):-len(suffix)]
+        if mid.isdigit():
+            return int(mid)
+    return None
+
+
+def _sealed_segment_paths() -> list:
+    """Sealed journal segments as (seq, path), ascending by seq. The live segment
+    (``position-journal.jsonl``) and the ``.corrupt`` quarantine file are excluded
+    by the naming rule; the checkpoint (``.json``) is excluded by suffix."""
+    out = []
+    for p in LOG_DIR.glob("position-journal.*.jsonl"):
+        seq = _parse_sealed_seq(p.name)
+        if seq is not None:
+            out.append((seq, p))
+    out.sort(key=lambda t: t[0])
+    return out
+
+
+def _read_all_journal_records() -> list:
+    """Every record across sealed segments (seq order) + the live segment, sorted
+    by seq. This is the full history used by a from-empty replay; rotation seals
+    contiguous seq ranges so concatenation is already seq-ordered, but we sort
+    defensively to make the replay-order invariant explicit (REFACTOR_PLAN.md:220)."""
+    records: list = []
+    for _seq, path in _sealed_segment_paths():
+        records.extend(read_jsonl_tolerant(path))
+    records.extend(read_jsonl_tolerant(POSITION_JOURNAL_LEDGER))
+    records.sort(key=lambda r: r.get("seq") if isinstance(r.get("seq"), int) else -1)
+    return records
+
+
+def replay_position_journal() -> dict:
+    """Full replay from EMPTY across ALL segments (sealed + live) via the SAME
+    apply_effect the live path uses (this is what guarantees replay == live).
+    Tolerates a truncated trailing record. This is the authoritative fallback
+    under the journal backend and the equivalence oracle the checkpoint is verified
+    against (REFACTOR_PLAN.md:202, :219, :233)."""
+    state = empty_paper_state()
+    last_ts, _consumed, _last_seq = _apply_records(state, _read_all_journal_records())
     state["updated_at"] = last_ts
     return state
+
+
+# ---------------------------------------------------------------------------
+# Journal lifecycle: verified checkpoint + segment rotation (Phase 1 task 7,
+# REFACTOR_PLAN.md:218-221). Keeps journal-mode startup replay bounded: a load
+# starts from the latest VERIFIED checkpoint and replays only the records newer
+# than it, instead of replaying the entire history from empty on every call.
+# ---------------------------------------------------------------------------
+
+def _canonical_state_json(state: dict) -> str:
+    """Canonical JSON for hashing: sorted keys, compact separators. Independent of
+    the pretty-printed on-disk form, so checkpoint formatting cannot affect the
+    integrity hash."""
+    return json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _state_hash(state: dict) -> str:
+    return hashlib.sha256(_canonical_state_json(state).encode("utf-8")).hexdigest()
+
+
+def _fsync_dir(path: Path) -> None:
+    """Best-effort fsync of a directory so a rename/replace inside it is durable."""
+    try:
+        dir_fd = os.open(str(path), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except (OSError, AttributeError):
+        pass
+
+
+def _atomic_json_dump(path: Path, obj: dict) -> None:
+    """Write JSON atomically + durably (tmp -> fsync -> replace -> dir fsync), the
+    same discipline as save_paper_state. Propagates OSError so the caller can fail
+    closed on a full disk (REFACTOR_PLAN.md:221)."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        f.write(json.dumps(obj, indent=2, ensure_ascii=False))
+        f.flush()
+        os.fsync(f.fileno())
+    tmp.replace(path)
+    _fsync_dir(path.parent)
+
+
+def _fail_closed_state_write(operation: str, exc: Exception, context: dict | None = None) -> None:
+    """A journal/checkpoint write failed (e.g. ENOSPC). Emit a loud, operator-visible
+    ERROR + a record on the alert ledger, then let the caller re-raise so the money
+    path is BLOCKED rather than proceeding on unpersisted/lost state
+    (REFACTOR_PLAN.md:221, fail closed to no-submit). The alert append is
+    best-effort: the alert ledger may sit on the same full disk, so the re-raise —
+    not the alert — is the real fail-closed guarantee."""
+    logging.error("STATE WRITE FAILED (%s) -- FAILING CLOSED, submission blocked: %s", operation, exc)
+    try:
+        append_jsonl(STATE_ALERT_LEDGER, {"ts": now_iso(), "alert": "STATE_WRITE_FAILED", "operation": operation, "error": str(exc), "context": context or {}})
+    except Exception:
+        pass
+
+
+def _read_checkpoint() -> "dict | None":
+    """Load the checkpoint with VERIFY-BEFORE-TRUST (REFACTOR_PLAN.md:219). Returns
+    the checkpoint dict only if (a) it parses, (b) its schema_version/
+    checkpoint_version are not from a newer writer, and (c) its stored state_hash
+    recomputes over the stored state. Any failure is loud and returns None, which
+    makes the caller DISCARD the checkpoint and fall back to full replay -- a
+    corrupt or forward-version checkpoint is never trusted."""
+    if not POSITION_JOURNAL_CHECKPOINT_FILE.exists():
+        return None
+    try:
+        ckpt = json.loads(POSITION_JOURNAL_CHECKPOINT_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logging.error("position-journal checkpoint unreadable (%s) -- DISCARDING, full replay", exc)
+        return None
+    if not isinstance(ckpt, dict):
+        logging.error("position-journal checkpoint is not an object -- DISCARDING, full replay")
+        return None
+    sv = ckpt.get("schema_version")
+    cv = ckpt.get("checkpoint_version")
+    if not isinstance(sv, int) or sv > POSITION_JOURNAL_SCHEMA_VERSION or not isinstance(cv, int) or cv > POSITION_JOURNAL_CHECKPOINT_VERSION:
+        logging.error("position-journal checkpoint from a newer writer (schema=%r checkpoint=%r, reader schema=%d checkpoint=%d) -- DISCARDING, full replay", sv, cv, POSITION_JOURNAL_SCHEMA_VERSION, POSITION_JOURNAL_CHECKPOINT_VERSION)
+        return None
+    state = ckpt.get("state")
+    last_seq = ckpt.get("last_seq")
+    if not isinstance(state, dict) or not isinstance(last_seq, int):
+        logging.error("position-journal checkpoint missing state/last_seq -- DISCARDING, full replay")
+        return None
+    if ckpt.get("state_hash") != _state_hash(state):
+        logging.error("position-journal checkpoint state_hash MISMATCH -- DISCARDING corrupt checkpoint, full replay")
+        return None
+    return ckpt
+
+
+def _checkpoint_last_seq_floor() -> "int | None":
+    """The checkpoint's last_seq used only as a monotonic floor for seq derivation.
+    Best-effort and tolerant of a partly-corrupt checkpoint: a hash mismatch does
+    not matter here (an over-high floor only skips seq numbers, never reuses them),
+    so we read last_seq directly without the full verify."""
+    if not POSITION_JOURNAL_CHECKPOINT_FILE.exists():
+        return None
+    try:
+        ckpt = json.loads(POSITION_JOURNAL_CHECKPOINT_FILE.read_text(encoding="utf-8"))
+        ls = ckpt.get("last_seq")
+        return ls if isinstance(ls, int) else None
+    except Exception:
+        return None
+
+
+def _load_from_checkpoint() -> "dict | None":
+    """Bounded journal-mode load (REFACTOR_PLAN.md:220, :239): start from a VERIFIED
+    checkpoint's state (deep-copied so the on-disk dict is never mutated) and replay
+    ONLY the records newer than checkpoint.last_seq from the live segment. Sealed
+    segments are subsumed by the checkpoint, so they are not replayed. Returns None
+    when there is no trustworthy checkpoint, signalling a full replay.
+
+    Result invariant: identical to replay_position_journal() (full from-empty
+    replay). updated_at carries over from the checkpoint state and is only advanced
+    by newer records, matching the full-replay's last-ts semantics."""
+    ckpt = _read_checkpoint()
+    if ckpt is None:
+        return None
+    state = copy.deepcopy(ckpt["state"])
+    last_seq = ckpt["last_seq"]
+    newer = [r for r in read_jsonl_tolerant(POSITION_JOURNAL_LEDGER) if isinstance(r.get("seq"), int) and r["seq"] > last_seq]
+    newer.sort(key=lambda r: r["seq"])
+    last_ts, _consumed, _last = _apply_records(state, newer)
+    if last_ts is not None:
+        state["updated_at"] = last_ts
+    return state
+
+
+def _rotate_live_segment(last_seq: int) -> None:
+    """Seal the live segment to ``position-journal.<last_seq>.jsonl`` and start a
+    fresh empty live segment. Atomic rename; propagates OSError to fail closed.
+    Called only AFTER a verified checkpoint covering last_seq has been fsync'd, so a
+    crash between the two is safe: on restart the checkpoint replays only seq >
+    last_seq from the (still-unrotated) live segment and ignores the rest."""
+    if not POSITION_JOURNAL_LEDGER.exists():
+        return
+    sealed = LOG_DIR / f"position-journal.{last_seq}.jsonl"
+    os.replace(POSITION_JOURNAL_LEDGER, sealed)
+    POSITION_JOURNAL_LEDGER.touch()
+    _fsync_dir(LOG_DIR)
+
+
+def _enforce_segment_retention() -> None:
+    """Keep the last K sealed segments; prune older ones. Safe because the verified
+    checkpoint subsumes every sealed segment -- they are retained only for forensic
+    replay (REFACTOR_PLAN.md:221). K < 0 keeps all."""
+    if HERMX_JOURNAL_SEGMENT_RETENTION < 0:
+        return
+    sealed = _sealed_segment_paths()
+    excess = len(sealed) - HERMX_JOURNAL_SEGMENT_RETENTION
+    for _seq, path in sealed[:max(0, excess)]:
+        try:
+            path.unlink()
+        except OSError as exc:
+            logging.warning("position-journal: could not prune sealed segment %s: %s", path, exc)
+
+
+def _checkpoint_and_rotate(state: dict) -> None:
+    """Write a verified checkpoint covering everything currently journaled, then
+    rotate the live segment (REFACTOR_PLAN.md:218-221). VERIFY-BEFORE-TRUST: the
+    checkpoint is only written after asserting that a full from-empty replay equals
+    the state built from (previous checkpoint + newer live records); if they
+    diverge we refuse to checkpoint (loud, no rotation) rather than persist a state
+    we cannot prove. Fail-closed on any write OSError. ``state`` is the live
+    in-memory state (used only as a sanity oracle); the checkpoint stores the
+    from-empty replay, which is the exact thing a subsequent load reconstructs."""
+    records = _read_all_journal_records()
+    full = empty_paper_state()
+    last_ts, consumed, last_seq = _apply_records(full, records)
+    full["updated_at"] = last_ts
+    if consumed == 0:
+        return  # nothing to checkpoint yet
+    incremental = _load_from_checkpoint()
+    if incremental is None:
+        # First checkpoint: the full from-empty replay IS the authoritative state.
+        chosen = full
+    else:
+        # Verify-before-trust (REFACTOR_PLAN.md:219). The incremental state
+        # (prev *hash-verified* checkpoint + records newer than it) is the authority
+        # the load path uses. The full from-empty replay is an independent oracle to
+        # cross-check it -- but it is only a VALID oracle while the on-disk history is
+        # still complete from seq 0. Retention pruning deliberately discards sealed
+        # segments already subsumed by a checkpoint, after which a from-empty replay
+        # is necessarily incomplete and must NOT be used to "refute" the incremental
+        # state. So: if history is complete (min seq == 0) assert full == incremental
+        # (strong equivalence); once pruning has occurred, the prior checkpoint's
+        # verified hash is the trust anchor and we persist the incremental state.
+        min_seq = min((r.get("seq") for r in records if isinstance(r.get("seq"), int)), default=0)
+        if min_seq == 0:
+            if _state_hash(incremental) != _state_hash(full):
+                logging.error("position-journal checkpoint ABORTED: incremental(prev checkpoint + newer) != full replay -- refusing to persist an unverified checkpoint (last_seq=%s)", last_seq)
+                raise RuntimeError("position-journal checkpoint equivalence verification failed")
+            chosen = full
+        else:
+            chosen = incremental
+    # Sanity: the live in-memory state should also equal the chosen reconstruction
+    # (the task-1 invariant that replay == live). Log if it diverges; the verified
+    # reconstruction is authoritative.
+    if _state_hash(state) != _state_hash(chosen):
+        logging.warning("position-journal checkpoint: in-memory state != verified reconstruction (last_seq=%s); persisting the reconstruction", last_seq)
+    ckpt = {
+        "schema_version": POSITION_JOURNAL_SCHEMA_VERSION,
+        "checkpoint_version": POSITION_JOURNAL_CHECKPOINT_VERSION,
+        "last_seq": last_seq,
+        # Seqs are contiguous from 0, so the checkpoint folds in last_seq+1 records.
+        "records_consumed": last_seq + 1,
+        "state": chosen,
+        "state_hash": _state_hash(chosen),
+        "created_at": now_iso(),
+    }
+    try:
+        _atomic_json_dump(POSITION_JOURNAL_CHECKPOINT_FILE, ckpt)  # fsync'd before rotate
+        _rotate_live_segment(last_seq)
+    except OSError as exc:
+        _fail_closed_state_write("checkpoint-rotate", exc, context={"last_seq": last_seq})
+        raise
+    _enforce_segment_retention()
+
+
+def _maybe_checkpoint_and_rotate(state: dict) -> None:
+    """Journal-mode only: trigger a checkpoint+rotation once the live segment grows
+    past HERMX_JOURNAL_SEGMENT_MAX_RECORDS, keeping replay bounded and disk growth
+    capped. No-op in legacy mode (no checkpoint files are ever created there)."""
+    if HERMX_STATE_BACKEND != "journal":
+        return
+    live = read_jsonl_tolerant(POSITION_JOURNAL_LEDGER)
+    if len(live) < HERMX_JOURNAL_SEGMENT_MAX_RECORDS:
+        return
+    _checkpoint_and_rotate(state)
 
 
 def paper_apply_policy(state: dict, normalized: dict, payload: dict, policy_key: str, policy: dict, price: float, received_at: str, base_notional_usd: float, account_key: str, account_label: str, *, compound: bool = False) -> dict:
@@ -2137,6 +2467,12 @@ def apply_paper_trading(record: dict) -> list[dict]:
         events.append(paper_apply_policy(state, normalized, record.get("payload") or {}, key, policy, float(price), record["received_at"], realistic_base, "compound_policies", "Compounding paper", compound=True))
     state["updated_at"] = record["received_at"]
     save_paper_state(state)
+    # Journal-mode lifecycle (REFACTOR_PLAN.md:218-221): once the live segment is
+    # large enough, write a verified checkpoint and rotate, so the next load replays
+    # only the bounded live tail. No-op in legacy mode. A write failure here fails
+    # closed (raises) -- this runs BEFORE execute_okx_if_enabled in build_record, so
+    # a blocked checkpoint also blocks submission.
+    _maybe_checkpoint_and_rotate(state)
     return events
 
 
