@@ -98,6 +98,28 @@ ORDER_STATE_UNKNOWN = "UNKNOWN"
 # load_open_orders() surfaces to startup reconciliation.
 ORDER_TERMINAL_STATES = frozenset({ORDER_STATE_FILLED, ORDER_STATE_REJECTED})
 ORDER_NON_TERMINAL_STATES = frozenset({ORDER_STATE_PLANNED, ORDER_STATE_SUBMITTED, ORDER_STATE_UNKNOWN})
+# Exchange reconciliation (REFACTOR_PLAN.md:208-215 -- Phase 1 task 4, OBSERVE-ONLY).
+# Reconciliation consumes the Task-3 venue-neutral query interface and the Task-5
+# order journal; it NEVER trades. The post-submit hook is gated behind
+# HERMX_RECONCILE_ENABLED (default OFF => byte-identical to pre-Task-4 behaviour, the
+# observe-only soak posture of :223). Startup reconcile always runs (read-only).
+RECONCILE_ALERT_LEDGER = LOG_DIR / "reconcile-alerts.jsonl"
+RECONCILE_ALERT_MISMATCH = "RECONCILE_MISMATCH"
+# Bounded exponential backoff (:213): max 5 attempts, 500ms base, ~8s cap, <=~20s wall.
+RECONCILE_MAX_ATTEMPTS = 5
+RECONCILE_BASE_DELAY_SECONDS = 0.5
+RECONCILE_CAP_DELAY_SECONDS = 8.0
+RECONCILE_WALL_CLOCK_BUDGET_SECONDS = 20.0
+RECONCILE_HISTORY_LIMIT = 100
+# Raw OKX order states that mean "the order genuinely exists on the venue". Anything
+# else returned by the query layer (not_found / error / not_implemented / unknown /
+# empty) is treated as "not present here" so the fallback chain keeps searching.
+_PRESENT_ORDER_STATES = frozenset({"live", "partially_filled", "filled", "canceled"})
+# Set once the one-time startup reconcile bootstrap finishes; exposed for FUTURE
+# enforcement (Task 6 may disarm submission until this is True). In THIS task it is
+# only set/logged -- it never hard-blocks the disabled/observe-only path.
+RECONCILE_STARTUP_COMPLETE = False
+RECONCILE_STARTUP_AT: "str | None" = None
 SIGNAL_STATE_FILE = ROOT / "seen-signals.json"
 DUPLICATE_LEDGER = LOG_DIR / "shadow-duplicates.jsonl"
 TAB_HEALTH_LEDGER = LOG_DIR / "tab-health.jsonl"
@@ -2755,6 +2777,360 @@ def load_open_orders() -> list[dict]:
     return [r for r in latest.values() if r.get("state") in ORDER_NON_TERMINAL_STATES]
 
 
+# ---------------------------------------------------------------------------
+# Exchange reconciliation (REFACTOR_PLAN.md:208-215 -- Phase 1 task 4, OBSERVE-ONLY).
+#
+# Reconciliation CONSUMES the Task-3 query interface (executor.get_order /
+# get_open_orders / get_order_history_archive / get_positions) and the Task-5 order
+# journal. It maps the exchange's truth onto the submission-outcome state machine and,
+# at most, (a) updates terminal order-journal states and (b) emits RECONCILE_MISMATCH
+# alerts. It NEVER submits, cancels, or auto-trades (:215 "does not auto-trade").
+# The periodic UNKNOWN resolver loop + per-symbol pause are Task 6, NOT here.
+# ---------------------------------------------------------------------------
+
+def _reconcile_float(value, default=0.0):
+    """Tolerant float coercion for normalized query fields (PURE)."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def reconcile_post_submit_enabled() -> bool:
+    """Observe-only soak gate for the POST-SUBMIT reconciliation hook (:223).
+
+    ``HERMX_RECONCILE_ENABLED`` unset/falsey => OFF (the submit path stays
+    byte-identical to pre-Task-4: stdout drives the tentative terminal record, no
+    query subprocess is spawned). Truthy => the exchange drives the authoritative
+    SUBMITTED->terminal transition (:214 "never trust stdout alone"). Startup
+    reconcile is read-only and runs regardless of this flag.
+    """
+    raw = os.environ.get("HERMX_RECONCILE_ENABLED")
+    if raw is None:
+        return False
+    return raw.strip().lower() not in {"false", "0", "no", ""}
+
+
+def map_order_outcome(order: "dict | None", ordered: "float | None" = None) -> tuple:
+    """PURE: map a normalized order (or None) to a reconciliation outcome.
+
+    Returns ``(state, partial, reason)`` per the :211-:212 mapping rules:
+      * state=partially_filled OR (0 < accFillSz < ordered) -> FILLED, partial=True
+      * state=filled (and not a known partial)              -> FILLED, partial=False
+      * state=canceled with accFillSz=0                      -> REJECTED (canceled)
+      * state=canceled with accFillSz>0                      -> FILLED, partial=True
+      * not-found (lookup exhausted / "does not exist")      -> REJECTED (not_found)
+      * state=live (non-terminal)                            -> SUBMITTED (keep polling)
+      * any other / inconclusive                             -> UNKNOWN
+    """
+    if order is None:
+        return ORDER_STATE_REJECTED, False, "not_found"
+    state = str(order.get("state") or "").lower()
+    acc = _reconcile_float(order.get("acc_fill_sz"), 0.0)
+    is_partial_by_size = ordered is not None and ordered > 0 and 0.0 < acc < ordered
+    if state == "not_found":
+        return ORDER_STATE_REJECTED, False, "not_found"
+    if state == "partially_filled":
+        return ORDER_STATE_FILLED, True, "partially_filled"
+    if state == "filled":
+        if is_partial_by_size:
+            return ORDER_STATE_FILLED, True, "partial_by_size"
+        return ORDER_STATE_FILLED, False, "filled"
+    if state == "canceled":
+        if acc > 0.0:
+            return ORDER_STATE_FILLED, True, "canceled_after_partial_fill"
+        return ORDER_STATE_REJECTED, False, "canceled_zero_fill"
+    if state == "live":
+        # Non-terminal: still working. partial flag only informs the caller's logging.
+        return ORDER_STATE_SUBMITTED, is_partial_by_size, "live"
+    # error / not_implemented / unknown / empty -> inconclusive, keep it UNKNOWN.
+    return ORDER_STATE_UNKNOWN, False, f"inconclusive:{state or 'empty'}"
+
+
+def _order_is_present(order: "dict | None") -> bool:
+    """A normalized order genuinely exists on the venue (vs not_found/error/...)."""
+    return isinstance(order, dict) and str(order.get("state") or "").lower() in _PRESENT_ORDER_STATES
+
+
+def _order_matches(order: dict, ord_id: "str | None", cl_ord_id: "str | None") -> bool:
+    """Does a list-returned (pending/archive) order match the keys we are chasing?
+    Match by ordId or clOrdId when provided; with neither, accept the first present
+    order for the instrument."""
+    if not _order_is_present(order):
+        return False
+    if ord_id and order.get("ord_id") == ord_id:
+        return True
+    if cl_ord_id and order.get("cl_ord_id") == cl_ord_id:
+        return True
+    return not ord_id and not cl_ord_id
+
+
+def reconcile_order_once(executor, lookup: dict) -> dict:
+    """One pass of the OKX v5 fallback chain (:209):
+       1. GET /trade/order              (instId + ordId preferred, else clOrdId)
+       2. GET /trade/orders-pending     (instId) if 1 returns not-found
+       3. GET /trade/orders-history-archive (instId, limit) if still absent
+    Returns the normalized outcome dict consumed by the backoff driver."""
+    inst_id = lookup.get("inst_id")
+    ord_id = lookup.get("ord_id")
+    cl_ord_id = lookup.get("cl_ord_id")
+    ordered = lookup.get("ordered")
+    limit = int(lookup.get("history_limit") or RECONCILE_HISTORY_LIMIT)
+
+    matched: "dict | None" = None
+    source: "str | None" = None
+
+    if inst_id:
+        order = executor.get_order(inst_id, ord_id=ord_id, cl_ord_id=cl_ord_id)
+        if _order_is_present(order):
+            matched, source = order, "get_order"
+    if matched is None and inst_id:
+        for cand in executor.get_open_orders(inst_id) or []:
+            if _order_matches(cand, ord_id, cl_ord_id):
+                matched, source = cand, "orders_pending"
+                break
+    if matched is None and inst_id:
+        for cand in executor.get_order_history_archive(inst_id, limit=limit) or []:
+            if _order_matches(cand, ord_id, cl_ord_id):
+                matched, source = cand, "orders_history_archive"
+                break
+
+    state, partial, reason = map_order_outcome(matched, ordered=ordered)
+    return {
+        "state": state,
+        "partial": partial,
+        "reason": reason,
+        "matched_order": matched,
+        "source": source,
+        "acc_fill_sz": _reconcile_float((matched or {}).get("acc_fill_sz"), 0.0),
+        "avg_px": (matched or {}).get("avg_px") if matched else None,
+        "ord_id": (matched or {}).get("ord_id") if matched else ord_id,
+        "cl_ord_id": (matched or {}).get("cl_ord_id") if matched else cl_ord_id,
+    }
+
+
+def reconcile_order_with_backoff(
+    executor,
+    lookup: dict,
+    *,
+    max_attempts: int = RECONCILE_MAX_ATTEMPTS,
+    base_delay: float = RECONCILE_BASE_DELAY_SECONDS,
+    cap_delay: float = RECONCILE_CAP_DELAY_SECONDS,
+    wall_clock_budget: float = RECONCILE_WALL_CLOCK_BUDGET_SECONDS,
+    sleep=time.sleep,
+    clock=time.time,
+) -> dict:
+    """Bounded exponential-backoff reconciliation (:213). Terminal outcomes
+    (FILLED/REJECTED, incl. not_found) return immediately; a non-terminal (live)
+    order is re-polled with delays 0.5s,1s,2s,4s (capped 8s). When the attempt or
+    wall-clock bound is exhausted while still non-terminal, the outcome is UNKNOWN
+    and a RECONCILE_MISMATCH is the caller's responsibility. ``sleep``/``clock`` are
+    injectable so tests exercise the bound with no real waiting. The submission is
+    NEVER retried -- only the read-only status query is."""
+    start = clock()
+    last: "dict | None" = None
+    attempts = 0
+    for attempt in range(max_attempts):
+        attempts = attempt + 1
+        last = reconcile_order_once(executor, lookup)
+        if last["state"] in ORDER_TERMINAL_STATES:
+            last["attempts"] = attempts
+            last["elapsed_s"] = round(clock() - start, 3)
+            return last
+        if attempts >= max_attempts:
+            break
+        delay = min(cap_delay, base_delay * (2 ** attempt))
+        if (clock() - start) + delay > wall_clock_budget:
+            break
+        sleep(delay)
+
+    outcome = dict(last) if last else {
+        "matched_order": None, "source": None, "acc_fill_sz": 0.0, "avg_px": None,
+        "ord_id": lookup.get("ord_id"), "cl_ord_id": lookup.get("cl_ord_id"), "partial": False,
+    }
+    prior_reason = (last or {}).get("reason") or "no_result"
+    outcome["state"] = ORDER_STATE_UNKNOWN
+    outcome["reason"] = f"deadline_exhausted:{prior_reason}"
+    outcome["attempts"] = attempts
+    outcome["elapsed_s"] = round(clock() - start, 3)
+    return outcome
+
+
+def emit_reconcile_alert(kind: str, detail: dict) -> dict:
+    """Durable-ish operator alert for reconciliation issues (observe-only transport;
+    a richer transport is Task 6 / :217). Best-effort JSONL append + loud log; an
+    alert write failure must never break reconciliation or the money path."""
+    record = {"ts": now_iso(), "alert": kind, "detail": detail or {}}
+    try:
+        append_jsonl(RECONCILE_ALERT_LEDGER, record)
+    except OSError as exc:
+        logging.error("failed to write reconcile alert %s: %s", kind, exc)
+    logging.warning("%s %s", kind, json.dumps(detail or {}, ensure_ascii=False))
+    return record
+
+
+def _expected_positions_from_state(state: dict) -> dict:
+    """PURE: derive the locally-EXPECTED position per symbol from paper/journal state.
+
+    Returns ``symbol -> {direction: long|short|mixed, policies: [account:policy, ...]}``
+    for every symbol any paper policy bucket currently holds. Flat symbols are absent.
+    'mixed' marks symbols held both long and short across policies (sign-incomparable)."""
+    out: dict = {}
+    for account_key in ("policies", "realistic_policies", "compound_policies"):
+        for policy_key, ps in (state.get(account_key) or {}).items():
+            for symbol, pos in ((ps or {}).get("symbols") or {}).items():
+                if not isinstance(pos, dict):
+                    continue
+                direction = pos.get("direction") or "long"
+                cur = out.setdefault(symbol, {"direction": direction, "policies": []})
+                if cur["direction"] != direction:
+                    cur["direction"] = "mixed"
+                cur["policies"].append(f"{account_key}:{policy_key}")
+    return out
+
+
+def _symbol_inst_map_from_orders(records: list) -> dict:
+    """PURE: build symbol -> inst_id from order-journal intents (latest wins). The
+    paper state keys positions by symbol; the exchange keys them by instId, so this
+    bridges the two for the startup position comparison."""
+    out: dict = {}
+    for rec in records:
+        intent = rec.get("intent") or {}
+        symbol, inst = intent.get("symbol"), intent.get("inst_id")
+        if symbol and inst:
+            out[symbol] = inst
+    return out
+
+
+def reconcile_positions_once(executor, expected: dict, symbol_to_inst: dict) -> list:
+    """Compare local expected positions against OKX /account/positions (:210/:215).
+    Emits a RECONCILE_MISMATCH alert per divergent symbol and returns the list of
+    mismatch details. OBSERVE-ONLY: detects + alerts, never trades."""
+    by_inst: dict = {}
+    for p in executor.get_positions() or []:
+        inst = p.get("inst_id")
+        if inst is not None:
+            by_inst[inst] = _reconcile_float(p.get("pos"), 0.0)
+
+    inst_to_symbol = {inst: sym for sym, inst in symbol_to_inst.items()}
+    symbols = set(expected) | {inst_to_symbol[i] for i in by_inst if i in inst_to_symbol}
+
+    mismatches: list = []
+    for symbol in sorted(symbols):
+        inst = symbol_to_inst.get(symbol)
+        exch_pos = by_inst.get(inst, 0.0) if inst else 0.0
+        exch_dir = "long" if exch_pos > 0 else "short" if exch_pos < 0 else "flat"
+        local = expected.get(symbol)
+        local_dir = local["direction"] if local else "flat"
+        local_flat, exch_flat = local_dir == "flat", exch_dir == "flat"
+        divergent = (local_flat != exch_flat) or (
+            not local_flat and not exch_flat and local_dir != "mixed" and local_dir != exch_dir
+        )
+        if divergent:
+            detail = {
+                "symbol": symbol,
+                "inst_id": inst,
+                "local_direction": local_dir,
+                "exchange_direction": exch_dir,
+                "exchange_pos": exch_pos,
+                "policies": (local or {}).get("policies", []),
+            }
+            emit_reconcile_alert(RECONCILE_ALERT_MISMATCH, detail)
+            mismatches.append(detail)
+    return mismatches
+
+
+def _reconciliation_executor():
+    """Build the active venue's read-only query executor, or None if unavailable.
+    Constructed lazily so a missing factory / bad config simply disables
+    reconciliation rather than crashing the receiver (fail closed to observe-only)."""
+    if ExecutorFactory is None:
+        return None
+    try:
+        return ExecutorFactory.create(CONFIG, ROOT)
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.warning("reconciliation executor unavailable: %s", exc)
+        return None
+
+
+def reconcile_startup(executor=None) -> dict:
+    """One-time startup reconcile bootstrap (:215, acceptance :236). OBSERVE-ONLY:
+
+      (a) reconcile every still-open order (load_open_orders) against the exchange and,
+          where the venue reports a terminal outcome and the journal state legally
+          allows it, write the authoritative terminal transition;
+      (b) compare local expected positions (paper/journal) vs OKX positions for traded
+          symbols and emit RECONCILE_MISMATCH on divergence.
+
+    Sets RECONCILE_STARTUP_COMPLETE + RECONCILE_STARTUP_AT for FUTURE enforcement; it
+    does NOT auto-trade and does NOT hard-block submission in this task. Returns a
+    summary dict (also useful for tests)."""
+    global RECONCILE_STARTUP_COMPLETE, RECONCILE_STARTUP_AT
+    if executor is None:
+        executor = _reconciliation_executor()
+    summary = {"open_orders": [], "position_mismatches": [], "executor_available": executor is not None, "errors": []}
+
+    if executor is not None:
+        try:
+            open_orders = load_open_orders()
+        except Exception as exc:  # pragma: no cover - tolerant
+            open_orders = []
+            summary["errors"].append(f"load_open_orders: {exc}")
+        for rec in open_orders:
+            cl = rec.get("cl_ord_id")
+            cur_state = rec.get("state")
+            intent = rec.get("intent") or {}
+            lookup = {"inst_id": intent.get("inst_id"), "cl_ord_id": cl}
+            try:
+                outcome = reconcile_order_once(executor, lookup)
+            except Exception as exc:  # pragma: no cover - tolerant
+                summary["errors"].append(f"reconcile_order_once[{cl}]: {exc}")
+                continue
+            recon_state = outcome["state"]
+            wrote = False
+            # Observe-only: only persist a LEGAL terminal transition (e.g. SUBMITTED/
+            # UNKNOWN -> FILLED/REJECTED). PLANNED->FILLED etc. is illegal and skipped.
+            if recon_state in ORDER_TERMINAL_STATES and order_state_can_transition(cur_state, recon_state):
+                try:
+                    record_order_state(
+                        cl, recon_state, intent=intent,
+                        detail={"startup_reconcile": True, "reason": outcome["reason"], "source": outcome["source"]},
+                        prev_state=cur_state,
+                    )
+                    wrote = True
+                except (ValueError, OSError) as exc:  # pragma: no cover - tolerant
+                    summary["errors"].append(f"record_order_state[{cl}]: {exc}")
+            if recon_state != cur_state and not (recon_state in ORDER_TERMINAL_STATES and wrote):
+                # Non-persisted divergence (e.g. still UNKNOWN) is still worth alerting.
+                emit_reconcile_alert(RECONCILE_ALERT_MISMATCH, {
+                    "stage": "startup_open_order", "cl_ord_id": cl,
+                    "journal_state": cur_state, "reconciled_state": recon_state, "reason": outcome["reason"],
+                })
+            summary["open_orders"].append({
+                "cl_ord_id": cl, "from": cur_state, "outcome": recon_state,
+                "reason": outcome["reason"], "wrote_transition": wrote,
+            })
+
+        try:
+            state = load_paper_state()
+            expected = _expected_positions_from_state(state)
+            sym_map = _symbol_inst_map_from_orders(read_jsonl_tolerant(ORDER_JOURNAL_LEDGER))
+            summary["position_mismatches"] = reconcile_positions_once(executor, expected, sym_map)
+        except Exception as exc:  # pragma: no cover - tolerant
+            summary["errors"].append(f"reconcile_positions: {exc}")
+
+    RECONCILE_STARTUP_COMPLETE = True
+    RECONCILE_STARTUP_AT = now_iso()
+    logging.info(
+        "RECONCILE_STARTUP_COMPLETE at=%s executor_available=%s open_orders=%d position_mismatches=%d errors=%d",
+        RECONCILE_STARTUP_AT, summary["executor_available"], len(summary["open_orders"]),
+        len(summary["position_mismatches"]), len(summary["errors"]),
+    )
+    return summary
+
+
 def execute_okx_if_enabled(record: dict) -> dict:
     armed, kill_switch_raw = submit_kill_switch_armed()
     if not armed:
@@ -2861,13 +3237,61 @@ def execute_okx_if_enabled(record: dict) -> dict:
         outcome_state = ORDER_STATE_UNKNOWN
         outcome_detail = {"error": str(exc), "exception_type": type(exc).__name__}
 
-    # Persist the (tentative) outcome. Best-effort: the order is already out of our hands,
-    # so a write failure here is logged via the fail-closed alert but must not mask the
-    # result the caller needs to ledger.
-    try:
-        record_order_state(cl_ord_id, outcome_state, intent=order_intent, detail=outcome_detail, prev_state=ORDER_STATE_SUBMITTED)
-    except OSError as exc:
-        _fail_closed_state_write("order-journal-outcome", exc, context={"cl_ord_id": cl_ord_id, "outcome_state": outcome_state})
+    def _record_tentative_outcome() -> None:
+        # Persist the stdout-derived (tentative) outcome. Best-effort: the order is
+        # already out of our hands, so a write failure here is logged via the
+        # fail-closed alert but must not mask the result the caller needs to ledger.
+        try:
+            record_order_state(cl_ord_id, outcome_state, intent=order_intent, detail=outcome_detail, prev_state=ORDER_STATE_SUBMITTED)
+        except OSError as exc:
+            _fail_closed_state_write("order-journal-outcome", exc, context={"cl_ord_id": cl_ord_id, "outcome_state": outcome_state})
+
+    # --- POST-SUBMIT RECONCILIATION HOOK (REFACTOR_PLAN.md:214, OBSERVE-ONLY) -------
+    # Default (HERMX_RECONCILE_ENABLED unset/false): byte-identical to pre-Task-4 --
+    # the stdout-derived tentative terminal is journalled and NO query subprocess runs.
+    # When enabled: the EXCHANGE drives the authoritative SUBMITTED->terminal/UNKNOWN
+    # transition (:214 "never trust stdout alone"), the result gains a `reconcile` key,
+    # and a RECONCILE_MISMATCH is emitted when the exchange disagrees with stdout. This
+    # only enriches/corrects the order journal -- it never trades.
+    if reconcile_post_submit_enabled():
+        executor = _reconciliation_executor()
+        reconcile_outcome = None
+        if executor is not None:
+            try:
+                reconcile_outcome = reconcile_order_with_backoff(
+                    executor, {"inst_id": order_intent.get("inst_id"), "cl_ord_id": cl_ord_id}
+                )
+            except Exception as exc:  # pragma: no cover - tolerant; fall back to stdout
+                logging.error("post-submit reconciliation error for %s: %s", cl_ord_id, exc)
+        if reconcile_outcome is None:
+            # Reconciliation unavailable/failed: keep the journal consistent by writing
+            # the stdout-derived tentative outcome (the legacy behaviour).
+            _record_tentative_outcome()
+        else:
+            recon_state = reconcile_outcome["state"]
+            result["reconcile"] = {
+                k: reconcile_outcome.get(k)
+                for k in ("state", "partial", "reason", "attempts", "elapsed_s", "source", "acc_fill_sz", "avg_px")
+            }
+            if order_state_can_transition(ORDER_STATE_SUBMITTED, recon_state):
+                try:
+                    record_order_state(
+                        cl_ord_id, recon_state, intent=order_intent,
+                        detail={"reconcile": result["reconcile"], "stdout_outcome": outcome_state},
+                        prev_state=ORDER_STATE_SUBMITTED,
+                    )
+                except OSError as exc:
+                    _fail_closed_state_write("order-journal-reconcile", exc, context={"cl_ord_id": cl_ord_id, "outcome_state": recon_state})
+            else:  # pragma: no cover - recon_state is always FILLED/REJECTED/UNKNOWN
+                _record_tentative_outcome()
+            if recon_state != outcome_state:
+                emit_reconcile_alert(RECONCILE_ALERT_MISMATCH, {
+                    "stage": "post_submit", "cl_ord_id": cl_ord_id,
+                    "stdout_outcome": outcome_state, "reconciled_outcome": recon_state,
+                    "reason": reconcile_outcome.get("reason"),
+                })
+    else:
+        _record_tentative_outcome()
 
     append_jsonl(EXECUTION_LEDGER, {"received_at": record.get("received_at"), "okx_execution": result})
     return result
@@ -3143,6 +3567,14 @@ def log_execution_arm_state() -> None:
 def main():
     ROOT.mkdir(parents=True, exist_ok=True)
     log_execution_arm_state()
+    # One-time startup reconcile (REFACTOR_PLAN.md:215, acceptance :236). OBSERVE-ONLY:
+    # reconciles open orders + compares OKX positions vs local, emitting
+    # RECONCILE_MISMATCH on divergence. Read-only and best-effort -- a failure must
+    # never prevent the receiver from coming up.
+    try:
+        reconcile_startup()
+    except Exception as exc:  # pragma: no cover - never block boot on observe-only reconcile
+        logging.error("startup reconcile failed (observe-only, continuing): %s", exc)
     threading.Thread(target=worker_loop, daemon=True, name="shadow-policy-worker").start()
     server = HTTPServer(("127.0.0.1", PORT), Handler)
     logging.info("MXC VPS shadow receiver listening on 127.0.0.1:%s", PORT)
