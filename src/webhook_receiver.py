@@ -20,6 +20,7 @@ import time
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from urllib import request as urllib_request
 from urllib.parse import urlparse, parse_qs
 
 PORT = int(os.environ.get("SHADOW_PORT", "8891"))
@@ -33,6 +34,7 @@ DECISION_LEDGER = LOG_DIR / "shadow-decisions.jsonl"
 PAPER_STATE_FILE = ROOT / "paper-state.json"
 CONTROL_STATE_FILE = ROOT / "control-state.json"
 PAPER_TRADES_LEDGER = LOG_DIR / "paper-trades.jsonl"
+PROCESSING_ERROR_LEDGER = LOG_DIR / "shadow-processing-errors.jsonl"
 # Phase 1 task 1/2 (REFACTOR_PLAN.md:202-206): durable, append-only position
 # journal. Every paper-state transition is journaled (write-ahead, fsync'd) and,
 # under the "journal" backend, in-memory state is *derived* by replaying it so a
@@ -105,12 +107,24 @@ ORDER_NON_TERMINAL_STATES = frozenset({ORDER_STATE_PLANNED, ORDER_STATE_SUBMITTE
 # observe-only soak posture of :223). Startup reconcile always runs (read-only).
 RECONCILE_ALERT_LEDGER = LOG_DIR / "reconcile-alerts.jsonl"
 RECONCILE_ALERT_MISMATCH = "RECONCILE_MISMATCH"
+RECONCILE_ALERT_RESOLVER_TIMEOUT = "UNKNOWN_RESOLVER_TIMEOUT"
+# Concrete operator transport (Task 6): alerts are mirrored to a dedicated ledger
+# and optionally POSTed to an external webhook (HERMX_ALERT_WEBHOOK_URL).
+OPERATOR_ALERT_LEDGER = LOG_DIR / "operator-alerts.jsonl"
+ALERT_AUTH_FAILURE = "AUTH_FAILURE"
+ALERT_QUEUE_SATURATION = "QUEUE_SATURATION"
 # Bounded exponential backoff (:213): max 5 attempts, 500ms base, ~8s cap, <=~20s wall.
 RECONCILE_MAX_ATTEMPTS = 5
 RECONCILE_BASE_DELAY_SECONDS = 0.5
 RECONCILE_CAP_DELAY_SECONDS = 8.0
 RECONCILE_WALL_CLOCK_BUDGET_SECONDS = 20.0
 RECONCILE_HISTORY_LIMIT = 100
+# Task 6 periodic resolver controls.
+UNKNOWN_RESOLVER_INTERVAL_SECONDS = float(os.environ.get("HERMX_UNKNOWN_RESOLVER_INTERVAL_SECONDS", "30") or "30")
+UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS = float(os.environ.get("HERMX_UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS", "900") or "900")
+UNKNOWN_RESOLVER_MAX_ORDERS_PER_TICK = int(os.environ.get("HERMX_UNKNOWN_RESOLVER_MAX_ORDERS_PER_TICK", "50") or "50")
+# Queue saturation signal is alert-only in this phase (no request rejection yet).
+QUEUE_SATURATION_ALERT_DEPTH = int(os.environ.get("HERMX_QUEUE_SATURATION_ALERT_DEPTH", "100") or "100")
 # Raw OKX order states that mean "the order genuinely exists on the venue". Anything
 # else returned by the query layer (not_found / error / not_implemented / unknown /
 # empty) is treated as "not present here" so the fallback chain keeps searching.
@@ -386,18 +400,20 @@ def check_and_mark_signal(normalized: dict, received_at: str) -> tuple[bool, dic
 
 
 def append_jsonl(path: Path, obj: dict) -> None:
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n")
+    """Append one JSONL record durably (flush + fsync).
 
-
-def append_jsonl_durable(path: Path, obj: dict) -> None:
-    """append_jsonl + flush()/os.fsync() so the record survives a power loss /
-    kill -9 the instant it returns (REFACTOR_PLAN.md:206 E4). Used for the
-    position journal write-ahead log."""
+    Phase 1 task 2 remainder (REFACTOR_PLAN.md:206): all append_jsonl callers now
+    inherit durable writes, not only the position/order journals.
+    """
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n")
         f.flush()
         os.fsync(f.fileno())
+
+
+def append_jsonl_durable(path: Path, obj: dict) -> None:
+    """Compatibility alias for durable JSONL appends."""
+    append_jsonl(path, obj)
 
 
 def read_jsonl_tolerant(path: Path) -> list[dict]:
@@ -434,6 +450,50 @@ def read_jsonl_tolerant(path: Path) -> list[dict]:
             logging.error("read_jsonl_tolerant: corrupt non-trailing line %d in %s (mid-file corruption)", i, path)
             raise
     return out
+
+
+def startup_quarantine_partial_ledgers(paths: "list[Path] | tuple[Path, ...] | None" = None) -> dict:
+    """Startup sweep for trailing partial JSONL lines (Task 2 remainder / :206).
+
+    Uses read_jsonl_tolerant() across runtime ledgers so crash-truncated tails are
+    quarantined into ``*.corrupt`` sidecars instead of blowing up readers.
+    """
+    scan_paths = list(paths) if paths is not None else [
+        RAW_INTAKE_LEDGER,
+        WEBHOOK_LEDGER,
+        DECISION_LEDGER,
+        PAPER_TRADES_LEDGER,
+        EXECUTION_PLAN_LEDGER,
+        EXECUTION_LEDGER,
+        LEGACY_EXECUTION_PLAN_LEDGER,
+        LEGACY_EXECUTION_LEDGER,
+        POSITION_JOURNAL_LEDGER,
+        ORDER_JOURNAL_LEDGER,
+        RECONCILE_ALERT_LEDGER,
+        STATE_ALERT_LEDGER,
+        DUPLICATE_LEDGER,
+        TAB_HEALTH_LEDGER,
+        STRATEGY_ALERT_LEDGER,
+        STRATEGY_QUARANTINE_LEDGER,
+        OPERATOR_ALERT_LEDGER,
+        PROCESSING_ERROR_LEDGER,
+    ]
+    summary = {"checked": 0, "quarantined": [], "errors": []}
+    for path in scan_paths:
+        if not path.exists():
+            continue
+        summary["checked"] += 1
+        corrupt_path = path.parent / (path.name + ".corrupt")
+        before_mtime = corrupt_path.stat().st_mtime_ns if corrupt_path.exists() else None
+        try:
+            read_jsonl_tolerant(path)
+        except Exception as exc:
+            summary["errors"].append(f"{path.name}: {exc}")
+            continue
+        after_mtime = corrupt_path.stat().st_mtime_ns if corrupt_path.exists() else None
+        if after_mtime is not None and after_mtime != before_mtime:
+            summary["quarantined"].append(path.name)
+    return summary
 
 
 # Monotonic journal sequence: derived once from the journal's last seq at first
@@ -1751,6 +1811,7 @@ def default_control_state() -> dict:
         "live_trading": "paused",
         "manual_pause": False,
         "pause_reason": "",
+        "symbol_pauses": {},
         "allowed_assets": list(ALLOWED_SYMBOLS),
         "allowed_policies": list(POLICY_KEYS),
         "risk_limits": {
@@ -1777,9 +1838,44 @@ def load_control_state() -> dict:
         default = default_control_state()
         merged = default | state
         merged["risk_limits"] = default.get("risk_limits", {}) | state.get("risk_limits", {})
+        merged["symbol_pauses"] = state.get("symbol_pauses") if isinstance(state.get("symbol_pauses"), dict) else {}
         return merged
     except Exception:
         return default_control_state()
+
+
+def symbol_pause_info(symbol: "str | None", state: "dict | None" = None) -> "dict | None":
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return None
+    cur_state = state if state is not None else load_control_state()
+    pauses = cur_state.get("symbol_pauses") if isinstance(cur_state.get("symbol_pauses"), dict) else {}
+    pause = pauses.get(sym)
+    if isinstance(pause, dict) and pause.get("paused"):
+        return pause
+    return None
+
+
+def pause_symbol(symbol: "str | None", reason: str) -> bool:
+    """Persist a per-symbol pause artifact (Task 6 operator control)."""
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return False
+    state = load_control_state()
+    pauses = state.get("symbol_pauses") if isinstance(state.get("symbol_pauses"), dict) else {}
+    current = pauses.get(sym) if isinstance(pauses.get(sym), dict) else {}
+    next_reason = str(reason or "")[:500]
+    if current.get("paused") and current.get("reason") == next_reason:
+        return False
+    pauses[sym] = {
+        "paused": True,
+        "paused_at": now_iso(),
+        "reason": next_reason,
+    }
+    state["symbol_pauses"] = pauses
+    state["updated_at"] = now_iso()
+    save_control_state(state)
+    return True
 
 
 def realistic_base_notional_usd(symbol: str) -> float:
@@ -2785,7 +2881,8 @@ def load_open_orders() -> list[dict]:
 # journal. It maps the exchange's truth onto the submission-outcome state machine and,
 # at most, (a) updates terminal order-journal states and (b) emits RECONCILE_MISMATCH
 # alerts. It NEVER submits, cancels, or auto-trades (:215 "does not auto-trade").
-# The periodic UNKNOWN resolver loop + per-symbol pause are Task 6, NOT here.
+# Periodic UNKNOWN/SUBMITTED re-reconciliation and per-symbol pause controls live in
+# resolve_unknown_orders_once()/unknown_resolver_loop() below (Task 6).
 # ---------------------------------------------------------------------------
 
 def _reconcile_float(value, default=0.0):
@@ -2958,16 +3055,68 @@ def reconcile_order_with_backoff(
     return outcome
 
 
+def emit_operator_alert(kind: str, detail: "dict | None" = None, *, severity: str = "warning") -> dict:
+    """Concrete operator alert transport (Task 6): durable ledger + log + optional
+    webhook POST configured by HERMX_ALERT_WEBHOOK_URL."""
+    record = {
+        "ts": now_iso(),
+        "alert": kind,
+        "severity": severity,
+        "detail": detail or {},
+    }
+    try:
+        append_jsonl(OPERATOR_ALERT_LEDGER, record)
+    except OSError as exc:
+        logging.error("failed to write operator alert %s: %s", kind, exc)
+
+    webhook_url = (os.environ.get("HERMX_ALERT_WEBHOOK_URL") or "").strip()
+    if webhook_url:
+        timeout_seconds = float(os.environ.get("HERMX_ALERT_WEBHOOK_TIMEOUT_SECONDS", "2") or "2")
+        body = json.dumps(record, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        req = urllib_request.Request(
+            webhook_url,
+            data=body,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(req, timeout=timeout_seconds):
+                pass
+        except Exception as exc:
+            logging.error("operator alert webhook failed kind=%s url=%s error=%s", kind, webhook_url, exc)
+
+    log_fn = logging.error if severity.lower() in {"error", "critical"} else logging.warning
+    log_fn("%s %s", kind, json.dumps(detail or {}, ensure_ascii=False))
+    return record
+
+
+def emit_auth_failure_alert(path: str, client_ip: "str | None") -> dict:
+    return emit_operator_alert(
+        ALERT_AUTH_FAILURE,
+        {"path": path, "client_ip": client_ip},
+        severity="error",
+    )
+
+
+def maybe_emit_queue_saturation_alert(queue_depth: int) -> bool:
+    if QUEUE_SATURATION_ALERT_DEPTH <= 0 or queue_depth < QUEUE_SATURATION_ALERT_DEPTH:
+        return False
+    emit_operator_alert(
+        ALERT_QUEUE_SATURATION,
+        {"queue_depth": queue_depth, "threshold": QUEUE_SATURATION_ALERT_DEPTH},
+        severity="error",
+    )
+    return True
+
+
 def emit_reconcile_alert(kind: str, detail: dict) -> dict:
-    """Durable-ish operator alert for reconciliation issues (observe-only transport;
-    a richer transport is Task 6 / :217). Best-effort JSONL append + loud log; an
-    alert write failure must never break reconciliation or the money path."""
+    """Compatibility ledger for reconciliation alerts + Task 6 operator transport."""
     record = {"ts": now_iso(), "alert": kind, "detail": detail or {}}
     try:
         append_jsonl(RECONCILE_ALERT_LEDGER, record)
     except OSError as exc:
         logging.error("failed to write reconcile alert %s: %s", kind, exc)
-    logging.warning("%s %s", kind, json.dumps(detail or {}, ensure_ascii=False))
+    emit_operator_alert(kind, detail or {}, severity="warning")
     return record
 
 
@@ -3131,6 +3280,180 @@ def reconcile_startup(executor=None) -> dict:
     return summary
 
 
+def unknown_resolver_enabled() -> bool:
+    raw = os.environ.get("HERMX_UNKNOWN_RESOLVER_ENABLED", "1")
+    return raw.strip().lower() not in {"false", "0", "no", ""}
+
+
+def _order_age_seconds(order_record: dict, now_ts: "str | None" = None) -> "float | None":
+    order_ts = parse_tv_time(order_record.get("ts"))
+    if order_ts is None:
+        return None
+    now_dt = parse_tv_time(now_ts) if now_ts else datetime.now(timezone.utc)
+    if now_dt is None:
+        now_dt = datetime.now(timezone.utc)
+    return max(0.0, (now_dt - order_ts).total_seconds())
+
+
+def resolve_unknown_orders_once(executor=None, *, now_ts: "str | None" = None, max_orders: "int | None" = None) -> dict:
+    """Task 6 periodic resolver pass for open SUBMITTED/UNKNOWN orders.
+
+    Re-runs reconciliation until terminal or per-order timeout budget expiry. On
+    budget expiry emits alerts and persists a per-symbol pause artifact.
+    """
+    if executor is None:
+        executor = _reconciliation_executor()
+    summary = {
+        "checked": 0,
+        "resolved": 0,
+        "pending": 0,
+        "expired": 0,
+        "paused_symbols": [],
+        "errors": [],
+        "executor_available": executor is not None,
+    }
+    if executor is None:
+        return summary
+
+    limit = max_orders if max_orders is not None else UNKNOWN_RESOLVER_MAX_ORDERS_PER_TICK
+    candidates = [
+        rec
+        for rec in load_open_orders()
+        if rec.get("state") in {ORDER_STATE_SUBMITTED, ORDER_STATE_UNKNOWN}
+    ]
+    candidates.sort(key=lambda r: r.get("seq", 0))
+    for rec in candidates[: max(0, int(limit))]:
+        summary["checked"] += 1
+        cl_ord_id = rec.get("cl_ord_id")
+        cur_state = rec.get("state")
+        intent = rec.get("intent") or {}
+        symbol = intent.get("symbol")
+        age_seconds = _order_age_seconds(rec, now_ts=now_ts)
+        lookup = {"inst_id": intent.get("inst_id"), "cl_ord_id": cl_ord_id}
+
+        if age_seconds is not None and age_seconds > UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS:
+            reason = f"resolver_budget_exhausted:{round(age_seconds, 3)}s"
+            emit_reconcile_alert(
+                RECONCILE_ALERT_MISMATCH,
+                {
+                    "stage": "unknown_resolver_timeout",
+                    "cl_ord_id": cl_ord_id,
+                    "symbol": symbol,
+                    "state": cur_state,
+                    "age_s": round(age_seconds, 3),
+                    "timeout_s": UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS,
+                    "reason": reason,
+                },
+            )
+            emit_operator_alert(
+                RECONCILE_ALERT_RESOLVER_TIMEOUT,
+                {
+                    "cl_ord_id": cl_ord_id,
+                    "symbol": symbol,
+                    "state": cur_state,
+                    "age_s": round(age_seconds, 3),
+                    "timeout_s": UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS,
+                },
+                severity="error",
+            )
+            if pause_symbol(symbol, f"unknown resolver timeout for {cl_ord_id} ({round(age_seconds, 3)}s)"):
+                summary["paused_symbols"].append(str(symbol or ""))
+            summary["expired"] += 1
+            continue
+
+        try:
+            outcome = reconcile_order_with_backoff(executor, lookup)
+        except Exception as exc:  # pragma: no cover - defensive
+            summary["errors"].append(f"reconcile[{cl_ord_id}]: {exc}")
+            emit_operator_alert(
+                "UNKNOWN_RESOLVER_ERROR",
+                {"cl_ord_id": cl_ord_id, "symbol": symbol, "error": str(exc)},
+                severity="error",
+            )
+            continue
+
+        next_state = outcome.get("state")
+        if next_state in ORDER_TERMINAL_STATES and order_state_can_transition(cur_state, next_state):
+            try:
+                record_order_state(
+                    cl_ord_id,
+                    next_state,
+                    intent=intent,
+                    detail={
+                        "unknown_resolver": True,
+                        "reason": outcome.get("reason"),
+                        "source": outcome.get("source"),
+                        "attempts": outcome.get("attempts"),
+                        "elapsed_s": outcome.get("elapsed_s"),
+                    },
+                    prev_state=cur_state,
+                )
+                summary["resolved"] += 1
+                continue
+            except (ValueError, OSError) as exc:
+                summary["errors"].append(f"record_order_state[{cl_ord_id}]: {exc}")
+
+        if next_state == ORDER_STATE_UNKNOWN and order_state_can_transition(cur_state, ORDER_STATE_UNKNOWN):
+            try:
+                record_order_state(
+                    cl_ord_id,
+                    ORDER_STATE_UNKNOWN,
+                    intent=intent,
+                    detail={
+                        "unknown_resolver": True,
+                        "reason": outcome.get("reason"),
+                        "source": outcome.get("source"),
+                        "attempts": outcome.get("attempts"),
+                        "elapsed_s": outcome.get("elapsed_s"),
+                    },
+                    prev_state=cur_state,
+                )
+                cur_state = ORDER_STATE_UNKNOWN
+            except (ValueError, OSError) as exc:
+                summary["errors"].append(f"record_unknown[{cl_ord_id}]: {exc}")
+
+        emit_reconcile_alert(
+            RECONCILE_ALERT_MISMATCH,
+            {
+                "stage": "unknown_resolver_pending",
+                "cl_ord_id": cl_ord_id,
+                "symbol": symbol,
+                "journal_state": cur_state,
+                "reconciled_state": next_state,
+                "reason": outcome.get("reason"),
+                "attempts": outcome.get("attempts"),
+            },
+        )
+        summary["pending"] += 1
+    return summary
+
+
+def unknown_resolver_loop(stop_event: "threading.Event | None" = None, sleep=time.sleep) -> None:
+    interval = max(1.0, UNKNOWN_RESOLVER_INTERVAL_SECONDS)
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            return
+        try:
+            summary = resolve_unknown_orders_once()
+            if summary["checked"] or summary["expired"] or summary["errors"]:
+                logging.info(
+                    "UNKNOWN resolver tick checked=%d resolved=%d pending=%d expired=%d errors=%d",
+                    summary["checked"],
+                    summary["resolved"],
+                    summary["pending"],
+                    summary["expired"],
+                    len(summary["errors"]),
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            emit_operator_alert("UNKNOWN_RESOLVER_ERROR", {"error": str(exc)}, severity="error")
+
+        if stop_event is not None:
+            if stop_event.wait(interval):
+                return
+        else:
+            sleep(interval)
+
+
 def execute_okx_if_enabled(record: dict) -> dict:
     armed, kill_switch_raw = submit_kill_switch_armed()
     if not armed:
@@ -3156,6 +3479,16 @@ def execute_okx_if_enabled(record: dict) -> dict:
             "ok": True,
             "mode": "not_submitted",
             "reason": readiness.get("block_reason") or "OKX execution disabled",
+        }
+        append_jsonl(EXECUTION_LEDGER, {"received_at": record.get("received_at"), "okx_execution": result})
+        return result
+    symbol_pause = symbol_pause_info(readiness.get("symbol"))
+    if symbol_pause:
+        result = {
+            "ok": True,
+            "mode": "not_submitted",
+            "reason": "symbol_paused",
+            "symbol_pause": symbol_pause,
         }
         append_jsonl(EXECUTION_LEDGER, {"received_at": record.get("received_at"), "okx_execution": result})
         return result
@@ -3471,7 +3804,7 @@ def process_payload_async(payload: dict, intake_received_at: str) -> None:
     try:
         status, record = build_record(payload, intake_received_at)
         if status >= 400:
-            append_jsonl(LOG_DIR / "shadow-processing-errors.jsonl", {"received_at": intake_received_at, "status": status, "record": record})
+            append_jsonl(PROCESSING_ERROR_LEDGER, {"received_at": intake_received_at, "status": status, "record": record})
             logging.warning("Shadow async processing rejected status=%s error=%s", status, record.get("error"))
         else:
             normalized = record.get("normalized") or {}
@@ -3483,7 +3816,7 @@ def process_payload_async(payload: dict, intake_received_at: str) -> None:
                 status,
             )
     except Exception as exc:
-        append_jsonl(LOG_DIR / "shadow-processing-errors.jsonl", {"received_at": intake_received_at, "error": str(exc), "payload": payload})
+        append_jsonl(PROCESSING_ERROR_LEDGER, {"received_at": intake_received_at, "error": str(exc), "payload": payload})
         logging.exception("Shadow async processing failed")
 
 
@@ -3524,6 +3857,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         provided = self.headers.get("X-Webhook-Secret", "") or parse_qs(parsed.query).get("secret", [""])[0]
         if SECRET and provided != SECRET:
+            client_ip = self.client_address[0] if getattr(self, "client_address", None) else None
+            emit_auth_failure_alert(parsed.path, client_ip)
             self._send(403, {"ok": False, "error": "forbidden"})
             return
         try:
@@ -3535,7 +3870,9 @@ class Handler(BaseHTTPRequestHandler):
         intake_received_at = now_iso()
         append_jsonl(RAW_INTAKE_LEDGER, {"received_at": intake_received_at, "payload": payload, "path": parsed.path})
         PROCESS_QUEUE.put((payload, intake_received_at))
-        self._send(200, {"ok": True, "status": "queued", "received_at": intake_received_at, "queue_depth": PROCESS_QUEUE.qsize()})
+        queue_depth = PROCESS_QUEUE.qsize()
+        maybe_emit_queue_saturation_alert(queue_depth)
+        self._send(200, {"ok": True, "status": "queued", "received_at": intake_received_at, "queue_depth": queue_depth})
 
     def log_message(self, fmt, *args):
         return
@@ -3554,18 +3891,27 @@ def log_execution_arm_state() -> None:
     logging.info(
         "EXECUTION ARM STATE: HERMX_SUBMIT_ENABLED=%s (kill_switch_armed=%s) "
         "execution.submit_orders=%s risk.allow_live_execution=%s "
-        "execution.enabled=%s execution.simulated_trading=%s",
+        "execution.enabled=%s execution.simulated_trading=%s "
+        "reconcile_post_submit=%s unknown_resolver_enabled=%s startup_reconcile_complete=%s",
         kill_switch_raw,
         armed,
         execution_cfg.get("submit_orders"),
         risk_cfg.get("allow_live_execution"),
         execution_cfg.get("enabled"),
         execution_cfg.get("simulated_trading"),
+        reconcile_post_submit_enabled(),
+        unknown_resolver_enabled(),
+        RECONCILE_STARTUP_COMPLETE,
     )
 
 
 def main():
     ROOT.mkdir(parents=True, exist_ok=True)
+    quarantine_summary = startup_quarantine_partial_ledgers()
+    if quarantine_summary["quarantined"]:
+        logging.warning("Startup quarantined truncated ledger tails: %s", quarantine_summary["quarantined"])
+    if quarantine_summary["errors"]:
+        logging.error("Startup ledger quarantine errors: %s", quarantine_summary["errors"])
     log_execution_arm_state()
     # One-time startup reconcile (REFACTOR_PLAN.md:215, acceptance :236). OBSERVE-ONLY:
     # reconciles open orders + compares OKX positions vs local, emitting
@@ -3575,6 +3921,8 @@ def main():
         reconcile_startup()
     except Exception as exc:  # pragma: no cover - never block boot on observe-only reconcile
         logging.error("startup reconcile failed (observe-only, continuing): %s", exc)
+    if unknown_resolver_enabled():
+        threading.Thread(target=unknown_resolver_loop, daemon=True, name="unknown-resolver").start()
     threading.Thread(target=worker_loop, daemon=True, name="shadow-policy-worker").start()
     server = HTTPServer(("127.0.0.1", PORT), Handler)
     logging.info("MXC VPS shadow receiver listening on 127.0.0.1:%s", PORT)
