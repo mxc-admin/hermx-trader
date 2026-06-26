@@ -1,0 +1,54 @@
+{
+  "_fixture_note": "Synthetic dry-run SHADOW_ROOT config for the characterization test harness. Copied into a temp SHADOW_ROOT as shadow-config.json before webhook_receiver binds its module globals. NO secrets. Execution is hard-disabled (execution.enabled=false, execution.submit_orders=false, risk.allow_live_execution=false) so no OKX subprocess can ever be armed. require_strategy_id is intentionally false (unlike the production VPS profile) so the same corpus can exercise BOTH strategy-file alerts (carry strategy_id) and shadow Duo-raw paper-trade alerts (no strategy_id) without quarantine.",
+  "mode": "duo_base_dev_strategy_demo",
+  "primary_policy": "not_selected",
+  "execution_timeframe": "strategy_file",
+  "chart_type": "heikin_ashi",
+  "base_notional_usd": 10000,
+  "fees": {
+    "maker_rate": 0.0002,
+    "taker_rate": 0.0005,
+    "default_liquidity": "taker"
+  },
+  "funding": {
+    "enabled": false,
+    "default_rate": 0.0
+  },
+  "policies": {
+    "enabled": ["duo_raw", "duo_regime_rsi_30m"]
+  },
+  "execution": {
+    "enabled": false,
+    "mode": "dry_run",
+    "exchange": "okx",
+    "execution_policy": "duo_raw",
+    "shadow_policy": "duo_regime_rsi_30m",
+    "route": "okx_api",
+    "account": "sandbox",
+    "td_mode": "isolated",
+    "simulated_trading": true,
+    "force_ipv4": true,
+    "submit_orders": false
+  },
+  "strategy_engine": {
+    "enabled": true,
+    "strategies_dir": "strategies",
+    "default_status": "trial_candidate",
+    "submit_orders": false,
+    "allow_strategy_alerts": true,
+    "require_strategy_id": false,
+    "quarantine_invalid_strategy_alerts": true
+  },
+  "assets": {
+    "BTCUSDT": {"enabled": true, "okx_inst_id": "BTC-USDT-SWAP", "budget_usd": 1500, "leverage": 2, "timeframe": "2h"},
+    "ETHUSDT": {"enabled": true, "okx_inst_id": "ETH-USDT-SWAP", "budget_usd": 2000, "leverage": 2, "timeframe": "2h"},
+    "SOLUSDT": {"enabled": true, "okx_inst_id": "SOL-USDT-SWAP", "budget_usd": 1500, "leverage": 2, "timeframe": "3h"},
+    "XRPUSDT": {"enabled": true, "okx_inst_id": "XRP-USDT-SWAP", "budget_usd": 1500, "leverage": 2, "timeframe": "4h"}
+  },
+  "risk": {
+    "allow_live_execution": false,
+    "duplicate_protection": true,
+    "max_slippage_pct": 0.25,
+    "max_daily_loss_usd": 150.0
+  }
+}

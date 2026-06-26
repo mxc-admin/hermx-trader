@@ -1,0 +1,12 @@
+{
+  "source": "tradingview",
+  "strategy_id": "btcusdt_duo_base_dev_2h",
+  "strategy_name": "BTCUSDT Duo Base Dev 2H",
+  "indicator": "mxc duo-base",
+  "symbol": "BTCUSDT",
+  "side": "buy",
+  "timeframe": "4h",
+  "tv_time": "2026-06-20T10:00:00Z",
+  "tv_signal_price": 65000.0,
+  "exchange": "okx"
+}

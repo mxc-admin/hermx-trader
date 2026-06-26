@@ -1,0 +1,7 @@
+{
+  "_fixture_note": "PLACEHOLDER (P1). Synthetic shape for a submit timeout. In production execute_okx_if_enabled produces this dict itself when subprocess.run raises TimeoutExpired (mode=submit_exception); captured here so P1 crash-recovery/reconciliation tests have a stable timeout oracle.",
+  "ok": false,
+  "mode": "submit_exception",
+  "elapsed_ms": 45000,
+  "error": "Command '[...okx_demo_executor.py execute]' timed out after 45 seconds"
+}

@@ -6,7 +6,10 @@ redirect it to an isolated temp directory BEFORE the module is ever imported.
 """
 from __future__ import annotations
 
+import importlib
+import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -48,3 +51,129 @@ def repo_root() -> Path:
 @pytest.fixture
 def fixtures_dir() -> Path:
     return FIXTURES_DIR
+
+
+# ---------------------------------------------------------------------------
+# Characterization harness (REFACTOR_PLAN.md:160 task 3, :167, :179).
+#
+# webhook_receiver binds CONFIG / STRATEGIES / ALLOWED_SYMBOLS / STRATEGY_ENGINE /
+# POLICY_KEYS and every LOG_DIR/state path from SHADOW_ROOT *at import time*. The
+# default conftest SHADOW_ROOT above is an empty dir (CONFIG=defaults,
+# STRATEGIES={}), so strategy alerts would be rejected unknown_strategy_id and no
+# corpus config would apply.
+#
+# Chosen approach: build a fresh, *populated* temp SHADOW_ROOT per test (copy the
+# 4 corpus strategy files + the synthetic dry-run shadow-config.json), point
+# SHADOW_ROOT at it, and importlib.reload(webhook_receiver) so its globals rebind
+# to that populated root. This is the faithful approach -- it exercises the real
+# module-load binding (load_shadow_config / load_strategy_files) rather than
+# monkeypatching globals after the fact. Per-test reload also gives full isolation
+# (fresh paper-state.json, seen-signals.json, logs/) so tests never touch the real
+# runtime state and never interfere with each other.
+#
+# On teardown we restore SHADOW_ROOT to the session temp root and reload again, so
+# tests that import webhook_receiver WITHOUT this fixture (e.g. test_kill_switch)
+# keep a module bound to a live (non-deleted) directory.
+# ---------------------------------------------------------------------------
+
+CORPUS_STRATEGIES_DIR = FIXTURES_DIR / "strategies"
+CORPUS_CONFIG = FIXTURES_DIR / "config" / "shadow-config.dryrun.json"
+CORPUS_PAPER_SEED = FIXTURES_DIR / "state" / "paper-state.seed.json"
+
+
+def _build_populated_root(root: Path) -> None:
+    """Lay out a SHADOW_ROOT the receiver can bind to: logs/, strategies/, config."""
+    (root / "logs").mkdir(parents=True, exist_ok=True)
+    strategies_dir = root / "strategies"
+    strategies_dir.mkdir(parents=True, exist_ok=True)
+    for src in sorted(CORPUS_STRATEGIES_DIR.glob("*.json")):
+        shutil.copy(src, strategies_dir / src.name)
+    shutil.copy(CORPUS_CONFIG, root / "shadow-config.json")
+
+
+@pytest.fixture
+def wr_root(tmp_path) -> Path:
+    """A fresh populated SHADOW_ROOT for one test."""
+    root = tmp_path / "shadow-root"
+    _build_populated_root(root)
+    return root
+
+
+@pytest.fixture
+def wr(wr_root, monkeypatch):
+    """webhook_receiver reloaded with globals bound to a populated SHADOW_ROOT.
+
+    Kill switch starts unset (inert/armed). Execution is hard-disabled via the
+    corpus config, so no OKX subprocess is ever armed regardless.
+    """
+    import webhook_receiver as module  # noqa: WPS433 (import inside fixture is intentional)
+
+    orig_shadow_root = os.environ.get("SHADOW_ROOT")
+    os.environ["SHADOW_ROOT"] = str(wr_root)
+    os.environ.pop("HERMX_SUBMIT_ENABLED", None)
+    importlib.reload(module)
+    try:
+        yield module
+    finally:
+        # Rebind to a live directory so unrelated tests don't import a module
+        # whose LOG_DIR points at this now-vanishing tmp_path.
+        if orig_shadow_root is not None:
+            os.environ["SHADOW_ROOT"] = orig_shadow_root
+        else:
+            os.environ["SHADOW_ROOT"] = str(_SHADOW_ROOT)
+        importlib.reload(module)
+
+
+@pytest.fixture
+def seed_paper_state(wr_root):
+    """Copy the empty paper-state seed into the active root and return it."""
+    dst = wr_root / "paper-state.json"
+    shutil.copy(CORPUS_PAPER_SEED, dst)
+    return dst
+
+
+# ---------------------------------------------------------------------------
+# Snapshot (golden) helper.
+#
+# Normalization rule (documented, deterministic): the corpus drives every alert
+# with a FIXED tv_time and passes received_at_override, so signal_id (sha256 of
+# strategy_id|symbol|side|timeframe|tv_time), client_order_id, latency, and all
+# *_at fields are already stable. The only non-portable values are absolute
+# filesystem paths (e.g. strategy_config["_path"] = "<tmp>/strategies/x.json").
+# normalize_snapshot() therefore:
+#   1. drops any dict key named "_path",
+#   2. replaces any string containing the active SHADOW_ROOT path with "<ROOT>".
+# Set SNAPSHOT_UPDATE=1 to (re)generate goldens.
+# ---------------------------------------------------------------------------
+
+SNAPSHOTS_DIR = FIXTURES_DIR / "snapshots"
+
+
+def normalize_snapshot(obj, root: Path):
+    root_str = str(root)
+    if isinstance(obj, dict):
+        return {k: normalize_snapshot(v, root) for k, v in obj.items() if k != "_path"}
+    if isinstance(obj, list):
+        return [normalize_snapshot(v, root) for v in obj]
+    if isinstance(obj, str) and root_str in obj:
+        return obj.replace(root_str, "<ROOT>")
+    return obj
+
+
+@pytest.fixture
+def assert_snapshot(wr_root):
+    def _assert(name: str, obj) -> None:
+        normalized = normalize_snapshot(obj, wr_root)
+        path = SNAPSHOTS_DIR / name
+        if os.environ.get("SNAPSHOT_UPDATE") == "1" or not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(normalized, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        expected = json.loads(path.read_text(encoding="utf-8"))
+        assert normalized == expected, f"snapshot drift vs {path.name}"
+
+    return _assert
+
+
+def load_alert(rel_path: str) -> dict:
+    """Load an alert payload fixture by path relative to tests/fixtures/alerts/."""
+    return json.loads((FIXTURES_DIR / "alerts" / rel_path).read_text(encoding="utf-8"))

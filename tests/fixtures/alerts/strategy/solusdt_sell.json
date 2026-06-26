@@ -1,0 +1,12 @@
+{
+  "source": "tradingview",
+  "strategy_id": "solusdt_duo_base_dev_3h",
+  "strategy_name": "SOLUSDT Duo Base Dev 3H",
+  "indicator": "mxc duo-base",
+  "symbol": "SOLUSDT",
+  "side": "sell",
+  "timeframe": "3h",
+  "tv_time": "2026-06-20T00:00:00Z",
+  "tv_signal_price": 150.0,
+  "exchange": "okx"
+}

@@ -1,0 +1,12 @@
+{
+  "source": "tradingview",
+  "strategy_id": "ethusdt_duo_base_dev_2h",
+  "strategy_name": "ETHUSDT Duo Base Dev 2H",
+  "indicator": "mxc duo-base",
+  "symbol": "ETHUSDT",
+  "side": "buy",
+  "timeframe": "2h",
+  "tv_time": "2026-06-20T00:00:00Z",
+  "tv_signal_price": 3500.0,
+  "exchange": "okx"
+}

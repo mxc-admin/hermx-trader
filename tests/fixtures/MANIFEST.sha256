@@ -1,7 +1,42 @@
-# HermX fixture corpus manifest (Phase 0).
+# HermX fixture corpus manifest (Phase 0 — REFACTOR_PLAN.md:174-175, :178).
 # Format: one entry per line -> "<sha256>  <relative/path/under/fixtures>"
-# (compatible with `sha256sum`/`shasum -a 256` output).
+# (compatible with `sha256sum` / `shasum -a 256` output).
 #
-# PLACEHOLDER: the full fixture corpus is built later in Phase 0 (REFACTOR_PLAN.md:162).
-# The verifier test (test_fixture_manifest.py) already enforces this manifest and
-# will fail on drift once entries are added. While no entries exist it skips gracefully.
+# Scope: this manifest hash-stamps the stable INPUT corpus (alerts, strategy
+# files, dry-run config, seed state, executor-output fixtures). It deliberately
+# EXCLUDES:
+#   * MANIFEST.sha256 itself, and
+#   * snapshots/  -- the golden outputs derived by the characterization suite,
+#     which are themselves the verifier for those goldens and are regenerable
+#     via SNAPSHOT_UPDATE=1. Stamping them here would make every intentional
+#     re-baseline look like corpus drift.
+# test_fixture_manifest.py enforces this manifest and fails on any drift/missing
+# file. The corpus passed the P2/S4 secret-redaction scan before commit (:176).
+#
+# Note: alerts/strategy/btcusdt_buy.json and btcusdt_buy_duplicate.json are
+# byte-identical (same digest) BY DESIGN -- the duplicate must share the original
+# dedupe identity (strategy_id|symbol|side|timeframe|tv_time).
+
+206ef9940251870dec48fba46916bf03780896c858fd8ee2e6d9018cc04b7e63  alerts/shadow/btcusdt_shadow_buy.json
+546759754b8c5ca6fd94fab62979b737616ca8436849ffa9a0f931cb8529e2d8  alerts/shadow/btcusdt_shadow_sell.json
+a6f7ec31ba4d054f6ed61460a39ad5a10ac897edc553a1e5068e0ec6ff0d2b11  alerts/strategy/btcusdt_buy.json
+a6f7ec31ba4d054f6ed61460a39ad5a10ac897edc553a1e5068e0ec6ff0d2b11  alerts/strategy/btcusdt_buy_duplicate.json
+965e26cbd216e3595dfed76344207c2498b95a7c255a566419ccbd3062191565  alerts/strategy/btcusdt_sell_reverse.json
+f16fef948680be413b418e97b9a92a764e84bedede9af1aa15ef8efdd7f0a058  alerts/strategy/ethusdt_buy.json
+99eb95dddb6cbc1ea85b3f165cfc260bca1e3c5368bc1183a382b16a2642d06d  alerts/strategy/malformed_bad_side.json
+700a97afe97374f3e54102cbe926ece05463304d6a39136807d6b0a4e5bc70d6  alerts/strategy/solusdt_sell.json
+720b4a7b197b75d0faa7521a998f1aefd85d9c6cc9ce06fc3e827ce546e393a8  alerts/strategy/symbol_mismatch.json
+be7707ab68099b67b79eace8c9bee956d31fd3dd8940125a7bb8c4e1ee8da23c  alerts/strategy/timeframe_mismatch.json
+ebf49e8889cb3840e56c9e7977eeec30f02e2e585dcc97f0b155959fb23bd359  alerts/strategy/unknown_strategy_id.json
+a0dee993f04b3ac64a0a7e4f341814e23b7fb1698411d602160aa92d9bc7c168  alerts/strategy/xrpusdt_buy.json
+d6f0c7039dbd2271de1a5248b1ebefc15771b0110d80c6357b7a801a0372f916  config/shadow-config.dryrun.json
+818fe8be9c757bfbb002585e869877a807c57554bd0902b23f8758367bb64604  executor_outputs/README.md
+2dd78a45379ec2b0cc68b7e83f1e2c38bc2c0321c7234ecf6e5ae02b98126dc8  executor_outputs/fill.json
+9cabe93cb187ac9f05e6d6ad9e41cac6dc87d19709c012b9ecfd535de358afc4  executor_outputs/partial_fill.json
+cf8df68dd6ed3a4bc2e8a1e0d774e7d6446b20a25c31a955426544d3270ef04c  executor_outputs/reject.json
+65117c8324c3c185a8c805c6d560a5583abc342bb7da8b97af355304ed0e33ee  executor_outputs/timeout.json
+23e1c1b3066be6897335edc21aa87bbfc27d32a263ef23a868ff1e7da2873c93  state/paper-state.seed.json
+8226c591e6703e87db8830e63d2b1bdc37d00ff36863c5e61aee4beb39582ac4  strategies/btcusdt_duo_base_dev_2h.json
+6269b6b5e6058811f42bdcaf9a771aaa2e17dad5132528bf5e06b0d754719328  strategies/ethusdt_duo_base_dev_2h.json
+123ba3e5505813122e1df97fd455dea13727bfcf3bf20a7446ad24db5b8125f2  strategies/solusdt_duo_base_dev_3h.json
+03099e5b2c86f542bfda78cf9afa87da1c33f2424ec4dcbf8982b469981199be  strategies/xrpusdt_duo_base_dev_4h.json

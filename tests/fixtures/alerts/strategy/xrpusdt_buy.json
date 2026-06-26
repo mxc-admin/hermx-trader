@@ -1,0 +1,12 @@
+{
+  "source": "tradingview",
+  "strategy_id": "xrpusdt_duo_base_dev_4h",
+  "strategy_name": "XRPUSDT Duo Base Dev 4H",
+  "indicator": "mxc duo-base",
+  "symbol": "XRPUSDT",
+  "side": "buy",
+  "timeframe": "4h",
+  "tv_time": "2026-06-20T00:00:00Z",
+  "tv_signal_price": 0.55,
+  "exchange": "okx"
+}
