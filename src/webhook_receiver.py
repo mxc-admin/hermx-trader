@@ -234,6 +234,14 @@ STRATEGY_ENGINE = CONFIG.get("strategy_engine", {}) or {}
 STRATEGIES_DIR = ROOT / str(STRATEGY_ENGINE.get("strategies_dir") or "strategies")
 STRATEGY_ALERT_LEDGER = LOG_DIR / "strategy-alerts.jsonl"
 STRATEGY_QUARANTINE_LEDGER = LOG_DIR / "strategy-alert-quarantine.jsonl"
+# Phase 6 / M2 (REFACTOR_PLAN.md): explicit alert-schema enforcement at intake.
+# The JSON schema lives in the source repo (NOT under SHADOW_ROOT, which tests
+# redirect to a temp dir), so resolve it relative to this file's repo root.
+ALERT_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "tradingview-alert.schema.json"
+# Observe-only counters for the alert-schema feature. Mutating a dict needs no
+# `global` declaration, and adding/incrementing these never alters any ledger
+# record or return value, so default-OFF behavior stays byte-identical.
+ALERT_SCHEMA_METRICS = {"invalid": 0, "quarantined": 0}
 POLICY_KEYS = tuple(CONFIG.get("policies", {}).get("enabled") or ["duo_raw", "duo_regime_rsi_30m"])
 MTF_POLICY_KEYS = {"v52_fast_1h", "v6_regime_duo", "duo_conviction_sized", "conviction_v2_candidate", "duo_regime_rsi_sized"}
 MTF_REQUIRED = any(key in set(POLICY_KEYS) for key in MTF_POLICY_KEYS)
@@ -254,6 +262,46 @@ PAPER_DEFAULT_FUNDING_RATE = float(CONFIG.get("funding", {}).get("default_rate",
 from hermx_shared import canonical_timeframe  # noqa: E402,F401
 
 
+def strategy_instrument(row: dict) -> dict:
+    """PURE: canonical instrument block for a strategy of EITHER schema version.
+
+    v2 carries a generic ``instrument`` block ({exchange, inst_id, type}); v1 is
+    OKX-coupled (``okx_inst_id`` only). This returns the same shape for both so
+    callers resolve venue/instrument identically regardless of file version. The
+    strategy NEVER carries credentials (REFACTOR_PLAN.md §0.4) -- this only maps
+    the public venue/instrument selection.
+    """
+    inst = (row or {}).get("instrument")
+    if isinstance(inst, dict) and inst.get("inst_id"):
+        return {
+            "exchange": str(inst.get("exchange") or "okx").lower(),
+            "inst_id": str(inst.get("inst_id")),
+            "type": str(inst.get("type") or "swap"),
+        }
+    okx_inst = (row or {}).get("okx_inst_id")
+    if okx_inst:
+        return {"exchange": "okx", "inst_id": str(okx_inst), "type": "swap"}
+    return {}
+
+
+def normalize_strategy_record(row: dict) -> dict:
+    """v1->v2 loader shim (REFACTOR_PLAN.md Phase 6 / M1).
+
+    A schema_version 2 strategy selects its exchange via the generic
+    ``instrument`` block and uses ``submit_orders``. The execution-readiness path
+    still reads the legacy ``okx_inst_id`` / ``okx_submit_orders`` keys, so bridge
+    them here for v2 records. v1 records already have those keys and are returned
+    unchanged, so existing strategies keep byte-identical behavior.
+    """
+    inst = row.get("instrument")
+    if isinstance(inst, dict):
+        if not row.get("okx_inst_id") and inst.get("inst_id"):
+            row["okx_inst_id"] = str(inst.get("inst_id"))
+        if "okx_submit_orders" not in row:
+            row["okx_submit_orders"] = bool(row.get("submit_orders", False))
+    return row
+
+
 def load_strategy_files() -> dict:
     strategies = {}
     if not STRATEGIES_DIR.exists():
@@ -264,6 +312,7 @@ def load_strategy_files() -> dict:
             sid = str(row.get("strategy_id") or "").strip()
             if not sid:
                 continue
+            row = normalize_strategy_record(row)
             row["_path"] = str(path)
             row["timeframe"] = canonical_timeframe(row.get("timeframe"))
             row["asset"] = str(row.get("asset") or "").upper()
@@ -1031,6 +1080,62 @@ def validate_strategy_alert(normalized: dict) -> tuple[bool, dict | None, str | 
     if str(strategy.get("status") or "") not in {"trial_candidate", "active_demo"}:
         return False, strategy, "strategy_not_active"
     return True, strategy, None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 6 / M2: explicit alert-schema validation at intake.                    #
+#                                                                              #
+# The schema is validated against the *normalized* alert (canonical snake_case #
+# keys, lowercased exchange/source, uppercased symbol) so a raw payload's      #
+# casing/aliasing (strategyId/ticker/action) never causes false rejections.    #
+# jsonschema is loaded lazily and cached; if it (or the schema file) is        #
+# unavailable we fail OPEN -- we never quarantine traffic we cannot evaluate.  #
+# Enforcement is gated by strategy_engine.enforce_alert_schema (default OFF).  #
+# --------------------------------------------------------------------------- #
+
+_ALERT_SCHEMA_VALIDATOR = None
+_ALERT_SCHEMA_LOAD_FAILED = False
+
+
+def _alert_schema_validator():
+    """Lazily build and cache the Draft 2020-12 validator for the alert schema.
+
+    Returns None (and disables enforcement) if jsonschema or the schema file is
+    unavailable -- import stays side-effect-free and enforcement fails open.
+    """
+    global _ALERT_SCHEMA_VALIDATOR, _ALERT_SCHEMA_LOAD_FAILED
+    if _ALERT_SCHEMA_VALIDATOR is not None:
+        return _ALERT_SCHEMA_VALIDATOR
+    if _ALERT_SCHEMA_LOAD_FAILED:
+        return None
+    try:
+        import jsonschema  # lazy: keep module import dependency-light
+
+        schema = json.loads(ALERT_SCHEMA_PATH.read_text(encoding="utf-8"))
+        _ALERT_SCHEMA_VALIDATOR = jsonschema.Draft202012Validator(schema)
+        return _ALERT_SCHEMA_VALIDATOR
+    except Exception as exc:  # fail open: cannot enforce what we cannot load
+        logging.warning("alert schema unavailable; schema enforcement disabled: %s", exc)
+        _ALERT_SCHEMA_LOAD_FAILED = True
+        return None
+
+
+def validate_alert_schema(normalized: dict) -> tuple[bool, str | None]:
+    """Validate a normalized alert against the TradingView alert JSON schema.
+
+    Returns (True, None) when valid or when the schema/jsonschema is unavailable
+    (fail open). On failure returns (False, "<path>: <message>") for the first
+    error in deterministic path order.
+    """
+    validator = _alert_schema_validator()
+    if validator is None:
+        return True, None
+    errors = sorted(validator.iter_errors(normalized), key=lambda e: list(e.path))
+    if not errors:
+        return True, None
+    first = errors[0]
+    loc = "/".join(str(p) for p in first.path) or "(root)"
+    return False, f"{loc}: {first.message}"
 
 
 def regime_from_acc(acc):
@@ -3248,6 +3353,11 @@ def build_strategy_execution_readiness(record: dict) -> dict:
     signal_identity = _signal_identity(normalized)
     client_order_id = stable_client_order_id(signal_identity, role="open")
     base_notional = float(strategy.get("budget_usd") or 0.0) * float(strategy.get("leverage") or 1.0)
+    planned_notional = float(dec_notional(base_notional))
+    # Exchange-agnostic instruction contract (Phase 6 / M3, ARCHITECTURE.md). ``td_mode``
+    # below is the OKX translation of this same value, so derive both from one expression.
+    margin_mode = strategy.get("margin_mode", execution_cfg.get("td_mode", "isolated"))
+    instrument = strategy_instrument(strategy)
     plan = {
         "mode": "strategy_file_live_order_enabled" if live_allowed else "strategy_file_trial_no_order",
         "live_execution_enabled": live_allowed,
@@ -3259,7 +3369,20 @@ def build_strategy_execution_readiness(record: dict) -> dict:
         "symbol": normalized.get("symbol"),
         "okx_inst_id": strategy.get("okx_inst_id"),
         "expected_leverage": strategy.get("leverage"),
-        "td_mode": strategy.get("margin_mode", execution_cfg.get("td_mode", "isolated")),
+        "td_mode": margin_mode,
+        # --- Exchange-agnostic instruction contract (Phase 6 / M3) ---
+        # THE wire contract going forward (ARCHITECTURE.md). The okx_inst_id / td_mode
+        # keys above stay present but are now adapter-derived translations of these:
+        # the CCXT adapter maps okx_inst_id<->symbol and tdMode<-margin_mode. Every value
+        # here is byte-identical to its OKX-named twin / execution_intent field, so orders
+        # and downstream readers are unchanged.
+        "instrument": instrument,
+        "strategy_id": strategy.get("strategy_id") or normalized.get("strategy_id"),
+        "asset": strategy.get("asset") or normalized.get("symbol"),
+        "target_side": direction,
+        "target_notional_usd": planned_notional,
+        "margin_mode": margin_mode,
+        "leverage": strategy.get("leverage"),
         "timeframe": normalized.get("timeframe"),
         "tv_time": normalized.get("tv_time"),
         "signal_side": normalized.get("side"),
@@ -3271,7 +3394,7 @@ def build_strategy_execution_readiness(record: dict) -> dict:
             "target_direction": direction,
             "actions": ["CLOSE_OPPOSITE_IF_ANY", f"OPEN_{direction.upper()}"],
             "base_notional_usd": float(strategy.get("budget_usd") or 0.0),
-            "planned_notional_usd": float(dec_notional(base_notional)),
+            "planned_notional_usd": planned_notional,
             "client_order_id": client_order_id,
         },
         "okx_fill": {
@@ -4119,6 +4242,33 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
         return 202, {"ok": True, "ignored": True, "reason": "non_tradingview_source", "normalized": normalized}
 
     received_at = received_at_override or now_iso()
+
+    # Phase 6 / M2: explicit alert-schema validation at intake. OBSERVE-ONLY by
+    # default -- gated behind strategy_engine.enforce_alert_schema (default OFF).
+    # When OFF, a schema-invalid alert is logged + counted but processed exactly
+    # as before (zero behavior change). When ON, it is routed to the EXISTING
+    # strategy-alert quarantine path and never processed.
+    schema_ok, schema_error = validate_alert_schema(normalized)
+    if not schema_ok:
+        ALERT_SCHEMA_METRICS["invalid"] += 1
+        if bool(STRATEGY_ENGINE.get("enforce_alert_schema", False)):
+            ALERT_SCHEMA_METRICS["quarantined"] += 1
+            reason = f"alert_schema_invalid:{schema_error}"
+            record = {
+                "received_at": received_at,
+                "mode": "strategy_alert_quarantine",
+                "ok": True,
+                "quarantined": True,
+                "reason": reason,
+                "payload": payload,
+                "normalized": normalized,
+                "strategy_config": None,
+            }
+            append_jsonl(STRATEGY_QUARANTINE_LEDGER, record)
+            append_jsonl(WEBHOOK_LEDGER, {"received_at": received_at, "payload": payload, "normalized": normalized, "quarantined": True, "reason": reason})
+            return 202, record
+        logging.warning("alert schema invalid (observe-only, processing anyway): %s", schema_error)
+
     strategy_ok, strategy_config, strategy_error = validate_strategy_alert(normalized)
     if not strategy_ok:
         record = {

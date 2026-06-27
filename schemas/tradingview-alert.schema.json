@@ -23,7 +23,7 @@
     "indicator": { "type": "string" },
     "symbol": {
       "type": "string",
-      "pattern": "^[A-Z0-9]+USDT$"
+      "pattern": "^[A-Z0-9]+(?:[-/][A-Z0-9]+)*$"
     },
     "timeframe": {
       "type": "string",
@@ -47,7 +47,7 @@
     },
     "exchange": {
       "type": "string",
-      "enum": ["okx"]
+      "enum": ["okx", "kucoin", "bybit", "hyperliquid"]
     },
     "source": {
       "type": "string",

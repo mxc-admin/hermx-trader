@@ -39,7 +39,8 @@
     "allow_strategy_alerts": true,
     "require_strategy_id": true,
     "quarantine_invalid_strategy_alerts": true,
-    "notes": "VPS demo profile for Duo Base Dev strategy-file alerts. Each strategy must also set okx_submit_orders=true before it can submit OKX sandbox orders."
+    "enforce_alert_schema": false,
+    "notes": "VPS demo profile for Duo Base Dev strategy-file alerts. Each strategy must also set okx_submit_orders=true before it can submit OKX sandbox orders. enforce_alert_schema defaults to false (observe-only): when false, alerts failing the tradingview-alert JSON schema are logged+counted but still processed as before; set true to quarantine schema-invalid alerts via the existing quarantine path."
   },
   "assets": {
     "SOLUSDT": {
