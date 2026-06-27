@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """Executor factory: select the right exchange adapter from config.
 
-The active venue is chosen by ``config["execution"]["exchange"]`` (e.g.
-"okx_demo", "kucoin_paper", "bybit_testnet"). The factory keeps a registry of
-known executor classes so adding a new exchange is a one-line registration — no
-changes to ``webhook_receiver`` are required.
+The active venue is chosen by ``config["execution"]["exchange"]``. Post P5-06/P5-07
+CCXT cutover, ``ccxt`` is the ONLY execution backend; the legacy okx_demo CLI
+adapter was removed. The factory keeps a registry of known executor classes so
+adding a new exchange is a one-line registration — no changes to
+``webhook_receiver`` are required.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 from .base import BaseExecutor
-from .okx_demo import OkxDemoExecutor
-from .kucoin_paper import KuCoinPaperExecutor
+
+try:
+    from .ccxt_adapter import CcxtExecutor
+except Exception:  # optional dependency or import-time guard
+    CcxtExecutor = None
 
 
 class ExecutorFactory:
@@ -20,13 +24,15 @@ class ExecutorFactory:
     # at runtime via ``register``.
     _registry: dict[str, type[BaseExecutor]] = {}
 
-    # Backward-compatibility aliases. Older configs used "okx"; map it to the
-    # demo adapter so existing deployments keep working unchanged.
+    # Backward-compatibility aliases. After the CCXT cutover every legacy OKX
+    # exchange key (including "okx_demo" itself) routes to the CCXT adapter so any
+    # existing config or alias keeps working unchanged on the single backend.
     _aliases: dict[str, str] = {
-        "okx": "okx_demo",
-        "okx_api": "okx_demo",
-        "okx_sandbox": "okx_demo",
-        "kucoin": "kucoin_paper",
+        "okx": "ccxt",
+        "okx_api": "ccxt",
+        "okx_sandbox": "ccxt",
+        "okx_demo": "ccxt",
+        "okx_ccxt": "ccxt",
     }
 
     @classmethod
@@ -41,7 +47,7 @@ class ExecutorFactory:
 
     @classmethod
     def resolve_key(cls, exchange: str | None) -> str:
-        key = str(exchange or "okx_demo").strip().lower()
+        key = str(exchange or "ccxt").strip().lower()
         return cls._aliases.get(key, key)
 
     @classmethod
@@ -63,5 +69,8 @@ class ExecutorFactory:
 
 
 # Register the built-in adapters. New venues are added here (one line each).
-ExecutorFactory.register(OkxDemoExecutor.key, OkxDemoExecutor)
-ExecutorFactory.register(KuCoinPaperExecutor.key, KuCoinPaperExecutor)
+# CcxtExecutor is the sole backend; if its optional ``ccxt`` import failed the
+# registry is empty and ExecutorFactory.available() == [] so the receiver fails
+# closed (never submits) rather than guessing a venue.
+if CcxtExecutor is not None:
+    ExecutorFactory.register(CcxtExecutor.key, CcxtExecutor)

@@ -27,7 +27,7 @@ import webhook_receiver as wr
 
 
 # ---------------------------------------------------------------------------
-# Normalized-shape builders (mirror src/okx_demo_executor.py normalize_* output).
+# Normalized-shape builders (mirror the venue-neutral query interface output).
 # ---------------------------------------------------------------------------
 
 def norm_order(state, *, cl_ord_id="cl-1", ord_id="ord-1", inst_id="XRP-USDT-SWAP", acc=0.0, avg=None):
@@ -230,27 +230,33 @@ def _armed_record(cl="mxc-xrpusdt-buy-abc0123456789de") -> dict:
     }
 
 
-def _fake_completed(returncode=0, stdout='{"mode": "submitted"}', stderr=""):
-    proc = mock.Mock()
-    proc.returncode = returncode
-    proc.stdout = stdout
-    proc.stderr = stderr
-    return proc
+def _submit_executor(*, ok=True, mode="submit_enabled"):
+    """Fake CCXT submit executor whose .execute returns a canned tentative outcome.
+    Distinct from the reconciliation `stub` (the read-only query executor)."""
+    fake = mock.Mock()
+    fake.execute = mock.Mock(return_value={
+        "ok": ok, "mode": mode, "exchange": "ccxt", "elapsed_ms": 5,
+        "fill_summary": {"status": "submitted", "order_id": "ord-1", "client_order_id": None},
+        "payload": {"symbol": "XRP/USDT:USDT"},
+    })
+    return fake
 
 
-def _force_submit(wr, monkeypatch, *, stub, run_result):
+def _force_submit(wr, monkeypatch, *, stub, submit_executor=None):
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "1")
     monkeypatch.setenv("HERMX_RECONCILE_ENABLED", "1")
+    # Submit goes through the CCXT executor (success => tentative FILLED); the
+    # post-submit reconciliation then queries the read-only `stub`.
     monkeypatch.setattr(wr, "_reconciliation_executor", lambda: stub)
-    monkeypatch.setattr(wr.subprocess, "run", lambda *a, **k: run_result)
+    monkeypatch.setattr(wr.ExecutorFactory, "create", lambda cfg, root: submit_executor or _submit_executor())
     return wr.execute_okx_if_enabled(_armed_record())
 
 
 def test_post_submit_reconcile_writes_terminal_transition(wr, monkeypatch):
     cl = "mxc-xrpusdt-buy-abc0123456789de"
     stub = StubExecutor(order=norm_order("filled", cl_ord_id=cl, acc=10.0, avg=0.5))
-    result = _force_submit(wr, monkeypatch, stub=stub, run_result=_fake_completed(0))
+    result = _force_submit(wr, monkeypatch, stub=stub)
 
     # Reconciliation enriched the execution result with a `reconcile` key.
     assert result["reconcile"]["state"] == wr.ORDER_STATE_FILLED
@@ -271,7 +277,7 @@ def test_post_submit_reconcile_mismatch_overrides_stdout_and_alerts(wr, monkeypa
     # stdout says success, but the EXCHANGE says canceled/zero-fill => REJECTED.
     cl = "mxc-xrpusdt-buy-abc0123456789de"
     stub = StubExecutor(order=norm_order("canceled", cl_ord_id=cl, acc=0.0))
-    result = _force_submit(wr, monkeypatch, stub=stub, run_result=_fake_completed(0))
+    result = _force_submit(wr, monkeypatch, stub=stub)
 
     assert result["reconcile"]["state"] == wr.ORDER_STATE_REJECTED
     records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
@@ -292,13 +298,13 @@ def test_reconcile_disabled_uses_stdout_outcome(wr, monkeypatch):
     monkeypatch.delenv("HERMX_RECONCILE_ENABLED", raising=False)
     exec_calls = []
     monkeypatch.setattr(wr, "_reconciliation_executor", lambda: exec_calls.append(1) or StubExecutor())
-    monkeypatch.setattr(wr.subprocess, "run", lambda *a, **k: _fake_completed(0))
+    monkeypatch.setattr(wr.ExecutorFactory, "create", lambda cfg, root: _submit_executor())
 
     result = wr.execute_okx_if_enabled(_armed_record())
     assert "reconcile" not in result
     assert exec_calls == []  # no reconciliation executor constructed
     records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
-    assert records[-1]["state"] == wr.ORDER_STATE_FILLED  # stdout-derived tentative
+    assert records[-1]["state"] == wr.ORDER_STATE_FILLED  # adapter-derived tentative
 
 
 # ---------------------------------------------------------------------------
@@ -380,10 +386,10 @@ def test_disabled_config_no_reconcile_no_journal(wr, monkeypatch):
         raise AssertionError("reconciliation executor must not be built on the disabled path")
 
     monkeypatch.setattr(wr, "_reconciliation_executor", boom)
-    with mock.patch.object(wr.subprocess, "run") as run_mock:
+    with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
         result = wr.execute_okx_if_enabled(_armed_record())
 
-    run_mock.assert_not_called()
+    create_mock.assert_not_called()
     assert result["mode"] == "not_submitted"
     assert "reconcile" not in result
     assert not wr.ORDER_JOURNAL_LEDGER.exists()

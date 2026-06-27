@@ -11,7 +11,7 @@ lines 37-38). Previously the readiness/execution writers referenced undefined
 OKX_*_LEDGER names and raised NameError silently. Here we drive real alerts all
 the way through the readiness builders + execute_okx_if_enabled and assert both
 ledgers got valid JSON lines with no exception -- with the kill switch ENGAGED
-so NO okx_demo_executor subprocess can ever run.
+so NO executor submit can ever run.
 
 test_ledger_constants.py is the static guard against reintroduction (:147);
 this is the dynamic, end-to-end proof.
@@ -35,10 +35,14 @@ def _read_jsonl(path):
 
 
 def _no_subprocess(monkeypatch, wr):
+    """Guard that NO submit is attempted while the kill switch is engaged. Post the
+    CCXT cutover the single submit call is ExecutorFactory.create(...).execute(); we
+    make even building the executor blow up so any submit attempt is caught."""
     def _boom(*args, **kwargs):  # pragma: no cover - must never be called
-        raise AssertionError("subprocess.run was invoked while kill switch engaged")
+        raise AssertionError("executor submit was attempted while kill switch engaged")
 
-    monkeypatch.setattr(wr.subprocess, "run", _boom)
+    if wr.ExecutorFactory is not None:
+        monkeypatch.setattr(wr.ExecutorFactory, "create", _boom)
 
 
 def test_strategy_alert_writes_both_ledgers_no_subprocess(wr, wr_root, monkeypatch):

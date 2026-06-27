@@ -187,7 +187,7 @@
             "entry_at": "2026-06-21T04:00:01Z",
             "entry_execution_price": 66300.0,
             "entry_fee_rate": 0.0005,
-            "entry_fee_usd": 1.55697,
+            "entry_fee_usd": 1.557,
             "entry_price": 66300.0,
             "entry_signal_side": "sell",
             "entry_tv_time": "2026-06-21T04:00:00Z",
@@ -197,7 +197,7 @@
             "notional_usd": 3113.94,
             "okx_last_price_at_entry": null,
             "okx_mark_price_at_entry": null,
-            "qty_units": 0.04696742081447964,
+            "qty_units": 0.04696742,
             "side": "short",
             "source_decision": "TRADE",
             "weight": 1.0
@@ -266,7 +266,7 @@
             "notional_usd": 10000.0,
             "okx_last_price_at_entry": null,
             "okx_mark_price_at_entry": null,
-            "qty_units": 0.15082956259426847,
+            "qty_units": 0.15082956,
             "side": "short",
             "source_decision": "TRADE",
             "weight": 1.0
@@ -329,7 +329,7 @@
             "notional_usd": 3000.0,
             "okx_last_price_at_entry": null,
             "okx_mark_price_at_entry": null,
-            "qty_units": 0.04524886877828054,
+            "qty_units": 0.04524887,
             "side": "short",
             "source_decision": "TRADE",
             "weight": 1.0

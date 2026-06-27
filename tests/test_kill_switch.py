@@ -35,23 +35,26 @@ def _armed_record() -> dict:
     }
 
 
-def _fake_completed(stdout: str = '{"mode": "test"}'):
-    proc = mock.Mock()
-    proc.returncode = 0
-    proc.stdout = stdout
-    proc.stderr = ""
-    return proc
+def _fake_executor():
+    """Stand-in CCXT submit executor: its .execute is the single submit call."""
+    fake = mock.Mock()
+    fake.execute = mock.Mock(return_value={
+        "ok": True, "mode": "submit_enabled", "exchange": "ccxt", "elapsed_ms": 5,
+        "fill_summary": {"status": "submitted", "order_id": "ord-1", "client_order_id": None},
+        "payload": {},
+    })
+    return fake
 
 
-def test_kill_switch_false_blocks_subprocess(monkeypatch):
-    """HERMX_SUBMIT_ENABLED=false => no OKX subprocess invocation at all."""
+def test_kill_switch_false_blocks_submit(monkeypatch):
+    """HERMX_SUBMIT_ENABLED=false => no executor submit at all."""
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "false")
 
-    with mock.patch.object(wr.subprocess, "run") as run_mock:
+    with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
         result = wr.execute_okx_if_enabled(_armed_record())
 
-    run_mock.assert_not_called()
+    create_mock.assert_not_called()
     assert result["mode"] == "not_submitted"
     assert "kill switch" in result["reason"].lower()
 
@@ -60,22 +63,23 @@ def test_kill_switch_falsey_variants_block(monkeypatch):
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
     for value in ("false", "0", "no", ""):
         monkeypatch.setenv("HERMX_SUBMIT_ENABLED", value)
-        with mock.patch.object(wr.subprocess, "run") as run_mock:
+        with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
             result = wr.execute_okx_if_enabled(_armed_record())
-        run_mock.assert_not_called()
+        create_mock.assert_not_called()
         assert result["mode"] == "not_submitted", f"value={value!r} should block"
 
 
 def test_kill_switch_unset_is_inert_armed_config_submits(monkeypatch):
-    """Positive control: with the switch unset and config armed, the subprocess
+    """Positive control: with the switch unset and config armed, the executor submit
     IS invoked -- proving it is the kill switch (not the config) that blocks above."""
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.delenv("HERMX_SUBMIT_ENABLED", raising=False)
 
-    with mock.patch.object(wr.subprocess, "run", return_value=_fake_completed()) as run_mock:
+    fake = _fake_executor()
+    with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):
         wr.execute_okx_if_enabled(_armed_record())
 
-    run_mock.assert_called_once()
+    fake.execute.assert_called_once()
 
 
 def test_submit_kill_switch_armed_helper(monkeypatch):

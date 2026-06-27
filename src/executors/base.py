@@ -128,6 +128,16 @@ class BaseExecutor(abc.ABC):
         """Aged-out order history, normalized. Defaults to empty."""
         return []
 
+    def get_order_history_raw(self, inst_ids: list[str] | None = None, limit: int = 100) -> list:
+        """Recent filled order history in the venue's raw row shape.
+
+        Unlike :meth:`get_order_history_archive` (venue-neutral normalized rows),
+        this returns rows keyed by the venue's native field names. It backs the
+        dashboard's close-row enrichment, which matches on raw OKX fields. Venues
+        without a raw-history path degrade to empty.
+        """
+        return []
+
     def get_positions(self, inst_id: str | None = None) -> list:
         """Open positions, normalized. Defaults to empty."""
         return []

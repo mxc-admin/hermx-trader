@@ -113,21 +113,29 @@ def _armed_record(cl: str = "mxc-xrpusdt-buy-abc0123456789de") -> dict:
     }
 
 
-def _fake_completed(returncode: int = 0, stdout: str = '{"mode": "submitted"}', stderr: str = ""):
-    proc = mock.Mock()
-    proc.returncode = returncode
-    proc.stdout = stdout
-    proc.stderr = stderr
-    return proc
+def _adapter_result(*, ok=True, mode="submit_enabled"):
+    """A normalized adapter result (BaseExecutor.normalized_result shape)."""
+    return {
+        "ok": ok,
+        "mode": mode,
+        "exchange": "ccxt",
+        "elapsed_ms": 5,
+        "fill_summary": {"status": "submitted", "order_id": "ord-1", "client_order_id": None},
+        "payload": {"symbol": "XRP/USDT:USDT"},
+    }
 
 
 # ---------------------------------------------------------------------------
-# (b) FORCED-submit: write-ahead ordering + outcome mapping.
+# (b) FORCED-submit: write-ahead ordering + outcome mapping, via the EXECUTOR seam.
+# Post-cutover the single submit call is executor.execute() (ExecutorFactory.create),
+# NOT a subprocess. The write-ahead guarantee is unchanged: PLANNED then SUBMITTED
+# are durably journalled BEFORE that submit call.
 # ---------------------------------------------------------------------------
 
-def _run_forced_submit(wr, monkeypatch, run_side_effect):
+def _run_forced_submit(wr, monkeypatch, adapter_fn):
     """Arm every gate, force submission, and capture the interleaving of order-journal
-    writes vs the subprocess.run invocation. Returns (events, result)."""
+    writes vs the executor.execute() invocation. ``adapter_fn`` returns the normalized
+    adapter result (or raises to simulate a submit exception). Returns (events, result)."""
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "1")
 
@@ -139,38 +147,42 @@ def _run_forced_submit(wr, monkeypatch, run_side_effect):
             events.append(("write", obj.get("state")))
         return orig_durable(path, obj)
 
-    def fake_run(*args, **kwargs):
-        events.append(("subprocess_run", None))
-        return run_side_effect()
+    def fake_execute(readiness):
+        events.append(("executor_execute", None))
+        return adapter_fn()
+
+    fake = mock.Mock()
+    fake.execute = fake_execute
 
     monkeypatch.setattr(wr, "append_jsonl_durable", spy_durable)
-    monkeypatch.setattr(wr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wr.ExecutorFactory, "create", lambda cfg, root: fake)
 
     result = wr.execute_okx_if_enabled(_armed_record())
     return events, result
 
 
 def test_write_ahead_planned_before_submit_success_fills(wr, monkeypatch):
-    events, result = _run_forced_submit(wr, monkeypatch, lambda: _fake_completed(0))
+    events, result = _run_forced_submit(wr, monkeypatch, lambda: _adapter_result(ok=True, mode="submit_enabled"))
 
-    # Write-ahead PROOF: PLANNED and SUBMITTED are both written BEFORE subprocess.run.
+    # Write-ahead PROOF: PLANNED and SUBMITTED are both written BEFORE executor.execute().
     assert events == [
         ("write", wr.ORDER_STATE_PLANNED),
         ("write", wr.ORDER_STATE_SUBMITTED),
-        ("subprocess_run", None),
+        ("executor_execute", None),
         ("write", wr.ORDER_STATE_FILLED),
     ]
     planned_idx = events.index(("write", wr.ORDER_STATE_PLANNED))
-    run_idx = events.index(("subprocess_run", None))
+    run_idx = events.index(("executor_execute", None))
     assert planned_idx < run_idx, "PLANNED must be durably written before submit"
 
     # Tentative FILLED is terminal => no open order remains.
     assert wr.load_open_orders() == []
-    assert result["mode"] == "submitted"
+    assert result["mode"] == "submit_enabled"
 
 
-def test_nonzero_returncode_rejects(wr, monkeypatch):
-    events, result = _run_forced_submit(wr, monkeypatch, lambda: _fake_completed(returncode=1, stderr="boom"))
+def test_explicit_reject_maps_rejected(wr, monkeypatch):
+    # Adapter mode submit_failed (explicit reject) => REJECTED.
+    events, result = _run_forced_submit(wr, monkeypatch, lambda: _adapter_result(ok=False, mode="submit_failed"))
 
     assert [e for e in events if e[0] == "write"] == [
         ("write", wr.ORDER_STATE_PLANNED),
@@ -182,10 +194,8 @@ def test_nonzero_returncode_rejects(wr, monkeypatch):
 
 
 def test_timeout_reaches_unknown_not_failure(wr, monkeypatch):
-    def raise_timeout():
-        raise wr.subprocess.TimeoutExpired(cmd="okx_demo_executor", timeout=45)
-
-    events, result = _run_forced_submit(wr, monkeypatch, raise_timeout)
+    # Adapter mode submit_timeout (ccxt client timeout) => UNKNOWN, not a failure.
+    events, result = _run_forced_submit(wr, monkeypatch, lambda: _adapter_result(ok=False, mode="submit_timeout"))
 
     assert [e for e in events if e[0] == "write"] == [
         ("write", wr.ORDER_STATE_PLANNED),
@@ -197,11 +207,29 @@ def test_timeout_reaches_unknown_not_failure(wr, monkeypatch):
     assert len(open_orders) == 1
     assert open_orders[0]["state"] == wr.ORDER_STATE_UNKNOWN
     assert open_orders[0]["cl_ord_id"] == "mxc-xrpusdt-buy-abc0123456789de"
+    assert result["mode"] == "submit_timeout"
+
+
+def test_submit_exception_reaches_unknown(wr, monkeypatch):
+    # A raised exception from executor.execute() => UNKNOWN (the order may have
+    # reached the venue); the journal records UNKNOWN, not a terminal failure.
+    def _boom():
+        raise RuntimeError("connection reset")
+
+    events, result = _run_forced_submit(wr, monkeypatch, _boom)
+
+    assert [e for e in events if e[0] == "write"] == [
+        ("write", wr.ORDER_STATE_PLANNED),
+        ("write", wr.ORDER_STATE_SUBMITTED),
+        ("write", wr.ORDER_STATE_UNKNOWN),
+    ]
     assert result["mode"] == "submit_exception"
+    open_orders = wr.load_open_orders()
+    assert len(open_orders) == 1 and open_orders[0]["state"] == wr.ORDER_STATE_UNKNOWN
 
 
 def test_planned_record_carries_minimal_intent(wr, monkeypatch):
-    _run_forced_submit(wr, monkeypatch, lambda: _fake_completed(0))
+    _run_forced_submit(wr, monkeypatch, lambda: _adapter_result(ok=True, mode="submit_enabled"))
     records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
     planned = next(r for r in records if r["state"] == wr.ORDER_STATE_PLANNED)
     assert planned["schema_version"] == wr.ORDER_JOURNAL_SCHEMA_VERSION
@@ -211,7 +239,7 @@ def test_planned_record_carries_minimal_intent(wr, monkeypatch):
         "symbol": "XRPUSDT",
         "side": "buy",
         "inst_id": "XRP-USDT-SWAP",
-        "planned_notional_usd": 1500.0,
+        "planned_notional_usd": "1500.000000",
         "policy": "weighted_v1",
     }
 
@@ -225,10 +253,10 @@ def test_disabled_gates_write_no_order_journal(wr, monkeypatch):
     monkeypatch.setattr(wr, "CONFIG", _disabled_config())
     monkeypatch.delenv("HERMX_SUBMIT_ENABLED", raising=False)  # unset => kill switch inert/armed
 
-    with mock.patch.object(wr.subprocess, "run") as run_mock:
+    with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
         result = wr.execute_okx_if_enabled(_armed_record())
 
-    run_mock.assert_not_called()
+    create_mock.assert_not_called()  # no executor built => no submit
     assert result["mode"] == "not_submitted"
     assert not wr.ORDER_JOURNAL_LEDGER.exists()
     assert wr.load_open_orders() == []
@@ -239,10 +267,10 @@ def test_kill_switch_branch_writes_no_order_journal(wr, monkeypatch):
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "false")
 
-    with mock.patch.object(wr.subprocess, "run") as run_mock:
+    with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
         result = wr.execute_okx_if_enabled(_armed_record())
 
-    run_mock.assert_not_called()
+    create_mock.assert_not_called()  # kill switch blocks before any executor build
     assert result["mode"] == "not_submitted"
     assert not wr.ORDER_JOURNAL_LEDGER.exists()
 

@@ -14,18 +14,94 @@ CONFIG_FILE = ROOT / "shadow-config.json"
 SYMBOLS = ["XRPUSDT", "SOLUSDT", "ETHUSDT", "BTCUSDT"]
 OKX_TICKER_CACHE = {"ts": 0.0, "data": {}}
 
+# Per-path stats for the most recent read of each ledger (Phase 4 / D1+D2). The
+# dashboard model snapshots this after building so corrupt/skipped lines are
+# *surfaced* rather than silently dropped.
+LEDGER_READ_STATS: dict[str, dict] = {}
 
-def read_jsonl(path: Path, limit: int = 200) -> list[dict]:
+# Hard ceiling on how far back we scan from EOF, so a pathological huge or
+# single-line ledger can never OOM the dashboard (D1).
+_TAIL_SCAN_CAP_BYTES = 16 * 1024 * 1024
+_TAIL_BLOCK_BYTES = 65536
+
+
+def _read_tail_lines(path: Path, limit: int):
+    """Return ``(lines, more)`` for roughly the last ``limit`` lines of ``path``.
+
+    Reads backwards from EOF in blocks so memory stays bounded regardless of
+    file size (D1). ``more`` is True when older content exists beyond what was
+    returned (file larger than the returned window or the scan cap was hit). A
+    partial leading line produced by stopping mid-line is dropped by the final
+    ``[-limit:]`` slice.
+    """
+    with open(path, "rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        pos = handle.tell()
+        data = b""
+        newlines = 0
+        capped = False
+        while pos > 0 and newlines <= limit:
+            if len(data) >= _TAIL_SCAN_CAP_BYTES:
+                capped = True
+                break
+            read_size = min(_TAIL_BLOCK_BYTES, pos)
+            pos -= read_size
+            handle.seek(pos)
+            data = handle.read(read_size) + data
+            newlines = data.count(b"\n")
+    text = data.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    more = capped or pos > 0 or len(lines) > limit
+    return lines[-limit:], more
+
+
+def read_jsonl_stats(path: Path, limit: int = 200):
+    """Bounded tail read returning ``(rows, stats)``.
+
+    Corrupt lines are *counted* (``stats["skipped"]``) instead of being hidden.
+    A single unparseable FINAL line is tolerated as a truncated in-flight append
+    (``stats["truncated_tail"]``) rather than counted as corruption, since the
+    writer fsyncs whole lines (Phase 1) and a torn tail is expected mid-write.
+    """
+    path = Path(path)
+    stats = {
+        "path": str(path),
+        "exists": False,
+        "read": 0,
+        "skipped": 0,
+        "truncated_tail": False,
+        "more": False,
+    }
     if not path.exists():
-        return []
+        LEDGER_READ_STATS[str(path)] = stats
+        return [], stats
+    stats["exists"] = True
+    try:
+        lines, more = _read_tail_lines(path, limit)
+    except Exception:
+        LEDGER_READ_STATS[str(path)] = stats
+        return [], stats
+    stats["more"] = more
     rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:]:
+    last = len(lines) - 1
+    for idx, line in enumerate(lines):
         if not line.strip():
             continue
         try:
             rows.append(json.loads(line))
         except Exception:
+            if idx == last:
+                stats["truncated_tail"] = True
+            else:
+                stats["skipped"] += 1
             continue
+    stats["read"] = len(rows)
+    LEDGER_READ_STATS[str(path)] = stats
+    return rows, stats
+
+
+def read_jsonl(path: Path, limit: int = 200) -> list[dict]:
+    rows, _stats = read_jsonl_stats(path, limit)
     return rows
 
 
@@ -57,16 +133,51 @@ def parse_dt(value):
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except Exception:
         return None
+    # Tolerate naive timestamps by assuming UTC (D6) — previously these returned
+    # an aware/naive mix that rendered as "-" and broke age/freshness math.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
-def colombia_time(iso):
+def display_tz():
+    """Resolve the dashboard display timezone (configurable, default UTC — D6).
+
+    ``HERMX_DASH_TZ`` (IANA name, e.g. ``America/Bogota``) takes precedence; then
+    ``HERMX_DASH_TZ_OFFSET_HOURS`` (signed float). Anything unset/invalid → UTC.
+    Read on each call so the timezone is configurable without reimport.
+    """
+    name = (os.environ.get("HERMX_DASH_TZ") or "").strip()
+    if name:
+        try:
+            from zoneinfo import ZoneInfo
+
+            return ZoneInfo(name)
+        except Exception:
+            pass
+    offset = (os.environ.get("HERMX_DASH_TZ_OFFSET_HOURS") or "").strip()
+    if offset:
+        try:
+            return timezone(timedelta(hours=float(offset)))
+        except Exception:
+            pass
+    return timezone.utc
+
+
+def display_time(iso):
     dt = parse_dt(iso)
     if not dt:
         return "-"
-    return dt.astimezone(timezone(timedelta(hours=-5))).strftime("%Y-%m-%d %H:%M")
+    return dt.astimezone(display_tz()).strftime("%Y-%m-%d %H:%M")
+
+
+# Backward-compatible shim: callers/imports still reference ``colombia_time`` but
+# the timezone is now configurable (default UTC) rather than hardcoded -05:00.
+def colombia_time(iso):
+    return display_time(iso)
 
 
 def asset_inst_id(config: dict, symbol: str) -> str:

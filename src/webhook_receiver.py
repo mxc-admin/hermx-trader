@@ -9,22 +9,41 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import hmac
 import json
 import logging
 import os
 import queue
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib import request as urllib_request
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
+
+from security.credentials import redact_secrets
 
 PORT = int(os.environ.get("SHADOW_PORT", "8891"))
-SECRET = os.environ.get("SHADOW_WEBHOOK_SECRET", "")
+SECRET = (os.environ.get("SHADOW_WEBHOOK_SECRET") or "").strip()
+HERMX_REQUIRE_HMAC = (os.environ.get("HERMX_REQUIRE_HMAC") or "false").strip().lower() in {"1", "true", "yes"}
+HERMX_WEBHOOK_HMAC_KEY = (os.environ.get("HERMX_WEBHOOK_HMAC_KEY") or "").strip()
+HERMX_REPLAY_WINDOW_SECONDS = float(os.environ.get("HERMX_REPLAY_WINDOW_SECONDS", "300") or "300")
+HERMX_MAX_BODY_BYTES = int(os.environ.get("HERMX_MAX_BODY_BYTES", "262144") or "262144")
+HERMX_RATE_LIMIT_WINDOW_SECONDS = float(os.environ.get("HERMX_RATE_LIMIT_WINDOW_SECONDS", "60") or "60")
+HERMX_RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("HERMX_RATE_LIMIT_MAX_REQUESTS", "120") or "120")
+HERMX_QUEUE_MAXSIZE = int(os.environ.get("HERMX_QUEUE_MAXSIZE", "200") or "200")
+HERMX_SUBMIT_TIMEOUT_SECONDS = float(os.environ.get("HERMX_SUBMIT_TIMEOUT_SECONDS", "45") or "45")
+HERMX_WORKER_POOL_SIZE = int(os.environ.get("HERMX_WORKER_POOL_SIZE", "1") or "1")
+HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS = float(os.environ.get("HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS", "86400") or "86400")
+HERMX_WATCHDOG_ENABLED = (os.environ.get("HERMX_WATCHDOG_ENABLED") or "true").strip().lower() not in {"0", "false", "no", ""}
+HERMX_WATCHDOG_STALE_SECONDS = float(os.environ.get("HERMX_WATCHDOG_STALE_SECONDS", "120") or "120")
+HERMX_QUEUE_LAG_SLO_SECONDS = float(os.environ.get("HERMX_QUEUE_LAG_SLO_SECONDS", "30") or "30")
 ROOT = Path(os.environ.get("SHADOW_ROOT", Path(__file__).resolve().parents[1]))
 LOG_DIR = ROOT / "logs"
 LATEST_FILE = ROOT / "latest.json"
@@ -123,7 +142,8 @@ RECONCILE_HISTORY_LIMIT = 100
 UNKNOWN_RESOLVER_INTERVAL_SECONDS = float(os.environ.get("HERMX_UNKNOWN_RESOLVER_INTERVAL_SECONDS", "30") or "30")
 UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS = float(os.environ.get("HERMX_UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS", "900") or "900")
 UNKNOWN_RESOLVER_MAX_ORDERS_PER_TICK = int(os.environ.get("HERMX_UNKNOWN_RESOLVER_MAX_ORDERS_PER_TICK", "50") or "50")
-# Queue saturation signal is alert-only in this phase (no request rejection yet).
+# Queue saturation signaling threshold for early warning; hard rejection now uses
+# PROCESS_QUEUE.maxsize and returns 503 when full.
 QUEUE_SATURATION_ALERT_DEPTH = int(os.environ.get("HERMX_QUEUE_SATURATION_ALERT_DEPTH", "100") or "100")
 # Raw OKX order states that mean "the order genuinely exists on the venue". Anything
 # else returned by the query layer (not_found / error / not_implemented / unknown /
@@ -135,6 +155,7 @@ _PRESENT_ORDER_STATES = frozenset({"live", "partially_filled", "filled", "cancel
 RECONCILE_STARTUP_COMPLETE = False
 RECONCILE_STARTUP_AT: "str | None" = None
 SIGNAL_STATE_FILE = ROOT / "seen-signals.json"
+SIGNAL_DEDUPE_LEDGER = LOG_DIR / "seen-signals.jsonl"
 DUPLICATE_LEDGER = LOG_DIR / "shadow-duplicates.jsonl"
 TAB_HEALTH_LEDGER = LOG_DIR / "tab-health.jsonl"
 CONFIG_FILE = ROOT / "shadow-config.json"
@@ -172,9 +193,11 @@ def load_shadow_config() -> dict:
         "execution": {
             "enabled": False,
             "mode": "dry_run",
-            # Exchange key understood by ExecutorFactory. "okx" is accepted as a
-            # backward-compat alias for "okx_demo".
-            "exchange": "okx_demo",
+            # Exchange key understood by ExecutorFactory. Post CCXT cutover "ccxt"
+            # is the sole backend; legacy okx_* keys are aliased to it.
+            "exchange": "ccxt",
+            "ccxt_exchange": "okx",
+            "ccxt_default_type": "swap",
             "execution_policy": "duo_raw",
             "shadow_policy": "duo_regime_rsi_30m",
             "route": "okx_api",
@@ -225,28 +248,10 @@ PAPER_FUNDING_ENABLED = bool(CONFIG.get("funding", {}).get("enabled", False))
 PAPER_DEFAULT_FUNDING_RATE = float(CONFIG.get("funding", {}).get("default_rate", 0.0))
 
 
-def canonical_timeframe(value) -> str:
-    text = str(value or "").strip().lower().replace(" ", "")
-    aliases = {
-        "30": "30m",
-        "30min": "30m",
-        "30mins": "30m",
-        "30minute": "30m",
-        "30minutes": "30m",
-        "60": "1h",
-        "1hr": "1h",
-        "1hour": "1h",
-        "120": "2h",
-        "2hr": "2h",
-        "2hour": "2h",
-        "180": "3h",
-        "3hr": "3h",
-        "3hour": "3h",
-        "240": "4h",
-        "4hr": "4h",
-        "4hour": "4h",
-    }
-    return aliases.get(text, text)
+# canonical_timeframe lives in the shared module so the receiver and the
+# dashboard can never drift (Phase 4 / D8). Re-exported here so existing
+# references (`canonical_timeframe(...)`) and importers keep working unchanged.
+from hermx_shared import canonical_timeframe  # noqa: E402,F401
 
 
 def load_strategy_files() -> dict:
@@ -271,7 +276,25 @@ def load_strategy_files() -> dict:
 STRATEGIES = load_strategy_files()
 
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-PROCESS_QUEUE: queue.Queue[tuple[dict, str]] = queue.Queue()
+PROCESS_QUEUE: queue.Queue[tuple] = queue.Queue(maxsize=max(1, HERMX_QUEUE_MAXSIZE))
+_RATE_LIMIT_LOCK = threading.Lock()
+_RATE_LIMIT_BUCKETS: dict[str, list[float]] = {}
+_STATE_WRITE_LOCK = threading.RLock()
+_SIGNAL_DEDUPE_LOCK = threading.Lock()
+_SIGNAL_DEDUPE_INDEX: dict[str, dict] = {"signals": {}, "keys": {}, "loaded": False}
+_SYMBOL_LOCKS: dict[str, threading.Lock] = {}
+_SYMBOL_LOCKS_LOCK = threading.Lock()
+_SYMBOL_TICKET_LOCK = threading.Lock()
+_SYMBOL_TICKET_TURN = threading.Condition()
+_SYMBOL_TICKET_NEXT: dict[str, int] = {}
+_SYMBOL_TICKET_RUN: dict[str, int] = {}
+_WORKER_HEARTBEATS: dict[str, float] = {}
+_RESOLVER_HEARTBEAT: float | None = None
+_WATCHDOG_LOCK = threading.Lock()
+_WATCHDOG_SUBMISSION_PAUSED = False
+_WATCHDOG_REASON = ""
+_WATCHDOG_LAST_ALERTS: dict[str, float] = {}
+_WORKER_NAMES: list[str] = []
 
 logging.basicConfig(
     level=logging.INFO,
@@ -298,6 +321,12 @@ try:
 except Exception as exc:  # fail closed: execution simply stays disabled
     ExecutorFactory = None
     logging.warning("Executor factory unavailable: %s", exc)
+
+try:
+    from execution import ExecutionService
+except Exception as exc:  # fail closed: execution simply stays disabled
+    ExecutionService = None
+    logging.warning("ExecutionService unavailable: %s", exc)
 
 ALLOWED_SYMBOLS = {symbol for symbol, cfg in CONFIG.get("assets", {}).items() if cfg.get("enabled", True)}
 ALLOWED_SIDES = {"buy", "sell"}
@@ -330,6 +359,246 @@ def parse_tv_time(value) -> datetime | None:
         return None
 
 
+def webhook_auth_config_healthy() -> bool:
+    if not SECRET:
+        return False
+    if HERMX_REQUIRE_HMAC and not HERMX_WEBHOOK_HMAC_KEY:
+        return False
+    return True
+
+
+def env_file_permissions_healthy(path: Path | None = None) -> bool:
+    target = path or (ROOT / ".env")
+    if not target.exists():
+        return True
+    try:
+        mode = stat.S_IMODE(target.stat().st_mode)
+    except OSError:
+        return False
+    return (mode & 0o077) == 0
+
+
+def _client_ip(handler: BaseHTTPRequestHandler) -> str:
+    forwarded = (handler.headers.get("CF-Connecting-IP") or "").strip()
+    if forwarded:
+        return forwarded
+    xff = (handler.headers.get("X-Forwarded-For") or "").strip()
+    if xff:
+        return xff.split(",", 1)[0].strip()
+    if getattr(handler, "client_address", None):
+        return str(handler.client_address[0])
+    return "unknown"
+
+
+def _symbol_lock(symbol: str | None) -> threading.Lock:
+    key = str(symbol or "").strip().upper() or "_UNKNOWN"
+    with _SYMBOL_LOCKS_LOCK:
+        lock = _SYMBOL_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _SYMBOL_LOCKS[key] = lock
+        return lock
+
+
+def _payload_symbol(payload: dict | None) -> str:
+    if not isinstance(payload, dict):
+        return "_UNKNOWN"
+    symbol = payload.get("symbol") or payload.get("asset") or payload.get("ticker")
+    return str(symbol or "").strip().upper() or "_UNKNOWN"
+
+
+def _reserve_symbol_ticket(symbol: str | None) -> tuple[str, int]:
+    key = str(symbol or "").strip().upper() or "_UNKNOWN"
+    with _SYMBOL_TICKET_LOCK:
+        ticket = int(_SYMBOL_TICKET_NEXT.get(key) or 0)
+        _SYMBOL_TICKET_NEXT[key] = ticket + 1
+        _SYMBOL_TICKET_RUN.setdefault(key, 0)
+    return key, ticket
+
+
+def _queue_work_item(payload: dict, intake_received_at: str) -> tuple[dict, str, str, int]:
+    symbol, ticket = _reserve_symbol_ticket(_payload_symbol(payload))
+    return payload, intake_received_at, symbol, ticket
+
+
+def _symbol_ticket_is_turn(symbol: str, ticket: int) -> bool:
+    with _SYMBOL_TICKET_TURN:
+        return int(_SYMBOL_TICKET_RUN.get(symbol) or 0) == int(ticket)
+
+
+def _advance_symbol_ticket_turn(symbol: str, ticket: int) -> None:
+    with _SYMBOL_TICKET_TURN:
+        current = int(_SYMBOL_TICKET_RUN.get(symbol) or 0)
+        if current <= int(ticket):
+            _SYMBOL_TICKET_RUN[symbol] = int(ticket) + 1
+        _SYMBOL_TICKET_TURN.notify_all()
+
+
+def _set_worker_heartbeat(name: str) -> None:
+    _WORKER_HEARTBEATS[name] = time.time()
+
+
+def _set_resolver_heartbeat() -> None:
+    global _RESOLVER_HEARTBEAT
+    _RESOLVER_HEARTBEAT = time.time()
+
+
+def _watchdog_submission_state() -> tuple[bool, str]:
+    with _WATCHDOG_LOCK:
+        return (not _WATCHDOG_SUBMISSION_PAUSED), _WATCHDOG_REASON
+
+
+def _set_watchdog_submission_paused(paused: bool, reason: str) -> None:
+    global _WATCHDOG_SUBMISSION_PAUSED, _WATCHDOG_REASON
+    with _WATCHDOG_LOCK:
+        _WATCHDOG_SUBMISSION_PAUSED = bool(paused)
+        _WATCHDOG_REASON = str(reason or "")
+
+
+def _maybe_watchdog_alert(kind: str, payload: dict, *, severity: str = "error", cooldown_s: float = 60.0) -> None:
+    now = time.time()
+    last = float(_WATCHDOG_LAST_ALERTS.get(kind) or 0.0)
+    if now - last < max(1.0, cooldown_s):
+        return
+    _WATCHDOG_LAST_ALERTS[kind] = now
+    emit_operator_alert(kind, payload, severity=severity)
+
+
+def _queue_oldest_age_seconds() -> float:
+    try:
+        with PROCESS_QUEUE.mutex:
+            if not PROCESS_QUEUE.queue:
+                return 0.0
+            oldest = PROCESS_QUEUE.queue[0]
+        if not isinstance(oldest, tuple) or len(oldest) < 2:
+            return 0.0
+        enq_dt = parse_tv_time(oldest[1])
+        if enq_dt is None:
+            return 0.0
+        return max(0.0, (datetime.now(timezone.utc) - enq_dt).total_seconds())
+    except Exception:
+        return 0.0
+
+
+def liveness_watchdog_loop(stop_event: "threading.Event | None" = None, sleep=time.sleep) -> None:
+    if not HERMX_WATCHDOG_ENABLED:
+        return
+    interval = max(1.0, min(10.0, HERMX_WATCHDOG_STALE_SECONDS / 4.0))
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            return
+        now = time.time()
+        stale_seconds = max(5.0, HERMX_WATCHDOG_STALE_SECONDS)
+        stale_workers = [name for name in _WORKER_NAMES if (now - float(_WORKER_HEARTBEATS.get(name) or 0.0)) > stale_seconds]
+        resolver_stale = unknown_resolver_enabled() and _RESOLVER_HEARTBEAT is not None and (now - _RESOLVER_HEARTBEAT) > stale_seconds
+        oldest_lag_s = _queue_oldest_age_seconds()
+        lag_breached = oldest_lag_s > max(1.0, HERMX_QUEUE_LAG_SLO_SECONDS)
+        degraded = bool(stale_workers or resolver_stale or lag_breached)
+        if degraded:
+            reason = "watchdog_degraded"
+            details = {
+                "stale_workers": stale_workers,
+                "resolver_stale": bool(resolver_stale),
+                "oldest_queue_lag_s": round(oldest_lag_s, 3),
+                "queue_lag_slo_s": HERMX_QUEUE_LAG_SLO_SECONDS,
+                "stale_threshold_s": stale_seconds,
+            }
+            _set_watchdog_submission_paused(True, reason)
+            _maybe_watchdog_alert("WATCHDOG_DEGRADED", details, severity="error", cooldown_s=30.0)
+        else:
+            was_ok, _ = _watchdog_submission_state()
+            if not was_ok:
+                _set_watchdog_submission_paused(False, "")
+                _maybe_watchdog_alert("WATCHDOG_RECOVERED", {"recovered": True}, severity="info", cooldown_s=30.0)
+        if stop_event is not None:
+            if stop_event.wait(interval):
+                return
+        else:
+            sleep(interval)
+
+
+def _rate_limit_key(handler: BaseHTTPRequestHandler) -> str:
+    key_id = (handler.headers.get("X-Webhook-Key-Id") or "").strip()
+    if key_id:
+        return f"key:{key_id}"
+    return f"ip:{_client_ip(handler)}"
+
+
+def rate_limit_allow(source_key: str, now_seconds: float | None = None) -> tuple[bool, dict]:
+    now = time.time() if now_seconds is None else float(now_seconds)
+    window = max(1.0, HERMX_RATE_LIMIT_WINDOW_SECONDS)
+    limit = max(1, HERMX_RATE_LIMIT_MAX_REQUESTS)
+    with _RATE_LIMIT_LOCK:
+        events = _RATE_LIMIT_BUCKETS.get(source_key, [])
+        events = [ts for ts in events if now - ts <= window]
+        allowed = len(events) < limit
+        if allowed:
+            events.append(now)
+        _RATE_LIMIT_BUCKETS[source_key] = events
+        return allowed, {
+            "source_key": source_key,
+            "window_seconds": window,
+            "limit": limit,
+            "count": len(events),
+        }
+
+
+def _parse_replay_timestamp(value: str) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        dt = parse_tv_time(text)
+        if dt is None:
+            return None
+        return dt.timestamp()
+
+
+def compute_webhook_hmac(timestamp: str, body: bytes, key: str) -> str:
+    return hmac.new(key.encode("utf-8"), timestamp.encode("utf-8") + body, hashlib.sha256).hexdigest()
+
+
+def verify_webhook_hmac(headers, body: bytes, now_seconds: float | None = None) -> tuple[bool, str]:
+    if not HERMX_REQUIRE_HMAC:
+        return True, "hmac_not_required"
+    if not HERMX_WEBHOOK_HMAC_KEY:
+        return False, "hmac_key_missing"
+    timestamp = (headers.get("X-Webhook-Timestamp") or "").strip()
+    signature = (headers.get("X-Webhook-Signature") or "").strip()
+    if not timestamp or not signature:
+        return False, "hmac_header_missing"
+    ts_value = _parse_replay_timestamp(timestamp)
+    if ts_value is None:
+        return False, "hmac_timestamp_invalid"
+    now = time.time() if now_seconds is None else float(now_seconds)
+    if abs(now - ts_value) > max(1.0, HERMX_REPLAY_WINDOW_SECONDS):
+        return False, "hmac_replay_window"
+    provided = signature.split("=", 1)[1] if signature.lower().startswith("sha256=") else signature
+    expected = compute_webhook_hmac(timestamp, body, HERMX_WEBHOOK_HMAC_KEY)
+    if not hmac.compare_digest(provided, expected):
+        return False, "hmac_mismatch"
+    return True, "ok"
+
+
+def authenticate_webhook_request(handler: BaseHTTPRequestHandler, body: bytes) -> tuple[bool, int, str]:
+    client_ip = _client_ip(handler)
+    path = urlparse(handler.path).path
+    if not SECRET:
+        emit_auth_failure_alert(path, client_ip)
+        return False, 401, "missing_webhook_secret"
+    provided = (handler.headers.get("X-Webhook-Secret") or "").strip()
+    if not hmac.compare_digest(provided, SECRET):
+        emit_auth_failure_alert(path, client_ip)
+        return False, 401, "forbidden"
+    ok, reason = verify_webhook_hmac(handler.headers, body)
+    if not ok:
+        emit_auth_failure_alert(path, client_ip)
+        return False, 401, reason
+    return True, 200, "ok"
+
+
 def latency_info(tv_time, received_at: str) -> dict:
     received_dt = parse_tv_time(received_at) or datetime.now(timezone.utc)
     tv_dt = parse_tv_time(tv_time)
@@ -347,6 +616,64 @@ def dedupe_key(normalized: dict) -> str:
     return "|".join(str(normalized.get(k, "")) for k in ("strategy_id", "symbol", "side", "timeframe", "tv_time"))
 
 
+def _signal_identity(normalized: dict) -> str:
+    return "|".join(
+        str(normalized.get(k, ""))
+        for k in ("strategy_id", "symbol", "side", "timeframe", "tv_time", "signal_id")
+    )
+
+
+def stable_client_order_id(identity: str, role: str = "base") -> str:
+    digest = hashlib.sha256(f"{identity}|{role}".encode("utf-8")).hexdigest()
+    return f"mxc{digest}"[:32]
+
+
+def _dedupe_window_seconds() -> float:
+    return max(1.0, HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS, HERMX_REPLAY_WINDOW_SECONDS)
+
+
+def _epoch_from_iso(ts: str | None) -> float | None:
+    dt = parse_tv_time(ts)
+    if dt is None:
+        return None
+    return dt.timestamp()
+
+
+def _load_signal_dedupe_index(now_seconds: float | None = None) -> None:
+    if _SIGNAL_DEDUPE_INDEX.get("loaded"):
+        return
+    now = time.time() if now_seconds is None else float(now_seconds)
+    cutoff = now - _dedupe_window_seconds()
+    signals: dict[str, dict] = {}
+    keys: dict[str, dict] = {}
+    for rec in read_jsonl_tolerant(SIGNAL_DEDUPE_LEDGER):
+        if not isinstance(rec, dict):
+            continue
+        first_seen_at = str(rec.get("first_seen_at") or rec.get("ts") or "")
+        first_seen_epoch = rec.get("first_seen_epoch")
+        if not isinstance(first_seen_epoch, (int, float)):
+            first_seen_epoch = _epoch_from_iso(first_seen_at)
+        if first_seen_epoch is None or first_seen_epoch < cutoff:
+            continue
+        entry = {
+            "first_seen_at": first_seen_at,
+            "first_seen_epoch": float(first_seen_epoch),
+            "signal_id": str(rec.get("signal_id") or ""),
+            "dedupe_key": str(rec.get("dedupe_key") or ""),
+            "symbol": rec.get("symbol"),
+            "side": rec.get("side"),
+            "timeframe": rec.get("timeframe"),
+            "tv_time": rec.get("tv_time"),
+        }
+        if entry["signal_id"]:
+            signals[entry["signal_id"]] = entry
+        if entry["dedupe_key"]:
+            keys[entry["dedupe_key"]] = entry
+    _SIGNAL_DEDUPE_INDEX["signals"] = signals
+    _SIGNAL_DEDUPE_INDEX["keys"] = keys
+    _SIGNAL_DEDUPE_INDEX["loaded"] = True
+
+
 def load_signal_state() -> dict:
     if not SIGNAL_STATE_FILE.exists():
         return {"version": 1, "signals": {}, "keys": {}}
@@ -360,43 +687,79 @@ def load_signal_state() -> dict:
 
 
 def save_signal_state(state: dict) -> None:
-    # Keep the file bounded; 5000 recent signals is plenty for shadow alerts.
-    for bucket in ("signals", "keys"):
-        items = list((state.get(bucket) or {}).items())[-5000:]
-        state[bucket] = dict(items)
-    tmp = SIGNAL_STATE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(SIGNAL_STATE_FILE)
+    with _SIGNAL_DEDUPE_LOCK:
+        fd, tmp_path = tempfile.mkstemp(prefix=f"{SIGNAL_STATE_FILE.name}.", suffix=".tmp", dir=str(SIGNAL_STATE_FILE.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(state, indent=2, ensure_ascii=False))
+                f.flush()
+                os.fsync(f.fileno())
+            Path(tmp_path).replace(SIGNAL_STATE_FILE)
+            _fsync_dir(SIGNAL_STATE_FILE.parent)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
 
 def check_and_mark_signal(normalized: dict, received_at: str) -> tuple[bool, dict]:
-    state = load_signal_state()
     sid = str(normalized.get("signal_id") or "")
     key = dedupe_key(normalized)
-    existing = None
-    duplicate_by = None
-    if sid and sid in state.get("signals", {}):
-        existing = state["signals"][sid]
-        duplicate_by = "signal_id"
-    elif key in state.get("keys", {}):
-        existing = state["keys"][key]
-        duplicate_by = "symbol_side_timeframe_tv_time"
-    meta = {
-        "signal_id": sid,
-        "dedupe_key": key,
-        "duplicate_by": duplicate_by,
-        "first_seen_at": (existing or {}).get("first_seen_at"),
-    }
-    if existing:
-        return True, meta
-    entry = {"first_seen_at": received_at, "signal_id": sid, "dedupe_key": key, "symbol": normalized.get("symbol"), "side": normalized.get("side"), "timeframe": normalized.get("timeframe"), "tv_time": normalized.get("tv_time")}
-    if sid:
-        state.setdefault("signals", {})[sid] = entry
-    state.setdefault("keys", {})[key] = entry
-    state["updated_at"] = received_at
-    save_signal_state(state)
-    meta["first_seen_at"] = received_at
-    return False, meta
+    received_epoch = _epoch_from_iso(received_at) or time.time()
+    cutoff = received_epoch - _dedupe_window_seconds()
+    with _SIGNAL_DEDUPE_LOCK:
+        _load_signal_dedupe_index(now_seconds=received_epoch)
+        signals = _SIGNAL_DEDUPE_INDEX.setdefault("signals", {})
+        keys = _SIGNAL_DEDUPE_INDEX.setdefault("keys", {})
+        for bucket in (signals, keys):
+            stale_keys = [k for k, v in bucket.items() if float(v.get("first_seen_epoch") or 0.0) < cutoff]
+            for stale in stale_keys:
+                bucket.pop(stale, None)
+
+        existing = None
+        duplicate_by = None
+        if sid and sid in signals:
+            existing = signals[sid]
+            duplicate_by = "signal_id"
+        elif key in keys:
+            existing = keys[key]
+            duplicate_by = "symbol_side_timeframe_tv_time"
+
+        meta = {
+            "signal_id": sid,
+            "dedupe_key": key,
+            "duplicate_by": duplicate_by,
+            "first_seen_at": (existing or {}).get("first_seen_at"),
+            "window_seconds": _dedupe_window_seconds(),
+        }
+        if existing:
+            return True, meta
+
+        entry = {
+            "first_seen_at": received_at,
+            "first_seen_epoch": received_epoch,
+            "signal_id": sid,
+            "dedupe_key": key,
+            "symbol": normalized.get("symbol"),
+            "side": normalized.get("side"),
+            "timeframe": normalized.get("timeframe"),
+            "tv_time": normalized.get("tv_time"),
+        }
+        if sid:
+            signals[sid] = entry
+        keys[key] = entry
+        append_jsonl(
+            SIGNAL_DEDUPE_LEDGER,
+            {
+                "ts": received_at,
+                "kind": "signal_dedupe",
+                **entry,
+            },
+        )
+        meta["first_seen_at"] = received_at
+        return False, meta
 
 
 def append_jsonl(path: Path, obj: dict) -> None:
@@ -1788,20 +2151,21 @@ def save_paper_state(state: dict) -> None:
     # then atomic-rename. Best-effort fsync of the directory so the rename itself
     # is durable. Content is byte-identical to the previous writer (indent=2, no
     # trailing newline) so the legacy golden snapshot is unchanged.
-    tmp = PAPER_STATE_FILE.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        f.write(json.dumps(state, indent=2, ensure_ascii=False))
-        f.flush()
-        os.fsync(f.fileno())
-    tmp.replace(PAPER_STATE_FILE)
-    try:
-        dir_fd = os.open(str(PAPER_STATE_FILE.parent), os.O_RDONLY)
+    with _STATE_WRITE_LOCK:
+        fd, tmp_path = tempfile.mkstemp(prefix=f"{PAPER_STATE_FILE.name}.", suffix=".tmp", dir=str(PAPER_STATE_FILE.parent))
         try:
-            os.fsync(dir_fd)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(state, indent=2, ensure_ascii=False))
+                f.flush()
+                os.fsync(f.fileno())
+            Path(tmp_path).replace(PAPER_STATE_FILE)
+            _fsync_dir(PAPER_STATE_FILE.parent)
         finally:
-            os.close(dir_fd)
-    except (OSError, AttributeError):
-        pass
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
 def default_control_state() -> dict:
     return {
@@ -1823,9 +2187,21 @@ def default_control_state() -> dict:
 
 
 def save_control_state(state: dict) -> None:
-    tmp = CONTROL_STATE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(CONTROL_STATE_FILE)
+    with _STATE_WRITE_LOCK:
+        fd, tmp_path = tempfile.mkstemp(prefix=f"{CONTROL_STATE_FILE.name}.", suffix=".tmp", dir=str(CONTROL_STATE_FILE.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(state, indent=2, ensure_ascii=False))
+                f.flush()
+                os.fsync(f.fileno())
+            Path(tmp_path).replace(CONTROL_STATE_FILE)
+            _fsync_dir(CONTROL_STATE_FILE.parent)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
 
 def load_control_state() -> dict:
@@ -1898,13 +2274,13 @@ def asset_leverage(symbol: str) -> float:
 def refresh_compound_stats(ps: dict) -> None:
     equity = ps.get("equity") or {}
     initial = ps.get("initial_equity") or {}
-    total_equity = sum(float(v or 0.0) for v in equity.values())
-    total_initial = sum(float(v or 0.0) for v in initial.values())
+    total_equity = sum((D(v or 0.0) for v in equity.values()), D("0"))
+    total_initial = sum((D(v or 0.0) for v in initial.values()), D("0"))
     stats = ps.setdefault("stats", empty_policy_stats())
-    stats["current_equity_usd"] = round(total_equity, 4)
-    stats["initial_equity_usd"] = round(total_initial, 4)
-    stats["equity_change_usd"] = round(total_equity - total_initial, 4)
-    stats["equity_change_pct"] = round(((total_equity / total_initial) - 1.0) * 100.0, 6) if total_initial else 0.0
+    stats["current_equity_usd"] = float(dec_usd(total_equity))
+    stats["initial_equity_usd"] = float(dec_usd(total_initial))
+    stats["equity_change_usd"] = float(dec_usd(total_equity - total_initial))
+    stats["equity_change_pct"] = float(dec_pct(((total_equity / total_initial) - D("1")) * D("100"))) if total_initial != 0 else 0.0
 
 
 def empty_policy_stats() -> dict:
@@ -1929,12 +2305,161 @@ def side_to_position(side: str) -> str:
     return "long" if side == "buy" else "short"
 
 
+def D(value, default: str = "0") -> Decimal:
+    if isinstance(value, Decimal):
+        return value
+    try:
+        if value in (None, ""):
+            return Decimal(default)
+        return Decimal(str(value))
+    except Exception:
+        return Decimal(default)
+
+
+def dec_usd(value) -> Decimal:
+    return D(value).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
+
+def dec_notional(value) -> Decimal:
+    return D(value).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+
+
+def dec_pct(value) -> Decimal:
+    return D(value).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+
+
+def dec_units(value) -> Decimal:
+    return D(value).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_UP)
+
+
+def dec_text(value: Decimal | str | float | int) -> str:
+    return format(D(value), "f")
+
+
+def usd_text(value) -> str:
+    return dec_text(dec_usd(value))
+
+
+def notional_text(value) -> str:
+    return dec_text(dec_notional(value))
+
+
+def pct_text(value) -> str:
+    return dec_text(dec_pct(value))
+
+
+def units_text(value) -> str:
+    return dec_text(dec_units(value))
+
+
+_USD_KEYS = {
+    "base_notional_usd",
+    "notional_usd",
+    "entry_fee_usd",
+    "exit_fee_usd",
+    "total_fees_usd",
+    "funding_usd",
+    "gross_pnl_usd",
+    "net_pnl_usd",
+    "pnl_usd",
+    "realized_pnl_usd",
+    "realized_net_pnl_usd",
+    "realized_gross_pnl_usd",
+    "current_equity_usd",
+    "initial_equity_usd",
+    "equity_change_usd",
+    "equity_usd",
+    "gross_usd",
+    "net_usd",
+    "entry_fee",
+    "exit_fee",
+    "equity_set",
+}
+_PCT_KEYS = {
+    "risk_weight",
+    "weight",
+    "pnl_pct",
+    "weighted_pnl_pct",
+    "net_weighted_pnl_pct",
+    "realized_pnl_pct",
+    "realized_net_pnl_pct_weighted",
+    "realized_gross_pnl_pct_weighted",
+    "realized_pnl_pct_weighted",
+    "alert_execution_diff_pct",
+    "weighted_pct",
+    "net_weighted_pct",
+    "equity_change_pct",
+}
+_UNITS_KEYS = {"qty_units", "filled_size"}
+
+
+def canonicalize_decimal_fields(value):
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if item is None:
+                out[key] = None
+            elif isinstance(item, (dict, list)):
+                out[key] = canonicalize_decimal_fields(item)
+            elif key_text == "planned_notional_usd":
+                out[key] = notional_text(item)
+            elif key_text in _USD_KEYS or key_text.endswith("_usd"):
+                out[key] = usd_text(item)
+            elif key_text in _PCT_KEYS or key_text.endswith("_pct"):
+                out[key] = pct_text(item)
+            elif key_text in _UNITS_KEYS or key_text.endswith("_units"):
+                out[key] = units_text(item)
+            else:
+                out[key] = item
+        return out
+    if isinstance(value, list):
+        return [canonicalize_decimal_fields(item) for item in value]
+    return value
+
+
+def _coerce_state_numeric_fields(value):
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if isinstance(item, (dict, list)):
+                out[key] = _coerce_state_numeric_fields(item)
+                continue
+            if not isinstance(item, str):
+                out[key] = item
+                continue
+            looks_numeric = (
+                key_text in _USD_KEYS
+                or key_text in _PCT_KEYS
+                or key_text in _UNITS_KEYS
+                or key_text.endswith("_usd")
+                or key_text.endswith("_pct")
+                or key_text.endswith("_units")
+                or key_text.endswith("_price")
+                or key_text in {"weight", "entry_fee", "equity_set"}
+            )
+            if looks_numeric:
+                try:
+                    out[key] = float(D(item))
+                    continue
+                except Exception:
+                    pass
+            out[key] = item
+        return out
+    if isinstance(value, list):
+        return [_coerce_state_numeric_fields(item) for item in value]
+    return value
+
+
 def pnl_pct(position_side: str, entry_price: float, exit_price: float) -> float:
-    if not entry_price or not exit_price:
+    entry = D(entry_price)
+    exit_ = D(exit_price)
+    if entry == 0 or exit_ == 0:
         return 0.0
     if position_side == "long":
-        return (exit_price / entry_price - 1.0) * 100.0
-    return (entry_price / exit_price - 1.0) * 100.0
+        return float(dec_pct((exit_ / entry - D("1")) * D("100")))
+    return float(dec_pct((entry / exit_ - D("1")) * D("100")))
 
 
 def fee_rate_for(liquidity: str | None = None) -> float:
@@ -1943,7 +2468,7 @@ def fee_rate_for(liquidity: str | None = None) -> float:
 
 
 def fee_usd(notional_usd: float, liquidity: str | None = None) -> float:
-    return float(notional_usd or 0.0) * fee_rate_for(liquidity)
+    return float(dec_usd(D(notional_usd) * D(fee_rate_for(liquidity))))
 
 
 def funding_rate_from_payload(payload: dict | None = None) -> float:
@@ -1951,28 +2476,30 @@ def funding_rate_from_payload(payload: dict | None = None) -> float:
     rate = as_float(first(payload, "funding_rate", "okx_funding_rate", default=None))
     if rate is None:
         rate = PAPER_DEFAULT_FUNDING_RATE
-    return float(rate or 0.0)
+    return float(dec_pct(rate or 0.0))
 
 
 def estimate_funding_usd(position: dict, payload: dict | None = None) -> float:
     # Placeholder until OKX funding timestamps are wired. Default is 0.
     if not PAPER_FUNDING_ENABLED:
         return 0.0
-    rate = funding_rate_from_payload(payload)
-    notional = float((position or {}).get("notional_usd") or 0.0)
+    rate = D(funding_rate_from_payload(payload))
+    notional = D((position or {}).get("notional_usd") or 0.0)
     side = (position or {}).get("side")
     # Positive funding rate usually means longs pay shorts.
-    sign = -1.0 if side == "long" else 1.0
-    return notional * rate * sign
+    sign = D("-1") if side == "long" else D("1")
+    return float(dec_usd(notional * rate * sign))
 
 
 def executed_price_from_signal(signal_price: float, payload: dict | None = None) -> tuple[float, float]:
     payload = payload or {}
     execution_price = as_float(first(payload, "okx_execution_price", "execution_price", "fill_price", "avg_fill_price", default=None))
     if execution_price is None:
-        execution_price = float(signal_price)
-    diff_pct = 0.0 if not signal_price else (float(execution_price) / float(signal_price) - 1.0) * 100.0
-    return float(execution_price), round(diff_pct, 6)
+        execution_price = float(D(signal_price))
+    signal = D(signal_price)
+    executed = D(execution_price)
+    diff_pct = D("0") if signal == 0 else dec_pct((executed / signal - D("1")) * D("100"))
+    return float(executed), float(diff_pct)
 
 
 # ---------------------------------------------------------------------------
@@ -2025,22 +2552,22 @@ def apply_effect(state: dict, account: str, policy: str, symbol: str, effect: di
     if op == "adjust":
         pos = symbols.get(symbol)
         if pos is not None:
-            pos.update(effect.get("fields") or {})
+            pos.update(_coerce_state_numeric_fields(effect.get("fields") or {}))
         return
     if op == "close":
         symbols.pop(symbol, None)
         stats["closed_trades"] = int(stats.get("closed_trades", 0)) + 1
-        stats["realized_gross_pnl_usd"] = round(float(stats.get("realized_gross_pnl_usd", 0)) + effect["gross_usd"], 4)
-        stats["realized_net_pnl_usd"] = round(float(stats.get("realized_net_pnl_usd", 0)) + effect["net_usd"], 4)
+        stats["realized_gross_pnl_usd"] = float(dec_usd(D(stats.get("realized_gross_pnl_usd", 0)) + D(effect["gross_usd"])))
+        stats["realized_net_pnl_usd"] = float(dec_usd(D(stats.get("realized_net_pnl_usd", 0)) + D(effect["net_usd"])))
         stats["realized_pnl_usd"] = stats["realized_net_pnl_usd"]
-        stats["realized_gross_pnl_pct_weighted"] = round(float(stats.get("realized_gross_pnl_pct_weighted", 0)) + effect["weighted_pct"], 6)
-        stats["realized_net_pnl_pct_weighted"] = round(float(stats.get("realized_net_pnl_pct_weighted", 0)) + effect["net_weighted_pct"], 6)
+        stats["realized_gross_pnl_pct_weighted"] = float(dec_pct(D(stats.get("realized_gross_pnl_pct_weighted", 0)) + D(effect["weighted_pct"])))
+        stats["realized_net_pnl_pct_weighted"] = float(dec_pct(D(stats.get("realized_net_pnl_pct_weighted", 0)) + D(effect["net_weighted_pct"])))
         stats["realized_pnl_pct_weighted"] = stats["realized_net_pnl_pct_weighted"]
-        stats["total_fees_usd"] = round(float(stats.get("total_fees_usd", 0)) + effect["exit_fee"], 4)
-        stats["total_funding_usd"] = round(float(stats.get("total_funding_usd", 0)) + effect["funding_usd"], 4)
+        stats["total_fees_usd"] = float(dec_usd(D(stats.get("total_fees_usd", 0)) + D(effect["exit_fee"])))
+        stats["total_funding_usd"] = float(dec_usd(D(stats.get("total_funding_usd", 0)) + D(effect["funding_usd"])))
         if effect.get("compound"):
             equity = ps.setdefault("equity", {})
-            equity[symbol] = effect["equity_set"]
+            equity[symbol] = float(dec_usd(effect["equity_set"]))
             refresh_compound_stats(ps)
         if effect["win"]:
             stats["wins"] = int(stats.get("wins", 0)) + 1
@@ -2049,8 +2576,8 @@ def apply_effect(state: dict, account: str, policy: str, symbol: str, effect: di
         return
     if op == "open":
         entry_fee = effect["entry_fee"]
-        stats["total_fees_usd"] = round(float(stats.get("total_fees_usd", 0)) + entry_fee, 4)
-        symbols[symbol] = effect["position"]
+        stats["total_fees_usd"] = float(dec_usd(D(stats.get("total_fees_usd", 0)) + D(entry_fee)))
+        symbols[symbol] = _coerce_state_numeric_fields(effect["position"])
         stats["entries"] = int(stats.get("entries", 0)) + 1
         if effect.get("compound"):
             refresh_compound_stats(ps)
@@ -2071,7 +2598,7 @@ def _record_transition(state: dict, account: str, policy: str, symbol: str, effe
         "account": account,
         "policy": policy,
         "symbol": symbol,
-        "effect": effect,
+        "effect": canonicalize_decimal_fields(effect),
     }
     # Write-ahead, fail-closed (REFACTOR_PLAN.md:221): the durable journal append
     # must succeed BEFORE in-memory state is mutated. If it fails (e.g. ENOSPC) we
@@ -2401,17 +2928,19 @@ def paper_apply_policy(state: dict, normalized: dict, payload: dict, policy_key:
         equity = ps.setdefault("equity", {})
         initial.setdefault(sym, asset_budget_usd(sym))
         equity.setdefault(sym, initial[sym])
-        base_notional_usd = max(0.0, float(equity.get(sym) or 0.0)) * asset_leverage(sym)
+        base_notional_usd = float(dec_usd(max(D("0"), D(equity.get(sym) or 0.0)) * D(asset_leverage(sym))))
     symbols = ps.setdefault("symbols", {})
     pos = symbols.get(sym)
     target_side = side_to_position(normalized["side"])
-    weight = float(policy.get("risk_weight") or 0.0)
+    weight_dec = D(policy.get("risk_weight") or 0.0)
+    weight = float(dec_pct(weight_dec))
+    base_notional_dec = D(base_notional_usd)
     decision = str(policy.get("decision") or "SKIP").upper()
     event = {
         "received_at": received_at,
         "paper_account": account_key,
         "paper_account_label": account_label,
-        "base_notional_usd": base_notional_usd,
+        "base_notional_usd": float(dec_usd(base_notional_dec)),
         "policy": policy_key,
         "policy_label": POLICY_LABELS.get(policy_key, policy_key),
         "symbol": sym,
@@ -2424,7 +2953,7 @@ def paper_apply_policy(state: dict, normalized: dict, payload: dict, policy_key:
         "okx_execution_price": None,
         "alert_execution_diff_pct": None,
         "decision": decision,
-        "risk_weight": weight,
+        "risk_weight": float(dec_pct(weight_dec)),
         "actions": [],
         "realized_pnl_pct": 0.0,
         "realized_pnl_usd": 0.0,
@@ -2454,42 +2983,52 @@ def paper_apply_policy(state: dict, normalized: dict, payload: dict, policy_key:
         event["actions"].append("SKIP_NO_NEW_ENTRY")
         return event
 
-    if (decision == "SKIP" or weight <= 0) and not (pos and pos.get("side") != target_side):
+    if (decision == "SKIP" or weight_dec <= 0) and not (pos and pos.get("side") != target_side):
         _record_transition(state, account_key, policy_key, sym, _eff("skip"), received_at)
         event["actions"].append("SKIP_NO_NEW_ENTRY")
         return event
 
     if pos and pos.get("side") == target_side:
         # Duo should not duplicate often, but keep the state stable if it happens.
-        old_weight = float(pos.get("weight") or 0)
+        old_weight = D(pos.get("weight") or 0)
         fields = {
-            "weight": weight,
+            "weight": float(dec_pct(weight_dec)),
             "last_signal_at": received_at,
             "last_signal_price": price,
             "last_execution_price": exec_price,
         }
         _record_transition(state, account_key, policy_key, sym, _eff("adjust", fields=fields), received_at)
-        event["actions"].append(f"UPDATE_SAME_DIRECTION {old_weight:.2f}->{weight:.2f}")
+        event["actions"].append(f"UPDATE_SAME_DIRECTION {float(old_weight):.2f}->{float(weight_dec):.2f}")
         return event
 
     if pos:
-        entry_price = float(pos.get("entry_execution_price") or pos.get("entry_price") or 0)
-        qty_units = float(pos.get("qty_units") or 0)
-        exit_notional = qty_units * exec_price
-        pct = pnl_pct(pos.get("side"), entry_price, exec_price)
-        weighted_pct = pct * float(pos.get("weight") or 0)
-        gross_usd = float(pos.get("notional_usd") or 0) * pct / 100.0
-        entry_fee = float(pos.get("entry_fee_usd") or 0)
-        exit_fee = fee_usd(exit_notional, liquidity)
-        total_trade_fees = entry_fee + exit_fee
-        funding_usd = estimate_funding_usd(pos, payload)
-        net_usd = gross_usd - total_trade_fees + funding_usd
-        net_weighted_pct = (net_usd / base_notional_usd) * 100.0 if base_notional_usd else 0.0
+        entry_price_dec = D(pos.get("entry_execution_price") or pos.get("entry_price") or 0)
+        qty_units_dec = D(pos.get("qty_units") or 0)
+        exec_price_dec = D(exec_price)
+        exit_notional_dec = qty_units_dec * exec_price_dec
+        pct_dec = D(pnl_pct(pos.get("side"), float(entry_price_dec), float(exec_price_dec)))
+        weighted_pct_dec = pct_dec * D(pos.get("weight") or 0)
+        gross_usd_dec = D(pos.get("notional_usd") or 0) * pct_dec / D("100")
+        entry_fee_dec = D(pos.get("entry_fee_usd") or 0)
+        exit_fee_dec = D(fee_usd(float(exit_notional_dec), liquidity))
+        total_trade_fees_dec = entry_fee_dec + exit_fee_dec
+        funding_usd_dec = D(estimate_funding_usd(pos, payload))
+        net_usd_dec = gross_usd_dec - total_trade_fees_dec + funding_usd_dec
+        net_weighted_pct_dec = (net_usd_dec / base_notional_dec) * D("100") if base_notional_dec != 0 else D("0")
+        pct = float(dec_pct(pct_dec))
+        weighted_pct = float(dec_pct(weighted_pct_dec))
+        gross_usd = float(dec_usd(gross_usd_dec))
+        entry_fee = float(dec_usd(entry_fee_dec))
+        exit_fee = float(dec_usd(exit_fee_dec))
+        total_trade_fees = float(dec_usd(total_trade_fees_dec))
+        funding_usd = float(dec_usd(funding_usd_dec))
+        net_usd = float(dec_usd(net_usd_dec))
+        net_weighted_pct = float(dec_pct(net_weighted_pct_dec))
         trade = {
             "closed_at": received_at,
             "paper_account": account_key,
             "paper_account_label": account_label,
-            "base_notional_usd": base_notional_usd,
+            "base_notional_usd": float(dec_usd(base_notional_dec)),
             "policy": policy_key,
             "policy_label": POLICY_LABELS.get(policy_key, policy_key),
             "symbol": sym,
@@ -2503,19 +3042,19 @@ def paper_apply_policy(state: dict, normalized: dict, payload: dict, policy_key:
             "exit_tv_time": normalized.get("tv_time"),
             "weight": pos.get("weight"),
             "notional_usd": pos.get("notional_usd"),
-            "pnl_pct": round(pct, 6),
-            "weighted_pnl_pct": round(weighted_pct, 6),
-            "net_weighted_pnl_pct": round(net_weighted_pct, 6),
-            "gross_pnl_usd": round(gross_usd, 4),
-            "entry_fee_usd": round(entry_fee, 4),
-            "exit_fee_usd": round(exit_fee, 4),
-            "total_fees_usd": round(total_trade_fees, 4),
-            "funding_usd": round(funding_usd, 4),
+            "pnl_pct": float(dec_pct(pct)),
+            "weighted_pnl_pct": float(dec_pct(weighted_pct)),
+            "net_weighted_pnl_pct": float(dec_pct(net_weighted_pct)),
+            "gross_pnl_usd": float(dec_usd(gross_usd)),
+            "entry_fee_usd": float(dec_usd(entry_fee)),
+            "exit_fee_usd": float(dec_usd(exit_fee)),
+            "total_fees_usd": float(dec_usd(total_trade_fees)),
+            "funding_usd": float(dec_usd(funding_usd)),
             "chart_type": normalized.get("chart_type"),
             "okx_mark_price": normalized.get("okx_mark_price"),
             "okx_last_price": normalized.get("okx_last_price"),
-            "pnl_usd": round(net_usd, 4),
-            "net_pnl_usd": round(net_usd, 4),
+            "pnl_usd": float(dec_usd(net_usd)),
+            "net_pnl_usd": float(dec_usd(net_usd)),
             "fee_rate": fee_rate_for(liquidity),
             "liquidity": liquidity,
             "exit_signal_side": normalized["side"],
@@ -2527,39 +3066,43 @@ def paper_apply_policy(state: dict, normalized: dict, payload: dict, policy_key:
         # the numbers above) so apply_effect just assigns it.
         close_eff = _eff(
             "close",
-            gross_usd=gross_usd,
-            net_usd=net_usd,
-            weighted_pct=weighted_pct,
-            net_weighted_pct=net_weighted_pct,
-            exit_fee=exit_fee,
-            funding_usd=funding_usd,
-            win=net_usd > 0,
+            gross_usd=float(dec_usd(gross_usd)),
+            net_usd=float(dec_usd(net_usd)),
+            weighted_pct=float(dec_pct(weighted_pct)),
+            net_weighted_pct=float(dec_pct(net_weighted_pct)),
+            exit_fee=float(dec_usd(exit_fee)),
+            funding_usd=float(dec_usd(funding_usd)),
+            win=net_usd_dec > 0,
         )
         if compound:
             cur_equity = ps.setdefault("equity", {})
-            close_eff["equity_set"] = round(float(cur_equity.get(sym, asset_budget_usd(sym))) + net_usd, 4)
+            close_eff["equity_set"] = float(dec_usd(D(cur_equity.get(sym, asset_budget_usd(sym))) + net_usd_dec))
         _record_transition(state, account_key, policy_key, sym, close_eff, received_at)
         event["actions"].append("CLOSE_" + str(pos.get("side", "")).upper())
         event["closed_trade"] = trade
-        event["realized_pnl_pct"] = round(net_weighted_pct, 6)
-        event["realized_pnl_usd"] = round(net_usd, 4)
-        event["gross_pnl_usd"] = round(gross_usd, 4)
-        event["fees_usd"] = round(total_trade_fees, 4)
-        event["funding_usd"] = round(funding_usd, 4)
+        event["realized_pnl_pct"] = float(dec_pct(net_weighted_pct))
+        event["realized_pnl_usd"] = float(dec_usd(net_usd))
+        event["gross_pnl_usd"] = float(dec_usd(gross_usd))
+        event["fees_usd"] = float(dec_usd(total_trade_fees))
+        event["funding_usd"] = float(dec_usd(funding_usd))
         # (symbol pop is performed by apply_effect for the close effect above.)
 
-    if decision == "SKIP" or weight <= 0:
+    if decision == "SKIP" or weight_dec <= 0:
         _record_transition(state, account_key, policy_key, sym, _eff("skip"), received_at)
         event["actions"].append("SKIP_NO_NEW_ENTRY")
         return event
 
     if compound:
-        base_notional_usd = max(0.0, float(ps.setdefault("equity", {}).get(sym, asset_budget_usd(sym)))) * asset_leverage(sym)
+        base_notional_dec = max(D("0"), D(ps.setdefault("equity", {}).get(sym, asset_budget_usd(sym)))) * D(asset_leverage(sym))
+        base_notional_usd = float(dec_usd(base_notional_dec))
         event["base_notional_usd"] = base_notional_usd
-        event["equity_usd"] = round(float(ps.setdefault("equity", {}).get(sym, 0.0)), 4)
-    notional = base_notional_usd * weight
-    qty_units = notional / exec_price if exec_price else 0.0
-    entry_fee = fee_usd(notional, liquidity)
+        event["equity_usd"] = float(dec_usd(ps.setdefault("equity", {}).get(sym, 0.0)))
+    notional_dec = base_notional_dec * weight_dec
+    qty_units_dec = (notional_dec / D(exec_price)) if D(exec_price) != 0 else D("0")
+    entry_fee_dec = D(fee_usd(float(notional_dec), liquidity))
+    notional = float(dec_usd(notional_dec))
+    qty_units = float(dec_units(qty_units_dec))
+    entry_fee = float(dec_usd(entry_fee_dec))
     position = {
         "side": target_side,
         "entry_price": price,
@@ -2571,8 +3114,8 @@ def paper_apply_policy(state: dict, normalized: dict, payload: dict, policy_key:
         "entry_at": received_at,
         "entry_tv_time": normalized.get("tv_time"),
         "entry_signal_side": normalized.get("side"),
-        "weight": weight,
-        "base_notional_usd": base_notional_usd,
+        "weight": float(dec_pct(weight_dec)),
+        "base_notional_usd": float(dec_usd(base_notional_dec)),
         "notional_usd": notional,
         "qty_units": qty_units,
         "entry_fee_usd": entry_fee,
@@ -2580,10 +3123,10 @@ def paper_apply_policy(state: dict, normalized: dict, payload: dict, policy_key:
         "liquidity": liquidity,
         "source_decision": decision,
         "mtf_status": policy.get("mtf_status"),
-        "equity_usd": round(float((ps.get("equity") or {}).get(sym, 0.0)), 4) if compound else None,
+        "equity_usd": float(dec_usd((ps.get("equity") or {}).get(sym, 0.0))) if compound else None,
     }
     _record_transition(state, account_key, policy_key, sym, _eff("open", position=position, entry_fee=entry_fee), received_at)
-    event["entry_fee_usd"] = round(entry_fee, 4)
+    event["entry_fee_usd"] = float(dec_usd(entry_fee))
     event["actions"].append("OPEN_" + target_side.upper())
     return event
 
@@ -2593,23 +3136,24 @@ def apply_paper_trading(record: dict) -> list[dict]:
     price = normalized.get("tv_signal_price")
     if price is None:
         return []
-    state = load_paper_state()
-    events = []
-    realistic_base = realistic_base_notional_usd(normalized.get("symbol"))
-    for key in POLICY_KEYS:
-        policy = (record.get("policies") or {}).get(key) or {}
-        events.append(paper_apply_policy(state, normalized, record.get("payload") or {}, key, policy, float(price), record["received_at"], PAPER_BASE_NOTIONAL_USD, "policies", "Research $10k fixed"))
-        events.append(paper_apply_policy(state, normalized, record.get("payload") or {}, key, policy, float(price), record["received_at"], realistic_base, "realistic_policies", "Fixed budget x leverage"))
-        events.append(paper_apply_policy(state, normalized, record.get("payload") or {}, key, policy, float(price), record["received_at"], realistic_base, "compound_policies", "Compounding paper", compound=True))
-    state["updated_at"] = record["received_at"]
-    save_paper_state(state)
-    # Journal-mode lifecycle (REFACTOR_PLAN.md:218-221): once the live segment is
-    # large enough, write a verified checkpoint and rotate, so the next load replays
-    # only the bounded live tail. No-op in legacy mode. A write failure here fails
-    # closed (raises) -- this runs BEFORE execute_okx_if_enabled in build_record, so
-    # a blocked checkpoint also blocks submission.
-    _maybe_checkpoint_and_rotate(state)
-    return events
+    with _STATE_WRITE_LOCK:
+        state = load_paper_state()
+        events = []
+        realistic_base = realistic_base_notional_usd(normalized.get("symbol"))
+        for key in POLICY_KEYS:
+            policy = (record.get("policies") or {}).get(key) or {}
+            events.append(paper_apply_policy(state, normalized, record.get("payload") or {}, key, policy, float(price), record["received_at"], PAPER_BASE_NOTIONAL_USD, "policies", "Research $10k fixed"))
+            events.append(paper_apply_policy(state, normalized, record.get("payload") or {}, key, policy, float(price), record["received_at"], realistic_base, "realistic_policies", "Fixed budget x leverage"))
+            events.append(paper_apply_policy(state, normalized, record.get("payload") or {}, key, policy, float(price), record["received_at"], realistic_base, "compound_policies", "Compounding paper", compound=True))
+        state["updated_at"] = record["received_at"]
+        save_paper_state(state)
+        # Journal-mode lifecycle (REFACTOR_PLAN.md:218-221): once the live segment is
+        # large enough, write a verified checkpoint and rotate, so the next load replays
+        # only the bounded live tail. No-op in legacy mode. A write failure here fails
+        # closed (raises) -- this runs BEFORE execute_okx_if_enabled in build_record, so
+        # a blocked checkpoint also blocks submission.
+        _maybe_checkpoint_and_rotate(state)
+        return events
 
 
 def find_policy_event(events: list[dict], policy_key: str, account_key: str = "realistic_policies") -> dict | None:
@@ -2630,11 +3174,11 @@ def build_okx_execution_readiness(record: dict, paper_events: list[dict]) -> dic
     shadow_event = find_policy_event(paper_events, shadow_policy)
     asset_cfg = CONFIG.get("assets", {}).get(normalized.get("symbol"), {}) or {}
     live_allowed = bool(execution_cfg.get("enabled")) and bool(risk_cfg.get("allow_live_execution"))
-    signal_id = (normalized.get("signal_id") or "")[:16]
-    client_order_id = f"mxc-{normalized.get('symbol','')}-{normalized.get('side','')}-{signal_id}".lower()
+    signal_identity = _signal_identity(normalized)
+    client_order_id = stable_client_order_id(signal_identity, role="open")
     weight = float((execution_event or {}).get("risk_weight") or 0.0)
     base_notional = float((execution_event or {}).get("base_notional_usd") or realistic_base_notional_usd(normalized.get("symbol")))
-    planned_notional = round(base_notional * weight, 6)
+    planned_notional = float(dec_notional(D(base_notional) * D(weight)))
     plan = {
         "mode": "live_order_enabled" if live_allowed else "dry_run_no_order",
         "live_execution_enabled": live_allowed,
@@ -2684,7 +3228,7 @@ def build_okx_execution_readiness(record: dict, paper_events: list[dict]) -> dic
         },
         "block_reason": None if live_allowed else "OKX execution disabled: dry-run shadow only",
     }
-    append_jsonl(EXECUTION_PLAN_LEDGER, {"received_at": record.get("received_at"), "execution_readiness": plan})
+    append_jsonl(EXECUTION_PLAN_LEDGER, {"received_at": record.get("received_at"), "execution_readiness": canonicalize_decimal_fields(plan)})
     return plan
 
 
@@ -2701,8 +3245,8 @@ def build_strategy_execution_readiness(record: dict) -> dict:
         and bool(risk_cfg.get("allow_live_execution"))
     )
     direction = "long" if normalized.get("side") == "buy" else "short"
-    signal_id = (normalized.get("signal_id") or "")[:16]
-    client_order_id = f"mxc-{normalized.get('strategy_id','')}-{normalized.get('side','')}-{signal_id}".lower()[:64]
+    signal_identity = _signal_identity(normalized)
+    client_order_id = stable_client_order_id(signal_identity, role="open")
     base_notional = float(strategy.get("budget_usd") or 0.0) * float(strategy.get("leverage") or 1.0)
     plan = {
         "mode": "strategy_file_live_order_enabled" if live_allowed else "strategy_file_trial_no_order",
@@ -2727,7 +3271,7 @@ def build_strategy_execution_readiness(record: dict) -> dict:
             "target_direction": direction,
             "actions": ["CLOSE_OPPOSITE_IF_ANY", f"OPEN_{direction.upper()}"],
             "base_notional_usd": float(strategy.get("budget_usd") or 0.0),
-            "planned_notional_usd": round(base_notional, 6),
+            "planned_notional_usd": float(dec_notional(base_notional)),
             "client_order_id": client_order_id,
         },
         "okx_fill": {
@@ -2742,7 +3286,7 @@ def build_strategy_execution_readiness(record: dict) -> dict:
         },
         "block_reason": None if live_allowed else "Duo Base Dev strategy trial is not approved for OKX submission",
     }
-    append_jsonl(EXECUTION_PLAN_LEDGER, {"received_at": record.get("received_at"), "execution_readiness": plan})
+    append_jsonl(EXECUTION_PLAN_LEDGER, {"received_at": record.get("received_at"), "execution_readiness": canonicalize_decimal_fields(plan)})
     return plan
 
 
@@ -2831,8 +3375,8 @@ def record_order_state(
         "cl_ord_id": cl_ord_id,
         "state": new_state,
         "prev_state": prev_state,
-        "intent": intent or {},
-        "detail": detail or {},
+        "intent": canonicalize_decimal_fields(intent or {}),
+        "detail": canonicalize_decimal_fields(detail or {}),
     }
     append_jsonl_durable(ORDER_JOURNAL_LEDGER, record)
     return record
@@ -2871,6 +3415,24 @@ def load_open_orders() -> list[dict]:
         if cur is None or seq > cur.get("seq", -1):
             latest[cl] = rec
     return [r for r in latest.values() if r.get("state") in ORDER_NON_TERMINAL_STATES]
+
+
+def latest_order_record(cl_ord_id: str | None) -> dict | None:
+    cl = str(cl_ord_id or "").strip()
+    if not cl:
+        return None
+    latest: dict | None = None
+    for rec in read_jsonl_tolerant(ORDER_JOURNAL_LEDGER):
+        if not isinstance(rec, dict):
+            continue
+        if str(rec.get("cl_ord_id") or "") != cl:
+            continue
+        seq = rec.get("seq")
+        if not isinstance(seq, int):
+            continue
+        if latest is None or seq > int(latest.get("seq") or -1):
+            latest = rec
+    return latest
 
 
 # ---------------------------------------------------------------------------
@@ -3191,14 +3753,35 @@ def reconcile_positions_once(executor, expected: dict, symbol_to_inst: dict) -> 
     return mismatches
 
 
+def _effective_execution_config() -> dict:
+    """The execution config the write path actually resolves: CONFIG with an
+    optional HERMX_EXEC_BACKEND override applied to execution.exchange.
+
+    Submit (ExecutionService via _execution_config) and reconciliation
+    (_reconciliation_executor) BOTH resolve through this same rule, so the backend
+    used to submit an order can never diverge from the backend used to reconcile
+    it -- both default to CCXT, and an explicit HERMX_EXEC_BACKEND is honored by
+    both paths identically."""
+    cfg = dict(CONFIG or {})
+    execution_cfg = dict(cfg.get("execution") or {})
+    backend = (os.environ.get("HERMX_EXEC_BACKEND") or "").strip()
+    if backend:
+        execution_cfg["exchange"] = backend
+    cfg["execution"] = execution_cfg
+    return cfg
+
+
 def _reconciliation_executor():
     """Build the active venue's read-only query executor, or None if unavailable.
     Constructed lazily so a missing factory / bad config simply disables
-    reconciliation rather than crashing the receiver (fail closed to observe-only)."""
+    reconciliation rather than crashing the receiver (fail closed to observe-only).
+
+    Uses _effective_execution_config() -- the SAME backend resolution the submit
+    path uses -- so reconcile always queries the venue the order was submitted to."""
     if ExecutorFactory is None:
         return None
     try:
-        return ExecutorFactory.create(CONFIG, ROOT)
+        return ExecutorFactory.create(_effective_execution_config(), ROOT)
     except Exception as exc:  # pragma: no cover - defensive
         logging.warning("reconciliation executor unavailable: %s", exc)
         return None
@@ -3433,6 +4016,7 @@ def unknown_resolver_loop(stop_event: "threading.Event | None" = None, sleep=tim
     while True:
         if stop_event is not None and stop_event.is_set():
             return
+        _set_resolver_heartbeat()
         try:
             summary = resolve_unknown_orders_once()
             if summary["checked"] or summary["expired"] or summary["errors"]:
@@ -3454,180 +4038,70 @@ def unknown_resolver_loop(stop_event: "threading.Event | None" = None, sleep=tim
             sleep(interval)
 
 
-def execute_okx_if_enabled(record: dict) -> dict:
-    armed, kill_switch_raw = submit_kill_switch_armed()
-    if not armed:
-        result = {
-            "ok": True,
-            "mode": "not_submitted",
-            "reason": "HERMX_SUBMIT_ENABLED kill switch engaged",
-            "kill_switch": kill_switch_raw,
-        }
-        append_jsonl(EXECUTION_LEDGER, {"received_at": record.get("received_at"), "okx_execution": result})
-        return result
-    readiness = record.get("execution_readiness") or {}
-    execution_cfg = CONFIG.get("execution", {}) or {}
-    risk_cfg = CONFIG.get("risk", {}) or {}
-    should_execute = (
-        bool(readiness.get("live_execution_enabled"))
-        and bool(execution_cfg.get("enabled"))
-        and bool(execution_cfg.get("submit_orders"))
-        and bool(risk_cfg.get("allow_live_execution"))
+def _execute_okx_via_service(record: dict) -> dict:
+    service = ExecutionService(
+        config=CONFIG,
+        root=ROOT,
+        executor_factory=ExecutorFactory,
+        submit_timeout_seconds=HERMX_SUBMIT_TIMEOUT_SECONDS,
+        hooks={
+            "submit_kill_switch_armed": submit_kill_switch_armed,
+            "append_jsonl": append_jsonl,
+            "execution_ledger": EXECUTION_LEDGER,
+            "webhook_auth_config_healthy": webhook_auth_config_healthy,
+            "watchdog_submission_state": _watchdog_submission_state,
+            "symbol_pause_info": symbol_pause_info,
+            "order_intent_from_readiness": _order_intent_from_readiness,
+            "cl_ord_id_from_readiness": _cl_ord_id_from_readiness,
+            "latest_order_record": latest_order_record,
+            "record_order_state": record_order_state,
+            "fail_closed_state_write": _fail_closed_state_write,
+            "order_state_planned": ORDER_STATE_PLANNED,
+            "order_state_submitted": ORDER_STATE_SUBMITTED,
+            "order_state_filled": ORDER_STATE_FILLED,
+            "order_state_rejected": ORDER_STATE_REJECTED,
+            "order_state_unknown": ORDER_STATE_UNKNOWN,
+            "reconcile_post_submit_enabled": reconcile_post_submit_enabled,
+            "reconciliation_executor": _reconciliation_executor,
+            "reconcile_order_with_backoff": reconcile_order_with_backoff,
+            "order_state_can_transition": order_state_can_transition,
+            "emit_reconcile_alert": emit_reconcile_alert,
+            "reconcile_alert_mismatch": RECONCILE_ALERT_MISMATCH,
+            "redact_secrets": redact_secrets,
+        },
     )
-    if not should_execute:
+    return service.execute(record)
+
+
+def execute_okx_if_enabled(record: dict) -> dict:
+    """Authoritative submission entry point: route through ExecutionService (CCXT)."""
+    return _execute_okx_authoritative(record)
+
+
+def _execute_okx_authoritative(record: dict) -> dict:
+    """Authoritative submission. Post P5-06/P5-07 cutover this ALWAYS routes through
+    ExecutionService, whose sole executor backend is CCXT. The legacy inline okx_demo
+    subprocess path was deleted.
+
+    FAIL CLOSED: if the controlled execution surface is unavailable (ExecutionService
+    or ExecutorFactory failed to import, or no executor backend is registered because
+    the optional ``ccxt`` dependency is missing), we NEVER submit. We return a
+    not_submitted/execution_unavailable outcome and append it to the execution ledger,
+    exactly like a blocked gate -- no order, no order-journal PLANNED/SUBMITTED writes.
+    """
+    if (
+        ExecutionService is None
+        or ExecutorFactory is None
+        or not ExecutorFactory.available()
+    ):
         result = {
             "ok": True,
             "mode": "not_submitted",
-            "reason": readiness.get("block_reason") or "OKX execution disabled",
+            "reason": "execution_unavailable",
         }
         append_jsonl(EXECUTION_LEDGER, {"received_at": record.get("received_at"), "okx_execution": result})
         return result
-    symbol_pause = symbol_pause_info(readiness.get("symbol"))
-    if symbol_pause:
-        result = {
-            "ok": True,
-            "mode": "not_submitted",
-            "reason": "symbol_paused",
-            "symbol_pause": symbol_pause,
-        }
-        append_jsonl(EXECUTION_LEDGER, {"received_at": record.get("received_at"), "okx_execution": result})
-        return result
-    # --- WRITE-AHEAD ORDER JOURNAL (REFACTOR_PLAN.md:204, :216) -------------------
-    # Reached ONLY when every gate above passed -- i.e. NEVER in the disabled
-    # production config (which returns via a not_submitted branch above, writing zero
-    # order-journal records). PLANNED is fsync'd to disk BEFORE the submit subprocess so
-    # restart reconciliation (Task 4) has an authoritative clOrdId key even if we crash
-    # mid-send. If the durable append fails (e.g. ENOSPC) we fail closed and re-raise:
-    # we must never submit without a durable PLANNED record.
-    order_intent = _order_intent_from_readiness(readiness)
-    cl_ord_id = _cl_ord_id_from_readiness(readiness)
-    try:
-        record_order_state(cl_ord_id, ORDER_STATE_PLANNED, intent=order_intent, prev_state=None)
-    except OSError as exc:
-        _fail_closed_state_write("order-journal-planned", exc, context={"cl_ord_id": cl_ord_id})
-        raise
-
-    script = ROOT / "src" / "okx_demo_executor.py"
-    env = os.environ.copy()
-    env["OKX_SIMULATED_TRADING"] = "1" if bool(execution_cfg.get("simulated_trading", True)) else "0"
-    env["OKX_FORCE_IPV4"] = "1" if bool(execution_cfg.get("force_ipv4", True)) else "0"
-    env["OKX_SUBMIT_ORDERS"] = "true"
-
-    # SUBMITTED is fsync'd immediately BEFORE subprocess.run: the order may now be in
-    # flight, so persist that fact first. Same fail-closed contract as PLANNED.
-    try:
-        record_order_state(cl_ord_id, ORDER_STATE_SUBMITTED, intent=order_intent, prev_state=ORDER_STATE_PLANNED)
-    except OSError as exc:
-        _fail_closed_state_write("order-journal-submitted", exc, context={"cl_ord_id": cl_ord_id})
-        raise
-
-    started = time.time()
-    try:
-        completed = subprocess.run(
-            [sys.executable, str(script), "execute"],
-            input=json.dumps(readiness, ensure_ascii=False),
-            text=True,
-            capture_output=True,
-            timeout=45,
-            env=env,
-        )
-        elapsed_ms = round((time.time() - started) * 1000)
-        if completed.returncode != 0:
-            result = {
-                "ok": False,
-                "mode": "submit_failed",
-                "elapsed_ms": elapsed_ms,
-                "returncode": completed.returncode,
-                "stderr": completed.stderr[-2000:],
-                "stdout": completed.stdout[-2000:],
-            }
-            # Non-zero return = explicit reject from the executor.
-            outcome_state = ORDER_STATE_REJECTED
-            outcome_detail = {"returncode": completed.returncode, "stderr": completed.stderr[-2000:]}
-        else:
-            payload = json.loads(completed.stdout)
-            result = {
-                "ok": True,
-                "mode": payload.get("mode"),
-                "elapsed_ms": elapsed_ms,
-                "payload": payload,
-            }
-            if isinstance(readiness.get("okx_fill"), dict):
-                readiness["okx_fill"].update(payload.get("okx_fill_summary") or {})
-            # TENTATIVE fill: stdout is not authoritative -- Task 4 reconciliation drives
-            # the confirmed terminal outcome (and may flip this to REJECTED/UNKNOWN).
-            outcome_state = ORDER_STATE_FILLED
-            outcome_detail = {"returncode": 0, "payload_mode": payload.get("mode")}
-    except Exception as exc:
-        # TimeoutExpired or any other exception => UNKNOWN (the order may have reached the
-        # exchange). UNKNOWN is first-class and triggers reconciliation, NOT a failure.
-        result = {
-            "ok": False,
-            "mode": "submit_exception",
-            "elapsed_ms": round((time.time() - started) * 1000),
-            "error": str(exc),
-        }
-        outcome_state = ORDER_STATE_UNKNOWN
-        outcome_detail = {"error": str(exc), "exception_type": type(exc).__name__}
-
-    def _record_tentative_outcome() -> None:
-        # Persist the stdout-derived (tentative) outcome. Best-effort: the order is
-        # already out of our hands, so a write failure here is logged via the
-        # fail-closed alert but must not mask the result the caller needs to ledger.
-        try:
-            record_order_state(cl_ord_id, outcome_state, intent=order_intent, detail=outcome_detail, prev_state=ORDER_STATE_SUBMITTED)
-        except OSError as exc:
-            _fail_closed_state_write("order-journal-outcome", exc, context={"cl_ord_id": cl_ord_id, "outcome_state": outcome_state})
-
-    # --- POST-SUBMIT RECONCILIATION HOOK (REFACTOR_PLAN.md:214, OBSERVE-ONLY) -------
-    # Default (HERMX_RECONCILE_ENABLED unset/false): byte-identical to pre-Task-4 --
-    # the stdout-derived tentative terminal is journalled and NO query subprocess runs.
-    # When enabled: the EXCHANGE drives the authoritative SUBMITTED->terminal/UNKNOWN
-    # transition (:214 "never trust stdout alone"), the result gains a `reconcile` key,
-    # and a RECONCILE_MISMATCH is emitted when the exchange disagrees with stdout. This
-    # only enriches/corrects the order journal -- it never trades.
-    if reconcile_post_submit_enabled():
-        executor = _reconciliation_executor()
-        reconcile_outcome = None
-        if executor is not None:
-            try:
-                reconcile_outcome = reconcile_order_with_backoff(
-                    executor, {"inst_id": order_intent.get("inst_id"), "cl_ord_id": cl_ord_id}
-                )
-            except Exception as exc:  # pragma: no cover - tolerant; fall back to stdout
-                logging.error("post-submit reconciliation error for %s: %s", cl_ord_id, exc)
-        if reconcile_outcome is None:
-            # Reconciliation unavailable/failed: keep the journal consistent by writing
-            # the stdout-derived tentative outcome (the legacy behaviour).
-            _record_tentative_outcome()
-        else:
-            recon_state = reconcile_outcome["state"]
-            result["reconcile"] = {
-                k: reconcile_outcome.get(k)
-                for k in ("state", "partial", "reason", "attempts", "elapsed_s", "source", "acc_fill_sz", "avg_px")
-            }
-            if order_state_can_transition(ORDER_STATE_SUBMITTED, recon_state):
-                try:
-                    record_order_state(
-                        cl_ord_id, recon_state, intent=order_intent,
-                        detail={"reconcile": result["reconcile"], "stdout_outcome": outcome_state},
-                        prev_state=ORDER_STATE_SUBMITTED,
-                    )
-                except OSError as exc:
-                    _fail_closed_state_write("order-journal-reconcile", exc, context={"cl_ord_id": cl_ord_id, "outcome_state": recon_state})
-            else:  # pragma: no cover - recon_state is always FILLED/REJECTED/UNKNOWN
-                _record_tentative_outcome()
-            if recon_state != outcome_state:
-                emit_reconcile_alert(RECONCILE_ALERT_MISMATCH, {
-                    "stage": "post_submit", "cl_ord_id": cl_ord_id,
-                    "stdout_outcome": outcome_state, "reconciled_outcome": recon_state,
-                    "reason": reconcile_outcome.get("reason"),
-                })
-    else:
-        _record_tentative_outcome()
-
-    append_jsonl(EXECUTION_LEDGER, {"received_at": record.get("received_at"), "okx_execution": result})
-    return result
+    return _execute_okx_via_service(record)
 
 
 def primary_decision_from_policies(policies: dict) -> dict:
@@ -3820,12 +4294,41 @@ def process_payload_async(payload: dict, intake_received_at: str) -> None:
         logging.exception("Shadow async processing failed")
 
 
-def worker_loop() -> None:
+def worker_loop(worker_name: str = "shadow-policy-worker-1") -> None:
     while True:
-        payload, intake_received_at = PROCESS_QUEUE.get()
+        _set_worker_heartbeat(worker_name)
         try:
-            process_payload_async(payload, intake_received_at)
+            item = PROCESS_QUEUE.get(timeout=1.0)
+        except queue.Empty:
+            continue
+        if not isinstance(item, tuple) or len(item) < 2:
+            PROCESS_QUEUE.task_done()
+            continue
+        payload = item[0]
+        intake_received_at = item[1]
+        symbol = _payload_symbol(payload)
+        ticket: int | None = None
+        if len(item) >= 4:
+            item_symbol = str(item[2] or "").strip().upper()
+            if item_symbol:
+                symbol = item_symbol
+            try:
+                ticket = int(item[3])
+            except (TypeError, ValueError):
+                ticket = None
+        if ticket is not None and not _symbol_ticket_is_turn(symbol, ticket):
+            PROCESS_QUEUE.put(item)
+            PROCESS_QUEUE.task_done()
+            time.sleep(0.001)
+            continue
+        try:
+            with _symbol_lock(symbol):
+                _set_worker_heartbeat(worker_name)
+                process_payload_async(payload, intake_received_at)
+                _set_worker_heartbeat(worker_name)
         finally:
+            if ticket is not None:
+                _advance_symbol_ticket_turn(symbol, ticket)
             PROCESS_QUEUE.task_done()
 
 
@@ -3855,21 +4358,49 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path not in {"/webhook", "/shadow/webhook"}:
             self._send(404, {"ok": False, "error": "not_found"})
             return
-        provided = self.headers.get("X-Webhook-Secret", "") or parse_qs(parsed.query).get("secret", [""])[0]
-        if SECRET and provided != SECRET:
-            client_ip = self.client_address[0] if getattr(self, "client_address", None) else None
-            emit_auth_failure_alert(parsed.path, client_ip)
-            self._send(403, {"ok": False, "error": "forbidden"})
-            return
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+            if length < 0:
+                raise ValueError("negative content length")
+        except Exception:
+            self._send(400, {"ok": False, "error": "invalid_content_length"})
+            return
+        if length > max(1, HERMX_MAX_BODY_BYTES):
+            self._send(413, {"ok": False, "error": "payload_too_large", "max_body_bytes": max(1, HERMX_MAX_BODY_BYTES)})
+            return
+        source_key = _rate_limit_key(self)
+        allowed, rate_meta = rate_limit_allow(source_key)
+        if not allowed:
+            self._send(429, {"ok": False, "error": "rate_limited", **rate_meta})
+            return
+        try:
+            raw_body = self.rfile.read(length) if length else b""
+            ok, status, reason = authenticate_webhook_request(self, raw_body)
+            if not ok:
+                self._send(status, {"ok": False, "error": reason})
+                return
+            payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
         except Exception as exc:
             self._send(400, {"ok": False, "error": "invalid_json", "detail": str(exc)})
             return
         intake_received_at = now_iso()
         append_jsonl(RAW_INTAKE_LEDGER, {"received_at": intake_received_at, "payload": payload, "path": parsed.path})
-        PROCESS_QUEUE.put((payload, intake_received_at))
+        try:
+            PROCESS_QUEUE.put_nowait(_queue_work_item(payload, intake_received_at))
+        except queue.Full:
+            emit_operator_alert(
+                ALERT_QUEUE_SATURATION,
+                {
+                    "queue_depth": PROCESS_QUEUE.qsize(),
+                    "queue_maxsize": PROCESS_QUEUE.maxsize,
+                    "dropped": True,
+                    "path": parsed.path,
+                    "source_key": source_key,
+                },
+                severity="error",
+            )
+            self._send(503, {"ok": False, "error": "queue_full", "queue_depth": PROCESS_QUEUE.qsize(), "queue_maxsize": PROCESS_QUEUE.maxsize})
+            return
         queue_depth = PROCESS_QUEUE.qsize()
         maybe_emit_queue_saturation_alert(queue_depth)
         self._send(200, {"ok": True, "status": "queued", "received_at": intake_received_at, "queue_depth": queue_depth})
@@ -3892,7 +4423,9 @@ def log_execution_arm_state() -> None:
         "EXECUTION ARM STATE: HERMX_SUBMIT_ENABLED=%s (kill_switch_armed=%s) "
         "execution.submit_orders=%s risk.allow_live_execution=%s "
         "execution.enabled=%s execution.simulated_trading=%s "
-        "reconcile_post_submit=%s unknown_resolver_enabled=%s startup_reconcile_complete=%s",
+        "reconcile_post_submit=%s unknown_resolver_enabled=%s startup_reconcile_complete=%s "
+        "auth_config_healthy=%s require_hmac=%s queue_maxsize=%s "
+        "worker_pool_size=%s submit_timeout_s=%s watchdog_enabled=%s",
         kill_switch_raw,
         armed,
         execution_cfg.get("submit_orders"),
@@ -3902,11 +4435,23 @@ def log_execution_arm_state() -> None:
         reconcile_post_submit_enabled(),
         unknown_resolver_enabled(),
         RECONCILE_STARTUP_COMPLETE,
+        webhook_auth_config_healthy(),
+        HERMX_REQUIRE_HMAC,
+        PROCESS_QUEUE.maxsize,
+        max(1, HERMX_WORKER_POOL_SIZE),
+        max(1.0, HERMX_SUBMIT_TIMEOUT_SECONDS),
+        HERMX_WATCHDOG_ENABLED,
     )
 
 
 def main():
     ROOT.mkdir(parents=True, exist_ok=True)
+    if not SECRET:
+        logging.error("Webhook auth misconfigured: SHADOW_WEBHOOK_SECRET is missing/blank. Receiver FAILS CLOSED with 401 for all webhook requests.")
+    if HERMX_REQUIRE_HMAC and not HERMX_WEBHOOK_HMAC_KEY:
+        logging.error("HMAC is required but HERMX_WEBHOOK_HMAC_KEY is missing/blank. Receiver FAILS CLOSED with 401 for all webhook requests.")
+    if not env_file_permissions_healthy():
+        logging.error(".env permissions are too broad; expected 600-style owner-only access.")
     quarantine_summary = startup_quarantine_partial_ledgers()
     if quarantine_summary["quarantined"]:
         logging.warning("Startup quarantined truncated ledger tails: %s", quarantine_summary["quarantined"])
@@ -3923,7 +4468,15 @@ def main():
         logging.error("startup reconcile failed (observe-only, continuing): %s", exc)
     if unknown_resolver_enabled():
         threading.Thread(target=unknown_resolver_loop, daemon=True, name="unknown-resolver").start()
-    threading.Thread(target=worker_loop, daemon=True, name="shadow-policy-worker").start()
+    pool_size = max(1, HERMX_WORKER_POOL_SIZE)
+    _WORKER_NAMES.clear()
+    for i in range(pool_size):
+        worker_name = f"shadow-policy-worker-{i + 1}"
+        _WORKER_NAMES.append(worker_name)
+        _set_worker_heartbeat(worker_name)
+        threading.Thread(target=worker_loop, args=(worker_name,), daemon=True, name=worker_name).start()
+    if HERMX_WATCHDOG_ENABLED:
+        threading.Thread(target=liveness_watchdog_loop, daemon=True, name="watchdog").start()
     server = HTTPServer(("127.0.0.1", PORT), Handler)
     logging.info("MXC VPS shadow receiver listening on 127.0.0.1:%s", PORT)
     server.serve_forever()

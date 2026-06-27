@@ -32,8 +32,8 @@ TradingView alert ──HTTP──▶ webhook_receiver.py (127.0.0.1:8891, singl
 
 - **Concurrency model (verified):** `HTTPServer` is single-threaded (`webhook_receiver.py:2335`); exactly **one** worker thread consumes the queue (`:2334`, `worker_loop` `:2278`). The HTTP handler only enqueues and returns immediately (`:2325-2326`). Therefore in-memory/state mutation is **serialized today**.
 - **This materially changes risk triage.** The "CRITICAL race conditions on paper state" reported by static analysis are **latent, not active** — they become real only if the worker pool grows or the server becomes threading. They are tracked here as hardening, not P0 bugs. The genuine P0s are crash recovery, exchange reconciliation, auth, unbounded queue, and head-of-line blocking.
-- **Two executor systems coexist.** Top-level `src/okx_demo_executor.py` (751 lines, battle-tested, the only one actually invoked) + an unused `src/executors/` package (factory + adapters) + a dead third base class `src/executors/base_executor.py`. `ExecutorFactory` is imported but never called (`webhook_receiver.py:201`).
-- **Everything is OKX-coupled** despite an exchange-agnostic ambition documented in `ARCHITECTURE.md`.
+- **Three executor surfaces exist today, none of them the target.** Top-level `src/okx_demo_executor.py` (the only path invoked) + an unused `src/executors/` package + a dead `src/executors/base_executor.py`. Plan v2 replaces all three with one controlled execution API, with legacy OKX path retained only as a shadow oracle during cutover.
+- **Everything is OKX-coupled** today despite an exchange-agnostic ambition documented in `ARCHITECTURE.md`; Plan v2 adopts CCXT as the exchange execution/polling implementation to avoid connector sprawl.
 
 ### 0.2 Guiding constraints
 
@@ -53,10 +53,41 @@ The system must support credentials for **multiple exchanges at the same time** 
 1. **Per-exchange, namespaced credentials.** Each exchange has its own credential set under a stable prefix derived from the adapter id — e.g. `OKX_API_KEY` / `OKX_SECRET_KEY` / `OKX_PASSPHRASE`, `KUCOIN_API_KEY` / `KUCOIN_SECRET_KEY` / `KUCOIN_PASSPHRASE`, `BYBIT_API_KEY` / `BYBIT_SECRET_KEY`. No exchange ever shares another's keys. The prefix is a function of the exchange, not duplicated per strategy.
 2. **Strategy selects the exchange; it never carries secrets.** A strategy file picks its exchange + API endpoint (the `instrument.exchange` / endpoint config from P6) and references a credential set **by exchange/id only** — never inline keys. Many strategies on the same exchange share that exchange's single credential set.
 3. **Endpoint and credentials are separate concerns.** API base URL / demo-vs-live endpoint is config- or strategy-selectable; credentials are resolved independently by the adapter from the namespaced env. (Demo vs. live OKX may use different key sets *and* endpoints.)
-4. **Adapter-scoped resolution + least-privilege (ties S4).** `ExecutorFactory`/the adapter resolves only the **selected** exchange's credentials and passes ONLY those into that adapter's subprocess `env={...}` — never the full parent env, never another exchange's keys. Adapter X must be structurally unable to read exchange Y's secrets.
+4. **Adapter-scoped resolution + least-privilege (ties S4/S8).** The controlled execution API resolves only the **selected** exchange's credentials and constructs only that exchange adapter/client with those namespaced values — never another exchange's keys. Optional worker-process isolation can still be used where required.
 5. **Fail closed on missing/partial credential set.** If a strategy selects an exchange whose credential set is unset or incomplete, that strategy is disarmed (no-submit) with a loud operator alert. It must NOT fall back to another exchange's keys or to an unauthenticated path.
 6. **Rotation per exchange (ties S6).** The rotation procedure is documented per-exchange; rotating one exchange's keys must not affect any other.
 7. **Env enumeration.** `.env` / `setup/env.example` enumerate the namespaced credential block for each supported exchange (empty placeholders), alongside shared non-exchange settings (`SHADOW_WEBHOOK_SECRET`, ports, Cloudflare). Live keys stay absent until explicitly provisioned.
+
+### 0.5 Target execution architecture (Plan v2)
+
+All exchange I/O (submission and polling/reconciliation) flows through a single internal API surface (`ExecutionService`).
+
+```
+TradingView webhook
+      ↓
+Hermes analysis skill
+      ↓
+Hermes execution skill
+      ↓
+ExecutionService (controlled API + risk controls)
+      ↓
+CCXT adapter (only exchange implementation)
+      ↓
+OKX / KuCoin / Bybit / ...
+```
+
+- **Hermes skill for execution:** Hermes decides and requests execution through the skill contract, not by hardcoding exchange calls in strategy logic.
+- **Controlled API layer:** `ExecutionService` is the only allowed gateway for submit/reconcile and owns all gate precedence and runtime safety checks.
+- **Risk controls stay in HermX code:** idempotency, write-ahead journal transitions, reconciliation semantics, symbol pause, and kill switches remain in first-party code, above CCXT.
+- **CCXT is transport, not policy:** CCXT handles exchange I/O and normalization across venues; it does not own risk policy.
+
+Execution invariants in Plan v2:
+1. No submit unless all gates are affirmative; ambiguous/unset gate => no-submit.
+2. `PLANNED`/`SUBMITTED` are journaled durably before exchange submission.
+3. `UNKNOWN` is first-class and always triggers reconciliation.
+4. Stable `client_order_id` dedupe remains primary in journal; exchange dedupe remains secondary.
+5. Money math remains `Decimal` in engine state/journals; CCXT numeric boundaries are normalized at API edge.
+6. Credentials remain namespaced per exchange with fail-closed behavior on missing/partial sets.
 
 ---
 
@@ -86,6 +117,7 @@ Grouped by theme; each maps to a phase below. Line numbers are current as of ana
 | S4 | P1 | `:2043-2051`, `:2064-2065` | Full parent env (all secrets) copied into the executor subprocess; on failure, subprocess `stdout/stderr[-2000:]` (may contain key fragments / tracebacks) is written into the execution ledger. |
 | S5 | P1 | `dashboard.py:1827`, `:1798-1820`, `/api` | Dashboard binds localhost (good) but has **no auth**; behind the Cloudflare tunnel it would expose live positions, budgets, PnL, and signals to anyone with the URL. |
 | S6 | P2 | secrets via env, no rotation | OKX keys live in `.env` / process env, readable via `/proc/<pid>/environ`; no documented rotation. |
+| S8 | P1 | Plan v2 CCXT integration | Moving exchange I/O in-process with CCXT can weaken subprocess isolation if done naively; mitigate with per-exchange client construction, strict redaction, and optional scoped worker-process mode if required. |
 | S7 | P3 | `dashboard.py:177` (`esc`) | Output is escaped today; keep it that way if any user-influenced field is ever surfaced. |
 
 ### 1.3 Dashboard reliability (Phase 4)
@@ -100,13 +132,14 @@ Grouped by theme; each maps to a phase below. Line numbers are current as of ana
 | D7 | P2 | `dashboard.py:41-46`, `:976-995`, `:1672` | Cache TTL vs client refresh interval mismatch; "Updated" label shows cache-expiry, not data age → silently stale. |
 | D8 | P2 | `:132-153` vs `dashboard.py:73-82` | `canonical_timeframe` duplicated in receiver and dashboard; drift breaks matching. |
 
-### 1.4 Executor architecture (Phase 5)
+### 1.4 Execution API & exchange I/O architecture (Phase 5)
 | ID | Sev | Location | Issue |
 |----|-----|----------|-------|
 | X1 | P1 | `src/executors/base_executor.py` | Dead third base class; only importer is the orphaned `src/kucoin_paper_executor.py:14` (wrong import path). |
-| X2 | P1 | `webhook_receiver.py:201`, `dashboard.py:442,507` | Execution & dashboard hardcode the OKX script path; `ExecutorFactory` is imported but never used. Two execution models (OKX out-of-process, KuCoin in-process). |
-| X3 | P2 | `okx_demo_executor.py` whole file | OKX REST/signing/contract-math all inline; adding Bybit/Binance means duplicating ~1k lines unless the adapter contract is adopted. |
-| X4 | P2 | `base.py:39-103` | The clean `BaseExecutor` contract exists but `readiness` schema is undocumented and field naming is inconsistent (`inst_id` vs `okx_inst_id`). |
+| X2 | P1 | `webhook_receiver.py`, `dashboard.py` | No single controlled execution API chokepoint; order submission and polling logic are fragmented. |
+| X3 | P1 | `okx_demo_executor.py` whole file | Exchange execution/polling is hand-rolled and venue-coupled; scaling to many venues would duplicate connector logic. |
+| X4 | P2 | `src/executors/base.py` / readiness payload | Contract is promising but inconsistent field naming and implicit schema limit clean agent-skill integration. |
+| X5 | P2 | skills/docs | Hermes has no first-class execution skill contract for controlled, auditable execution requests. |
 
 ### 1.5 Schema / exchange-agnosticism (Phase 6)
 | ID | Sev | Location | Issue |
@@ -132,7 +165,7 @@ P1  Critical Bug Fixes             (state durability, reconcile)    ~1–2 wk   
 P2  Security Hardening             (auth, HMAC, queue bounds)       ~1 wk
 P3  Execution Engine Stabilization (idempotency, timeouts, atomic)  ~1–2 wk
 P4  Dashboard Reliability          (safe reads, dynamic cards)      ~1 wk
-P5  Executor Consolidation         (one factory, delete dead code)  ~1 wk
+P5  Execution API + CCXT Cutover   (skill+API+risk+ccxt write path) ~1–2 wk
 P6  Schema Modernization           (exchange-agnostic)              ~1 wk
 P7  Test Strategy & CI Hardening   (coverage gates, pipeline)       ongoing
 ```
@@ -169,16 +202,17 @@ P7  Test Strategy & CI Hardening   (coverage gates, pipeline)       ongoing
 
 **Tasks**
 1. `git init`, commit the current tree as the baseline, add a remote (private). Confirm `.gitignore` already excludes `.env`, state files, and `logs/` (it does) — **verify no secrets were ever committed**. Run secret scan **before first push**.
-2. Pin dependencies: `requirements.txt` currently only lists `kucoin-python`. Add explicit versions for everything actually imported (stdlib is fine, but pin `kucoin-python`, add `pytest`, `jsonschema`, and a lint/format toolchain to a `requirements-dev.txt`).
+2. Pin dependencies: add an explicit pinned `ccxt` version and keep dependency drift controlled across environments. Add explicit versions for everything actually imported (stdlib is fine), plus `pytest`, `jsonschema`, and a lint/format toolchain in `requirements-dev.txt`.
 3. Stand up a test harness (`pytest`) with a `tests/` dir and fixtures that point `SHADOW_ROOT` at a temp dir so tests never touch real logs/state.
 4. **Capture a fixture corpus (prerequisite for all later test work).** Before any characterization test is written, record a versioned corpus of **real, anonymized inputs** under `tests/fixtures/`: representative TradingView alert payloads (at least one per active strategy, covering buy / sell / reverse plus one malformed and one duplicate), the matching `strategies/*.json`, captured `okx_demo_executor` stdout for **fill / partial-fill / reject / timeout** outcomes, a seed `paper-state`/journal snapshot, and recorded OKX REST payload fixtures for reconciliation paths (`trade/order`, `orders-pending`, `orders-history-archive`, `account/positions`, `account/balance`) including not-found/aged-out variants. Check the corpus in and hash-stamp it so it is a stable, shared oracle rather than ad-hoc per-test inputs.
    - Add `tests/fixtures/MANIFEST.sha256` plus a verifier test that fails on drift.
    - Corpus must pass the same secret redaction/scan gate used in P2/S4 before commit.
    - Immediate Hotfix synthetic alert test remains allowed before this corpus exists; backfill it to the corpus in this phase.
-   - **The same corpus is consumed by P1 (crash-recovery, partial-fill reconciliation), P3 (`clOrdId` idempotency, `Decimal` math), P5 (factory↔legacy shadow comparison), and P7 (mock-OKX component tests)** — no later phase invents its own inputs.
+   - **The same corpus is consumed by P1 (crash-recovery, partial-fill reconciliation), P3 (`clOrdId` idempotency, `Decimal` math), P5 (CCXT↔legacy shadow comparison), and P7 (mock-CCXT component tests)** — no later phase invents its own inputs.
 5. **Characterization tests** (lock current behavior before touching it): replay the fixture corpus through `process_alert`/`apply_paper_trading` and snapshot the resulting ledger rows + paper state. These are the regression oracle for P1/P3.
 6. Add a global **kill switch**: a single env/flag (`HERMX_SUBMIT_ENABLED=false`) checked at the top of `execute_okx_if_enabled` that hard-blocks all order submission regardless of config. Document it in `skills/emergency-stop.md`.
 7. Write a `make`/script target to run the receiver + dashboard against the demo profile locally for manual smoke testing.
+8. Add `skills/hermes-execution.md` as the execution skill contract skeleton: inputs, outputs, gate precedence, dry-run/live behavior, and operator controls.
 
 **Risk:** Minimal (no runtime behavior change except the new, default-safe kill switch).
 
@@ -204,15 +238,16 @@ P7  Test Strategy & CI Hardening   (coverage gates, pipeline)       ongoing
    - Use strict write-ahead ordering for submissions: persist (`fsync`) the `PLANNED`/`SUBMITTED` journal record (intent + ids) **before** invoking the order submission call, so restart reconciliation has authoritative keys.
    - Add `schema_version` to each journal record and define replay compatibility rules (forward/backward handling + migration path) before introducing new record shapes (e.g., `Decimal` serialization, idempotency metadata).
 2. **Atomic, durable writes (E4).** Wrap all ledger appends with `flush()` + `os.fsync()`; on startup, detect and quarantine a trailing partial line rather than crashing the reader.
-3. **Expose a queryable OKX interface used by reconciliation.** Implement a supported query path (either importable client module or explicit CLI verbs) for `trade/order`, `orders-pending`, `orders-history-archive`, `account/positions`, and `account/balance` so reconciliation does not depend on parsing `execute` stdout.
-4. **Exchange reconciliation on startup and post-submit (E2).** Reconciliation is an explicit contract, not an ad-hoc call:
-   - **Endpoints (OKX v5, via the existing HMAC signer in `okx_demo_executor.py`):** order status — `GET /api/v5/trade/order` with required `instId` + (`ordId` preferred, `clOrdId` fallback); if absent there, fallback to `GET /api/v5/trade/orders-pending`, then `GET /api/v5/trade/orders-history-archive` if the order has aged out of the live set. Position truth — `GET /api/v5/account/positions`; balance — `GET /api/v5/account/balance`.
-   - **Checks:** (a) order `state` ∈ {`live`, `partially_filled`, `filled`, `canceled`}; (b) `accFillSz`/`avgPx` reconciled against the intended `target_notional_usd` using the instrument contract multiplier / unit conversion; (c) net `pos`/`posSide` from `account/positions` against the journal-derived expected position for the symbol with explicit `posMode` mapping and tolerance bands.
-   - **Partial-fill mapping:** `state=partially_filled` (or `0 < accFillSz < ordered`) → outcome `FILLED` with `partial=true`, and the journal records the **actual** `accFillSz`/`avgPx`, never the intended size. `accFillSz=0` with a terminal `state` (`canceled`) → `REJECTED`. A non-terminal `state` past the polling deadline → `UNKNOWN`.
+3. **Expose a queryable exchange interface used by reconciliation.** Implement a supported polling path through the controlled execution API + CCXT adapter (`fetch_order`, fallback open/history order lookups, `fetch_positions`, `fetch_balance`) so reconciliation never depends on submit-return payload parsing.
+4. **Exchange reconciliation on startup and post-submit (E2).** Reconciliation is an explicit contract in a controlled execution API, not ad-hoc calls:
+   - **CCXT read path first:** implement exchange polling through CCXT (`fetch_order`, `fetch_open_orders`/equivalent fallback, `fetch_positions`, `fetch_balance`) while keeping existing legacy execution path as temporary oracle during rollout.
+   - **Venue fallback semantics:** if one CCXT method is unavailable per venue, adapter documents ordered fallback calls and maps to normalized statuses consistently.
+   - **Checks:** (a) normalized order status (`open`/`partially_filled`/`filled`/`canceled`); (b) actual `filled` and `average` reconciled against intended `target_notional_usd` using instrument conversion rules; (c) net position from `fetch_positions` against the journal-derived expected position for the symbol within explicit tolerance bands.
+   - **Partial-fill mapping:** `partially_filled` (or `0 < filled < ordered`) → outcome `FILLED` with `partial=true`, and the journal records **actual** filled size/avg price, never intended size. `filled=0` with terminal `canceled` → `REJECTED`. A non-terminal status past polling deadline → `UNKNOWN`.
    - **Not-found mapping:** if submit failed before acknowledgement and order lookup returns not-found (`order does not exist`) → `REJECTED`; if submission path indicated possible send but lookup chain is inconclusive → `UNKNOWN`.
    - **Retry bounds:** poll order status with bounded exponential backoff — **max 5 attempts**, base 500 ms, cap ~8 s, total wall-clock ≤ ~20 s. When the bound is exhausted the outcome is `UNKNOWN` and `RECONCILE_MISMATCH` is emitted. No unbounded polling, and the *submission* itself is never silently retried.
-   - **Post-submit:** after `okx_demo_executor execute`, always reconcile by `clOrdId` per the above and record the *confirmed* fill — never trust stdout alone.
-   - **Startup:** a reconciliation pass compares OKX `account/positions` against the local journal and emits a loud `RECONCILE_MISMATCH` alert if they diverge (does not auto-trade; operator decides). New submission remains disarmed until startup reconcile completes.
+   - **Post-submit:** after any submit path, always reconcile by client order id and record the *confirmed* fill — never trust submit-return payload alone.
+   - **Startup:** a reconciliation pass compares exchange-reported positions against the local journal and emits a loud `RECONCILE_MISMATCH` alert if they diverge (does not auto-trade; operator decides). New submission remains disarmed until startup reconcile completes.
 5. **Define a "submission outcome" state machine:** `PLANNED → SUBMITTED → (FILLED | REJECTED | UNKNOWN)`. `UNKNOWN` (timeout/crash) is a first-class state that triggers reconciliation rather than being treated as failure.
 6. **UNKNOWN resolver + operator controls.** Add a periodic resolver loop that re-reconciles all non-terminal `UNKNOWN`/`SUBMITTED` records until terminal or timeout budget expiry. Add an explicit per-symbol pause artifact (persisted in control state) and a concrete alert transport (not just JSONL) for `RECONCILE_MISMATCH` / queue saturation / auth failures.
 7. **Journal lifecycle (compaction/checkpoint policy).** Add periodic verified checkpoints so startup replay cost stays bounded and disk usage does not grow without limit:
@@ -234,7 +269,7 @@ This resolves the apparent contradiction between "the journal is the only source
 - [ ] Injected truncated ledger line → reader quarantines it and continues; no unhandled exception.
 - [ ] Forced subprocess timeout → outcome recorded as `UNKNOWN`, reconciliation runs, `RECONCILE_MISMATCH` emitted when local≠exchange.
 - [ ] Startup reconciliation runs against OKX demo and reports a clean match for a known-flat account.
-- [ ] Reconciliation query interface is available independently of `execute` and integration-tested against fixture responses for success/partial/not-found/aged-out paths.
+- [ ] Reconciliation query interface is available independently of `execute`, implemented through CCXT read methods, and integration-tested against success/partial/not-found/aged-out fixture paths.
 - [ ] `UNKNOWN` records are periodically re-reconciled and either converge to terminal state or remain explicitly tracked with alerting and per-symbol pause.
 - [ ] Checkpoint + journal-segment rotation keeps replay bounded (startup replay time no longer grows linearly with full history) and preserves exact state equivalence.
 - [ ] All P0 characterization tests still pass (no PnL/ledger regressions).
@@ -253,7 +288,7 @@ This resolves the apparent contradiction between "the journal is the only source
 3. **Bound the queue + basic rate limiting (S3).** Cap `PROCESS_QUEUE` (`maxsize`), return `503` when full, and add a per-source request rate limit. Behind Cloudflare Tunnel, rate-limit by authenticated key id or `CF-Connecting-IP` (not tunnel source IP). Read `Content-Length` with a hard max body size before buffering.
    - **Sequencing note (maxsize stays permissive until P3 lands):** in P2 the queue is still drained by the **single serial worker** — head-of-line blocking is not removed until **P3**. A tight `maxsize` here would shed *legitimate* alerts during a transient backlog (one slow 45 s OKX call can back up four strategies firing on the same bar close). So ship P2 with a **deliberately generous `maxsize`**, sized to absorb a worst-case serial drain rather than to throttle, and rely on the **hard body-size cap + per-source rate limit** as the real DoS bound. **Tighten `maxsize` to its true enforcing value only after P3's bounded per-symbol worker pool lands**, when a full queue signals genuine overload rather than single-worker latency. Until then the bound is a safety ceiling, not an alert-dropping floor (matches the `queue maxsize default permissive` rollback default below).
    - Request-path order is explicit: `(1) Content-Length/max-body check -> 413`, `(2) rate-limit`, `(3) auth/HMAC verify`, `(4) enqueue or 503`. Every `503` emits an operator alert because it represents a dropped trading signal.
-4. **Subprocess least-privilege (S4).** Pass only the explicit vars the executor needs (`env={...}`), not `os.environ.copy()`. Redact/scrub captured `stdout/stderr` before writing to the ledger (strip anything matching key/secret patterns). **Scope the injected vars to the selected exchange's namespaced credential set only (see §0.4)** — an adapter never receives another exchange's keys.
+4. **Execution adapter least-privilege (S4/S8).** Build per-exchange CCXT clients from only selected exchange namespaced credentials (see §0.4), never a global credential bag. Redact/scrub exchange exceptions/results before ledger writes (strip key/secret patterns and request payload fragments). Keep optional scoped worker-process mode documented for environments needing extra process isolation.
 5. **Dashboard auth (S5).** Require a token (or HTTP basic) on `dashboard.py` and `/api`; never serve PnL/positions unauthenticated even on localhost-behind-proxy. Keep the localhost bind. Fail closed when dashboard auth token/config is missing.
 6. **Execution gate precedence table.** Document and implement explicit precedence: live submission requires **all** gates affirmative (`HERMX_SUBMIT_ENABLED=true` AND `execution.submit_orders=true` AND `risk.allow_live_execution=true` AND auth healthy). Any unset/ambiguous state defaults to dry-run/no-submit.
 7. **Secrets hygiene (S6).** Document a **per-exchange** rotation procedure in `setup/` (rotating one exchange's keys must not affect others); confirm `.env` is git-ignored (it is) and add a pre-commit secret scan. Define the namespaced per-exchange credential blocks (§0.4) in `setup/env.example` with empty placeholders, and tighten `.env` file permissions (currently world-readable `rw-r--r--`) to `600`.
@@ -270,7 +305,7 @@ This resolves the apparent contradiction between "the journal is the only source
 - [ ] Signing relay (if used) is deployed with authenticated ingress + key-rotation procedure + health checks, and receiver fails closed on missing/invalid relay signature.
 - [ ] Queue saturation returns `503`, memory stays bounded under a flood test.
 - [ ] Queue `maxsize` is configured from measured burst/serial-latency capacity (`peak arrival × worst-case serial drain`) and only tightened after P3 concurrency rollout.
-- [ ] Executor subprocess env contains only whitelisted keys (asserted by test); ledger entries contain no secret-shaped strings.
+- [ ] Per-exchange CCXT client construction uses only selected exchange credentials (asserted by test); ledger entries contain no secret-shaped strings.
 - [ ] Unauthenticated dashboard/`/api` request returns `401`.
 - [ ] Execution gate-precedence matrix is documented and covered by tests (any unset/ambiguous gate => no-submit).
 
@@ -286,10 +321,12 @@ This resolves the apparent contradiction between "the journal is the only source
 3. **Idempotent submission (E7).** A deterministic `client_order_id` is *already* generated and passed to OKX as `clOrdId` (`:1980`) — the gap is **stability and semantics of the value**, not wiring it through.
    - Generate a stable **32-char alphanumeric** `clOrdId` from durable signal identity plus semantic order role (e.g. `strategy_id + asset + signal/bar timestamp + role{close|open|reduce}`), with no wall-clock entropy and no positional counters. Same signal+role => same id across retries/restarts; distinct roles => distinct ids.
    - Validate id constraints pre-submit (≤32 chars, alphanumeric) and reject invalid ids before API call.
+   - Validate per-exchange id constraints pre-submit inside the adapter/API boundary (OKX uses ≤32 alphanumeric), rejecting invalid ids before any API call.
    - Treat durable journal dedupe as the **primary** idempotency guard (`check-before-submit`); treat exchange-side `clOrdId` dedupe as secondary in-flight protection only.
    - Persist dedupe in the durable journal (not a 5000-cap file) and key replay protection on signal identity + time window (ties into S2).
 4. **Money math (E6).** Introduce `Decimal` for notional/fee/PnL in the paper engine and any value compared against exchange fills; centralize rounding rules.
    - Serialize `Decimal` as canonical strings in ledgers/journal to avoid float reintroduction on round-trip.
+   - Normalize CCXT numeric responses at API edge before entering engine state so floats never leak into money-state logic.
    - Re-baseline characterization snapshots for money fields at this phase using an explicit tolerance/normalization rule; structural/event-order assertions from P0 remain strict.
 5. **Concurrency-safe state (E8).** With a worker pool now real, add the locking/atomic-state discipline that was previously only latent: per-symbol locks around journal-derived state, atomic snapshot writes with unique temp names. (This is now load-bearing, not theoretical.)
 6. **Active liveness/watchdog controls.** Add worker heartbeat + queue-lag watchdog + resolver heartbeat with explicit alerting/auto-pause behavior:
@@ -305,6 +342,7 @@ This resolves the apparent contradiction between "the journal is the only source
 - [ ] The same signal+role regenerates a stable 32-char alphanumeric `clOrdId` across process restarts (unit test), while close/open roles for a reversal produce distinct ids.
 - [ ] Replay-after-fill is blocked by durable journal dedupe even when exchange-side `clOrdId` dedupe no longer applies (integration test).
 - [ ] PnL computed with `Decimal` matches a hand-checked fixture to the cent.
+- [ ] Exchange numeric payloads are normalized at the API boundary and do not bypass `Decimal` handling (boundary test).
 - [ ] Characterization suite policy is explicit: money-value snapshots are tolerance-normalized/re-baselined at P3; non-money structural assertions remain strict and unchanged.
 - [ ] Per-symbol ordering preserved under load (open-before-close invariant holds in a fuzz test).
 - [ ] Heartbeat/watchdog tests prove stale worker/resolver states trigger alert + submission pause, and recovery clears degraded state safely.
@@ -337,27 +375,32 @@ This resolves the apparent contradiction between "the journal is the only source
 
 ---
 
-### Phase 5 — Executor Architecture Consolidation
+### Phase 5 — Execution API + CCXT Cutover
 
-**Goal:** One execution path, one abstraction, no dead code. Fixes X1–X4. **Recommendation: activate the existing `src/executors/` factory (composition over the proven OKX script); do not rewrite the OKX REST client.**
+**Goal:** One controlled execution path, one skill/API contract, and CCXT as the exchange execution/polling implementation. Fixes X1–X5.
+
+Implementation kickoff checklist: `docs/P5_EXECUTION_API_CCXT_KICKOFF.md`.
+Skill contract: `skills/hermes-execution.md`.
 
 **Tasks**
-1. **Delete the dead system (X1).** Remove `src/executors/base_executor.py` and the orphaned `src/kucoin_paper_executor.py`; or, if KuCoin paper is wanted, repoint it to `src/executors/base.BaseExecutor`.
-2. **Wire the factory in (X2).** Replace the hardcoded subprocess call in `webhook_receiver.py:2024-2085` and the dashboard's direct OKX calls (`dashboard.py:442,507`) with `ExecutorFactory.create(CONFIG, ROOT)`. The OKX adapter keeps shelling out to the proven `okx_demo_executor.py` — no reimplementation.
-3. **Formalize the contract (X4).** Document the `readiness`/instruction schema and the normalized result envelope on `BaseExecutor.execute`; unify `inst_id` vs `okx_inst_id` naming behind one accessor.
-4. **Keep the OKX REST client as-is (X3)** but expose it only through the adapter, so a future Bybit/Binance adapter is ~100 lines (compose another CLI/REST client) rather than a fork of the engine.
-5. **Adapter-scoped credential resolution (X2, see §0.4).** The factory resolves the selected exchange's **namespaced** credentials (`<EXCHANGE>_API_KEY/...`) and an API endpoint, and injects only that adapter's keys into its subprocess env (composes with S4 least-privilege). Multiple exchanges' credential sets coexist; a strategy's `instrument.exchange` selects which set is used. A missing/partial set fails closed (disarms that exchange) rather than borrowing another's keys.
+1. **Introduce `ExecutionService` as single chokepoint (X2).** Route submission/reconciliation through one internal API that owns gate precedence, idempotency checks, journal write-ahead transitions, and risk constraints.
+2. **Hermes execution skill (X5).** Implement the concrete skill contract that calls `ExecutionService` (`analyze -> translate -> execute`) using strategy JSON + runtime context, with explicit dry-run/live mode behavior.
+3. **CCXT write-path adapter (X3).** Extend CCXT integration from read/polling into live submit/cancel/amend path with venue translation handled in adapter params.
+4. **Shadow parity before cutover.** Keep legacy OKX path as oracle during soak; compare normalized readiness/fill outcomes between legacy and CCXT paths before enabling CCXT write-path for submission.
+5. **Finalize contract normalization (X4).** Enforce consistent naming and normalized execution payloads (`symbol`, `status`, `filled`, `avg_price`, `client_order_id`, `outcome`).
+6. **Delete dead executor surfaces (X1).** Remove dead base/orphaned paths once CCXT cutover and rollback path are proven.
 
-**Risk:** MEDIUM — the factory becomes the live order path. Mitigation: behind `HERMX_EXECUTOR_BACKEND=factory|legacy`; run factory in shadow (plan-only, compare its **normalized** readiness/result against the legacy direct call) before switching live submission to it.
+**Risk:** HIGH — this changes the live execution write path. Mitigation: keep kill switch precedence unchanged, flag-gate API routing/cutover, and require shadow parity over meaningful alert cycles before enabling submit.
 
-**Rollback:** Flip `HERMX_EXECUTOR_BACKEND=legacy`.
+**Rollback:** Keep `legacy` execution backend flag available until one clean release completes on CCXT write-path; emergency rollback remains kill-switch first, backend second.
 
 **Acceptance criteria**
-- [ ] `src/executors/base_executor.py` removed; no remaining importers; `grep` clean.
-- [ ] Both receiver and dashboard obtain executors only via `ExecutorFactory`; no hardcoded script paths remain.
-- [ ] Factory path produces **normalized-equivalent** readiness and equivalent fills vs legacy in shadow comparison over a soak window — compared after canonicalization (sorted keys, normalized number formatting / `Decimal` quantization, whitespace) and after dropping legitimately non-deterministic fields (timestamps, `clOrdId` nonces, request ids), **not** by byte-for-byte diff. Any residual non-normalized difference is investigated and resolved before cutover.
-- [ ] A stub `bybit` adapter can be registered and selected via config without touching receiver/dashboard code (proof-of-extensibility test).
-- [ ] Multiple exchanges' credential sets coexist; an adapter's subprocess env contains **only** its own exchange's namespaced credentials (test asserts no cross-exchange secret leakage), and a missing/partial credential set disarms that exchange (fail-closed) instead of falling back (§0.4).
+- [ ] Receiver/dashboard/order path call exchange I/O only through controlled execution API; no direct hardcoded exchange script path remains in active path.
+- [ ] Hermes execution skill is documented and implemented as the only agent-facing execution surface.
+- [ ] CCXT path produces normalized-equivalent results vs legacy during shadow soak (after canonicalization and removal of nondeterministic fields).
+- [ ] At least one non-OKX stub adapter path can be configured and dry-run end-to-end without receiver/dashboard code edits.
+- [ ] Per-exchange credentials remain isolated; missing/partial set fails closed and cannot borrow another exchange credential set.
+- [ ] Dead executor base/orphaned paths are removed only after cutover acceptance and rollback proof.
 
 ---
 
@@ -371,6 +414,8 @@ This resolves the apparent contradiction between "the journal is the only source
 3. **Generic instruction wire format (M3).** Make the readiness/instruction the exchange-agnostic shape from `ARCHITECTURE.md` (`strategy_id, asset, target_side, target_notional_usd, margin_mode, leverage`); let the adapter translate to OKX `inst_id`/`td_mode`. OKX-specific fields move *inside* the OKX adapter.
 4. **Migrate the four live strategy files** to v2 in a single reviewed change once the shim is proven.
 
+   - Plan v2 requirement: support CCXT-unified symbol expression where possible (for example `BTC/USDT:USDT`) with optional exchange-native override fields for edge cases.
+
 **Risk:** MEDIUM — schema changes can break matching/validation. Mitigation: dual-version loader, validate both schemas in CI, migrate strategy files last and one at a time on the demo account.
 
 **Rollback:** Loader accepts v1 and v2 simultaneously; revert individual strategy files to v1 if needed.
@@ -378,6 +423,7 @@ This resolves the apparent contradiction between "the journal is the only source
 **Acceptance criteria**
 - [ ] v1 and v2 strategy files both load and execute correctly (parametrized test over both).
 - [ ] A non-OKX (e.g. stub Bybit) strategy validates and routes to the right adapter end-to-end in dry-run.
+- [ ] A strategy defined with CCXT-unified symbol format can be translated and routed by the execution API in dry-run.
 - [ ] Alerts are schema-validated at intake; invalid alerts are quarantined (per existing `quarantine_invalid_strategy_alerts` config).
 - [ ] All four production strategies migrated to v2 with identical resulting orders vs v1 (diff test).
 - [ ] A strategy selecting a second exchange (e.g. KuCoin) resolves that exchange's namespaced credentials + endpoint end-to-end in dry-run with **no code change**; a strategy with no/partial credentials for its selected exchange is disarmed with an operator alert and never borrows another exchange's keys (§0.4).
@@ -390,9 +436,10 @@ This resolves the apparent contradiction between "the journal is the only source
 
 **Test pyramid**
 - **Unit:** PnL/fee/`Decimal` math, `canonical_timeframe`, schema validation, dedupe/idempotency keys, HMAC/replay logic, executor result normalization.
-- **Component:** `process_alert` → journal → readiness, with a **mock OKX adapter** (no network) asserting orders/ledger/state.
+- **Component:** `process_alert` → Hermes execution skill → `ExecutionService` → journal/reconcile, with a **mock CCXT adapter** (no network) asserting orders/ledger/state.
 - **Crash/recovery:** kill-mid-trade, truncated ledger, reconciliation mismatch (from P1/P3).
 - **Contract:** strategy + alert JSON schema validation in CI; `scripts/validate_package.py` folded into the suite.
+- **CCXT conformance:** pinned fixture tests for status mapping, order id round-trip, and numeric normalization boundaries across supported exchanges.
 - **Integration (gated, manual/scheduled):** against OKX **demo** only, behind a CI flag and the kill switch, asserting idempotency and reconciliation. Never runs against live keys in CI.
 - **Dashboard snapshot:** rendered model/`/api` golden files.
 
@@ -407,7 +454,8 @@ This resolves the apparent contradiction between "the journal is the only source
 
 **Acceptance criteria**
 - [ ] CI green required to merge; coverage gate enforced and monotonic.
-- [ ] Mock-OKX component tests cover open/close/reverse/reject/timeout paths.
+- [ ] Mock-CCXT component tests cover open/close/reverse/reject/timeout paths.
+- [ ] CCXT conformance tests fail on incompatible mapping drift and enforce pinned-version behavior.
 - [ ] Secret scan blocks commits containing key-shaped strings.
 - [ ] Demo-integration job runs on schedule and reports idempotency + reconciliation status.
 - [ ] Demo-integration job uses masked **demo-only** credentials (asserted non-live, fork PRs excluded) and asserts the kill switch (`HERMX_SUBMIT_ENABLED=false` → zero submissions) before any armed test runs.
@@ -417,7 +465,7 @@ This resolves the apparent contradiction between "the journal is the only source
 ## 3. Cross-Phase Migration & Rollback Strategy
 
 **Principles**
-- **Everything risky is flag-gated**, default to current behavior, flip per-environment. Master switches: `HERMX_SUBMIT_ENABLED`, `HERMX_STATE_BACKEND`, `HERMX_REQUIRE_HMAC`, `HERMX_DASH_AUTH`, `HERMX_WORKER_POOL_SIZE`, `HERMX_EXECUTOR_BACKEND`, strategy `schema_version`.
+- **Everything risky is flag-gated**, default to current behavior, flip per-environment. Master switches: `HERMX_SUBMIT_ENABLED`, `HERMX_STATE_BACKEND`, `HERMX_REQUIRE_HMAC`, `HERMX_DASH_AUTH`, `HERMX_WORKER_POOL_SIZE`, `HERMX_EXEC_API`, `HERMX_EXEC_BACKEND`, strategy `schema_version`.
 - **Soak in shadow before switching.** New state backend, new executor backend, and reconciliation each run in parallel/observe-only against the demo account before they take authority.
 - **Forward-compatible data.** Journal + legacy snapshot written together during P1 soak; v1+v2 schemas loadable together during P6. No destructive migration until the new path is proven.
 - **Gate precedence is explicit and test-backed.** Any gate unset/ambiguous => no-submit/dry-run; no implicit live arming.
@@ -445,6 +493,8 @@ This resolves the apparent contradiction between "the journal is the only source
 | Concurrency change causes double orders | 3 | Med | High | `clOrdId` idempotency at exchange; pool size starts at 1; demo double-submit test |
 | HMAC rollout breaks alert intake (sender can't sign) | 2 | Med | High | Ship constant-time header auth + replay window first; HMAC via relay later, flag-gated |
 | Signing relay outage/misconfiguration blocks alert verification | 2 | Med | High | Relay health checks + authenticated ingress + key rotation + receiver fail-closed behavior with runbook |
+| CCXT mapping drift changes execution semantics | 1,5,7 | Med | High | Pin CCXT version + conformance fixture tests + shadow parity against legacy before cutover |
+| In-process exchange adapter weakens secret isolation | 2,5 | Low | High | Per-exchange credential scoping, strict redaction, optional worker-process isolation mode |
 | Schema migration breaks strategy matching | 6 | Med | Med | Dual-version loader; migrate files last, one at a time, diff-tested |
 | Reconciliation false-positives spook the operator | 1 | Med | Med | Observe-only first; tune before enforcing; clear mismatch reporting |
 | Dashboard refactor hides a real state | 4 | Low | Med | Snapshot tests; explicit error banners replace silent empties |
@@ -454,4 +504,4 @@ This resolves the apparent contradiction between "the journal is the only source
 
 ## 5. Sequencing Summary (the one-paragraph version)
 
-Put the project under **git and tests first (P0)** so nothing else is done blind. Then fix the only bugs that can **lose money silently** — non-durable position state and the absence of exchange reconciliation (**P1**). Close the **externally exploitable auth gaps (P2)** since the bot is reachable through the tunnel right now. With state durable and access controlled, **stabilize the engine (P3)**: remove head-of-line blocking, make submission idempotent at the exchange, and use `Decimal` for money. Make the **dashboard trustworthy and strategy-driven (P4)**. Only then do the **architecture cleanups (P5 executor consolidation, P6 exchange-agnostic schemas)** that the earlier phases made safe to perform. **CI/test hardening (P7)** lands continuously throughout, ratcheting coverage up and gating every merge. Every behavior change is flag-gated, soaked in shadow on the demo account, and revertible in one step.
+Put the project under **git and tests first (P0)** so nothing else is done blind. Then fix the only bugs that can **lose money silently** — non-durable position state and missing exchange truth reconciliation (**P1**) while introducing CCXT read-path polling behind controls. Close the **externally exploitable auth gaps (P2)** since the bot is reachable through the tunnel right now. With state durable and access controlled, **stabilize the engine (P3)**: remove head-of-line blocking, enforce stable idempotency semantics, and keep `Decimal` money integrity. Make the **dashboard trustworthy and strategy-driven (P4)**. Then perform the core Plan v2 shift in **P5**: Hermes execution skill + controlled execution API + risk constraints + CCXT write-path cutover with shadow parity before activation. Finally land **P6 exchange-agnostic schemas** and continue **P7 CI/test hardening**. Every behavior change remains flag-gated, demo-soaked, and rollback-safe.

@@ -4,10 +4,15 @@
   "real_money_enabled": false,
   "require_strategy_id": true,
   "submit_orders": false,
-  "exchange": "okx",
+  "exchange": "ccxt",
   "exchange_environment": "live",
   "default_margin_mode": "isolated",
   "default_leverage": 2,
+  "execution": {
+    "exchange": "ccxt",
+    "ccxt_exchange": "okx",
+    "ccxt_default_type": "swap"
+  },
   "dashboard_enabled": true,
   "health_checks_enabled": true,
   "notes": "Example only. Real live config must be created deliberately and approved."

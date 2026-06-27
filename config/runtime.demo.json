@@ -19,7 +19,9 @@
   "execution": {
     "enabled": true,
     "mode": "demo_live",
-    "exchange": "okx",
+    "exchange": "ccxt",
+    "ccxt_exchange": "okx",
+    "ccxt_default_type": "swap",
     "execution_policy": "strategy_file_duo_base_dev",
     "shadow_policy": "none",
     "route": "okx_api",

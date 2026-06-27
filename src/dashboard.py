@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import base64
 import html
+import hmac
 import json
 import os
-import subprocess
 import sys
 import time
 import urllib.request
@@ -14,11 +15,13 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from dashboard_core import (
+    LEDGER_READ_STATS,
     SYMBOLS,
     as_float,
     asset_inst_id,
     build_combined_events,
     colombia_time,
+    display_time,
     merged_replay_state,
     normalize_policy_decision,
     okx_swap_tickers,
@@ -26,17 +29,36 @@ from dashboard_core import (
     read_jsonl,
     shadow_config,
 )
+from hermx_shared import canonical_timeframe
+
+try:
+    from executors import ExecutorFactory
+except Exception:
+    ExecutorFactory = None
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ROOT = Path(os.environ.get("SHADOW_ROOT", REPO_ROOT))
 LOGS = ROOT / "logs"
 PORT = int(os.environ.get("CLEAN_DASHBOARD_PORT", "8098"))
+DASH_AUTH_ENABLED = (os.environ.get("HERMX_DASH_AUTH") or "true").strip().lower() not in {"0", "false", "no", ""}
+DASH_AUTH_TOKEN = (os.environ.get("HERMX_DASH_AUTH_TOKEN") or "").strip()
 BACKFILL_FILE = ROOT / "research" / "mxc-backfill-jun11-jun16.json"
 STRATEGIES_DIR = ROOT / "strategies"
 STRATEGY_ALERTS_FILE = LOGS / "strategy-alerts.jsonl"
 TRIAL_TAB_ID = "duo_base_dev_trial"
 
 POLICIES = ()
+
+# Client silent-refresh cadence (must match setInterval below). Data older than
+# this is considered stale for the freshness badge / executor banner (D7).
+REFRESH_INTERVAL_SECONDS = int(os.environ.get("HERMX_DASH_REFRESH_SECONDS") or "20")
+
+# Strategy statuses that mean "do not render a card" (D5). Anything else that is
+# not explicitly disabled is treated as active, preserving today's behaviour for
+# the four `active_demo` files while letting an operator hide one by status.
+DISABLED_STRATEGY_STATUSES = {
+    "disabled", "inactive", "paused", "archived", "off", "retired", "draft", "deleted",
+}
 
 MODEL_CACHE_TTL_SECONDS = 10
 _MODEL_CACHE = {"expires_at": 0.0, "model": None}
@@ -70,16 +92,8 @@ ASSET_META = {
 }
 
 
-def canonical_timeframe(value):
-    text = str(value or "").strip().lower().replace(" ", "")
-    aliases = {
-        "30": "30m", "30min": "30m", "30mins": "30m",
-        "60": "1h", "1hr": "1h", "1hour": "1h",
-        "120": "2h", "2hr": "2h", "2hour": "2h",
-        "180": "3h", "3hr": "3h", "3hour": "3h",
-        "240": "4h", "4hr": "4h", "4hour": "4h",
-    }
-    return aliases.get(text, text)
+# canonical_timeframe is imported from hermx_shared (Phase 4 / D8) — the receiver
+# and dashboard now share one implementation so the alias tables cannot drift.
 
 
 def load_strategy_files():
@@ -95,19 +109,47 @@ def load_strategy_files():
             rows.append(row)
         except Exception:
             continue
-    order = {"SOLUSDT": 0, "ETHUSDT": 1, "XRPUSDT": 2, "BTCUSDT": 3}
-    return sorted(rows, key=lambda r: (order.get(r.get("asset"), 99), r.get("strategy_id") or ""))
+    # No hardcoded per-symbol sort map (D5) — order deterministically by the
+    # strategy's own identity so adding/removing a file needs no code change.
+    return sorted(rows, key=lambda r: (r.get("asset") or "", r.get("strategy_id") or ""))
+
+
+def is_strategy_active(strategy) -> bool:
+    """Whether a strategy file should render a card (D5).
+
+    A card appears for any strategy that is not explicitly disabled — by a falsey
+    ``enabled``/``active`` flag or a disabling ``status``. This makes adding a
+    ``status: active_demo`` file surface a card with no code change, and flipping
+    a file to ``status: disabled`` (or ``enabled: false``) remove it.
+    """
+    if strategy.get("enabled") is False:
+        return False
+    if strategy.get("active") is False:
+        return False
+    status = str(strategy.get("status") or "").strip().lower()
+    return status not in DISABLED_STRATEGY_STATUSES
+
+
+def active_strategies(strategies=None):
+    rows = strategies if strategies is not None else load_strategy_files()
+    return [s for s in rows if is_strategy_active(s)]
 
 
 def trial_symbols(config=None):
+    """Symbols the dashboard cares about, derived from active strategy files (D5).
+
+    Falls back to the legacy static SYMBOLS list only when there are no strategy
+    files at all, so an empty/misconfigured deploy still renders something.
+    """
     seen = []
-    for sym in SYMBOLS:
-        if sym not in seen:
-            seen.append(sym)
-    for strategy in load_strategy_files():
+    for strategy in active_strategies():
         sym = strategy.get("asset")
         if sym and sym not in seen:
             seen.append(sym)
+    if not seen:
+        for sym in SYMBOLS:
+            if sym not in seen:
+                seen.append(sym)
     return seen
 
 
@@ -335,11 +377,12 @@ def real_decisions(limit=10000):
     rows = read_jsonl(LOGS / "shadow-decisions.jsonl", limit)
     out = []
     seen = set()
+    symbol_set = set(trial_symbols())
     for row in rows:
         norm = row.get("normalized") or {}
         if row.get("duplicate") or norm.get("source") != "tradingview":
             continue
-        if norm.get("symbol") not in SYMBOLS or norm.get("side") not in {"buy", "sell"}:
+        if norm.get("symbol") not in symbol_set or norm.get("side") not in {"buy", "sell"}:
             continue
         sid = norm.get("signal_id") or f"{norm.get('symbol')}|{norm.get('side')}|{norm.get('tv_time')}"
         if sid in seen:
@@ -434,31 +477,35 @@ def mark_prices(config):
     return marks
 
 
+def _dashboard_executor(config):
+    if ExecutorFactory is None:
+        return None, "executor_factory_unavailable"
+    try:
+        cfg = dict(config or {})
+        exec_cfg = dict((cfg.get("execution") or {}))
+        if not exec_cfg.get("exchange"):
+            exec_cfg["exchange"] = "ccxt"
+        cfg["execution"] = exec_cfg
+        return ExecutorFactory.create(cfg, ROOT), None
+    except Exception as exc:
+        return None, str(exc)
+
+
 def okx_live_snapshot(config):
     now = time.time()
     cached = _OKX_LIVE_CACHE.get("snapshot")
     if cached is not None and now < float(_OKX_LIVE_CACHE.get("expires_at") or 0):
         return cached
-    script = ROOT / "src" / "okx_demo_executor.py"
     snapshot = {"ok": False, "positions": {}, "error": None, "generated_at": None}
-    if not script.exists():
-        snapshot["error"] = "src/okx_demo_executor.py missing"
+    executor, exec_err = _dashboard_executor(config)
+    if executor is None:
+        snapshot["error"] = exec_err or "dashboard_executor_unavailable"
         return snapshot
-    env = os.environ.copy()
-    env["OKX_SUBMIT_ORDERS"] = "false"
     try:
-        completed = subprocess.run(
-            [sys.executable, str(script), "health"],
-            cwd=str(ROOT),
-            text=True,
-            capture_output=True,
-            timeout=12,
-            env=env,
-        )
-        if completed.returncode != 0:
-            snapshot["error"] = (completed.stderr or completed.stdout)[-500:]
+        payload = executor.health() or {}
+        if not bool(payload.get("ok")):
+            snapshot["error"] = str(payload.get("error") or "executor_health_failed")
         else:
-            payload = json.loads(completed.stdout)
             by_inst = {row.get("instId"): row for row in (payload.get("positions") or [])}
             public_marks = mark_prices(config)
             positions = {}
@@ -486,7 +533,7 @@ def okx_live_snapshot(config):
                     "imr": as_float(row.get("imr")),
                 }
             snapshot = {
-                "ok": bool(payload.get("ok")),
+                "ok": True,
                 "generated_at": payload.get("generated_at"),
                 "account": payload.get("account") or {},
                 "positions": positions,
@@ -504,35 +551,20 @@ def okx_order_history_snapshot(config):
     cached = _OKX_ORDER_HISTORY_CACHE.get("snapshot")
     if cached is not None and now < float(_OKX_ORDER_HISTORY_CACHE.get("expires_at") or 0):
         return cached
-    script = ROOT / "src" / "okx_demo_executor.py"
     snapshot = {"ok": False, "rows": [], "error": None, "generated_at": None}
-    if not script.exists():
-        snapshot["error"] = "src/okx_demo_executor.py missing"
+    executor, exec_err = _dashboard_executor(config)
+    if executor is None:
+        snapshot["error"] = exec_err or "dashboard_executor_unavailable"
         return snapshot
-    env = os.environ.copy()
-    env["OKX_SUBMIT_ORDERS"] = "false"
     try:
-        cmd = [sys.executable, str(script), "orders-history", "--limit", "100"]
-        for sym in trial_symbols(config):
-            cmd.extend(["--inst-id", strategy_inst_id(config, sym)])
-        completed = subprocess.run(
-            cmd,
-            cwd=str(ROOT),
-            text=True,
-            capture_output=True,
-            timeout=12,
-            env=env,
-        )
-        if completed.returncode != 0:
-            snapshot["error"] = (completed.stderr or completed.stdout)[-500:]
-        else:
-            payload = json.loads(completed.stdout)
-            snapshot = {
-                "ok": bool(payload.get("ok")),
-                "generated_at": payload.get("generated_at"),
-                "rows": payload.get("rows") or [],
-                "error": None,
-            }
+        inst_ids = [strategy_inst_id(config, sym) for sym in trial_symbols(config)]
+        rows = executor.get_order_history_raw(inst_ids, limit=100)
+        snapshot = {
+            "ok": True,
+            "generated_at": now,
+            "rows": rows or [],
+            "error": None,
+        }
     except Exception as exc:
         snapshot["error"] = str(exc)
     _OKX_ORDER_HISTORY_CACHE["snapshot"] = snapshot
@@ -973,26 +1005,148 @@ def simulate(events, config):
     return state
 
 
+def human_age(seconds):
+    if seconds is None:
+        return "unknown"
+    seconds = max(0.0, float(seconds))
+    if seconds < 90:
+        return f"{int(seconds)}s"
+    if seconds < 5400:
+        return f"{int(seconds // 60)}m"
+    if seconds < 172800:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
+def executor_health_summary(okx_live, now=None):
+    """Collapse the executor read into an explicit health verdict (D3).
+
+    ``degraded`` drives the visible banner; we never let an errored or stale
+    executor read render as a healthy flat view.
+    """
+    now = now if now is not None else time.time()
+    okx_live = okx_live or {}
+    healthy = bool(okx_live.get("ok"))
+    error = None if healthy else str(okx_live.get("error") or "executor_unavailable")
+    age = None
+    stale = False
+    dt = parse_dt(okx_live.get("generated_at"))
+    if dt is not None:
+        age = max(0.0, now - dt.timestamp())
+        stale = age > REFRESH_INTERVAL_SECONDS
+    elif healthy:
+        # Reported ok but no timestamp to prove freshness -> treat as stale.
+        stale = True
+    return {
+        "ok": healthy and not stale,
+        "healthy": healthy,
+        "error": error,
+        "stale": stale,
+        "degraded": (not healthy) or stale,
+        "age_seconds": age,
+        "generated_at": okx_live.get("generated_at"),
+    }
+
+
+def ledger_health_summary():
+    """Aggregate corrupt/skipped-line counts surfaced by the bounded reader (D1/D2)."""
+    ledgers = {}
+    total_skipped = 0
+    truncated_tails = 0
+    for path, st in LEDGER_READ_STATS.items():
+        skipped = int(st.get("skipped") or 0)
+        total_skipped += skipped
+        if st.get("truncated_tail"):
+            truncated_tails += 1
+        if skipped or st.get("truncated_tail") or st.get("more"):
+            ledgers[Path(path).name] = {
+                "skipped": skipped,
+                "truncated_tail": bool(st.get("truncated_tail")),
+                "more": bool(st.get("more")),
+                "read": int(st.get("read") or 0),
+            }
+    return {
+        "total_skipped": total_skipped,
+        "truncated_tails": truncated_tails,
+        "ledgers": ledgers,
+    }
+
+
+def freshness_summary(model, now=None):
+    """True data age vs. the refresh interval, for the "Updated" badge (D7)."""
+    now = now if now is not None else time.time()
+    candidates = []
+    for row in model.get("strategy_alerts") or []:
+        for key in ("received_at", "tv_time"):
+            dt = parse_dt(row.get(key))
+            if dt is not None:
+                candidates.append(dt.timestamp())
+    dt = parse_dt((model.get("okx_live") or {}).get("generated_at"))
+    if dt is not None:
+        candidates.append(dt.timestamp())
+    data_at = max(candidates) if candidates else None
+    age = (now - data_at) if data_at is not None else None
+    stale = (age is None) or (age > REFRESH_INTERVAL_SECONDS)
+    return {
+        "generated_at": model.get("generated_at"),
+        "data_at": datetime.fromtimestamp(data_at, timezone.utc).isoformat() if data_at is not None else None,
+        "age_seconds": age,
+        "stale": stale,
+        "no_data": data_at is None,
+        "refresh_interval_seconds": REFRESH_INTERVAL_SECONDS,
+    }
+
+
 def dashboard_model():
     now = time.time()
     cached = _MODEL_CACHE.get("model")
     if cached is not None and now < float(_MODEL_CACHE.get("expires_at") or 0):
         return cached
+    # Clear per-read ledger stats so ledger_health reflects THIS build only (D1/D2).
+    LEDGER_READ_STATS.clear()
     cfg = shadow_config()
     loaded = load_events()
+    okx_live = okx_live_snapshot(cfg)
+    strategies = load_strategy_files()
     model = {
         "config": cfg,
         "loaded": loaded,
-        "sim": simulate(loaded["events"], cfg),
-        "okx_live": okx_live_snapshot(cfg),
+        "okx_live": okx_live,
         "okx_executions": okx_execution_records(cfg),
-        "strategies": load_strategy_files(),
+        "strategies": strategies,
+        "active_strategies": active_strategies(strategies),
         "strategy_alerts": strategy_alert_rows(),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+    model["executor"] = executor_health_summary(okx_live, now)
+    model["ledger_health"] = ledger_health_summary()
+    model["freshness"] = freshness_summary(model, now)
     _MODEL_CACHE["model"] = model
     _MODEL_CACHE["expires_at"] = now + MODEL_CACHE_TTL_SECONDS
     return model
+
+
+def api_payload():
+    """The structured model the ``/api`` route serializes.
+
+    Legacy `policies` field removed (D4): it was always ``{}`` because no policies
+    are configured. Executor/ledger/freshness health is surfaced explicitly so a
+    consumer can never mistake an executor failure for a healthy flat view (D3).
+    """
+    model = dashboard_model()
+    loaded = model["loaded"]
+    return {
+        "generated_at": model["generated_at"],
+        "source_counts": {k: loaded[k] for k in ("historical_count", "backfill_count", "live_count")},
+        "backfill": loaded["backfill"],
+        "strategies": model.get("active_strategies") or [],
+        "strategy_alerts": model.get("strategy_alerts") or [],
+        "okx_live": model.get("okx_live"),
+        "okx_executions": model.get("okx_executions") or [],
+        "executor": model.get("executor") or {},
+        "ledger_health": model.get("ledger_health") or {},
+        "freshness": model.get("freshness") or {},
+    }
 
 
 def health_payload():
@@ -1005,8 +1159,7 @@ def health_payload():
         "policies": policies,
         "primary_policy": cfg.get("primary_policy"),
         "allow_live_execution": bool(((cfg.get("risk") or {}).get("allow_live_execution"))),
-        "expected_policies": [key for key, _ in POLICIES],
-        "strategy_files": [row.get("strategy_id") for row in load_strategy_files()],
+        "strategy_files": [row.get("strategy_id") for row in active_strategies()],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1561,26 +1714,55 @@ def policy_tab(policy_key, policy, okx_live, okx_executions, config):
     """
 
 
+def banner(text, kind="warn"):
+    return f'<div class="banner {kind}">{esc(text)}</div>'
+
+
+def status_banners(model):
+    """Explicit banners for executor failure / stale data / corrupt ledgers."""
+    out = []
+    execu = model.get("executor") or {}
+    fresh = model.get("freshness") or {}
+    ledger = model.get("ledger_health") or {}
+    if execu.get("error"):
+        out.append(banner(f"EXECUTOR ERROR — exchange data unavailable / stale ({execu.get('error')})", "bad"))
+    elif execu.get("stale"):
+        out.append(banner(f"EXECUTOR DATA STALE — last exchange read {human_age(execu.get('age_seconds'))} ago", "warn"))
+    if ledger.get("total_skipped"):
+        out.append(banner(f"{ledger['total_skipped']} ledger lines skipped (corrupt) — see /api ledger_health", "warn"))
+    if fresh.get("stale"):
+        if fresh.get("no_data"):
+            out.append(banner("No recent data — dashboard has not received any alerts yet", "warn"))
+        else:
+            out.append(banner(f"DATA MAY BE STALE — newest data is {human_age(fresh.get('age_seconds'))} old (refresh {fresh.get('refresh_interval_seconds')}s)", "warn"))
+    return "".join(out)
+
+
 def render():
     model = dashboard_model()
     cfg = model["config"]
     loaded = model["loaded"]
-    sim = model["sim"]
     okx_live = model.get("okx_live") or {}
     okx_executions = model.get("okx_executions") or []
     backfill = loaded["backfill"]
     backfill_status = str(backfill.get("status") or "missing")
+    strategies = model.get("active_strategies") or []
+    strategy_alerts = model.get("strategy_alerts") or []
     source_line = (
-        f"{len(model.get('strategies') or [])} active strategies | "
-        f"{len(model.get('strategy_alerts') or [])} strategy alerts received"
+        f"{len(strategies)} active strategies | "
+        f"{len(strategy_alerts)} strategy alerts received"
     )
-    warn = ""
+    warn = status_banners(model)
     execution_cfg = cfg.get("execution") or {}
     risk_cfg = cfg.get("risk") or {}
     okx_enabled = bool(execution_cfg.get("enabled")) and bool(execution_cfg.get("submit_orders")) and bool(risk_cfg.get("allow_live_execution"))
     okx_badge = badge("OKX demo enabled", "good") if okx_enabled else badge("No OKX orders", "warn")
-    strategies = model.get("strategies") or []
-    strategy_alerts = model.get("strategy_alerts") or []
+    fresh = model.get("freshness") or {}
+    updated_text = "Updated " + (display_time(model["generated_at"]) or model["generated_at"])
+    if fresh.get("age_seconds") is not None:
+        updated_text += f" · data age {human_age(fresh.get('age_seconds'))}"
+    updated_badge = badge(updated_text, "warn" if fresh.get("stale") else "neutral")
+    stale_badge = badge("STALE", "bad") if fresh.get("stale") else ""
     tabs = f'<button class="tab-btn" data-target="{TRIAL_TAB_ID}">Duo Base Dev Trial</button>'
     panels = strategy_trial_tab(strategies, strategy_alerts, okx_live, okx_executions)
     return f"""<!doctype html>
@@ -1603,7 +1785,8 @@ def render():
         <span>{badge("Strategy files", "good")}</span>
         <span>{badge("Heikin Ashi", "neutral")}</span>
         <span>{okx_badge}</span>
-        <span>{badge("Updated " + esc(colombia_time(model["generated_at"]) or model["generated_at"]), "neutral")}</span>
+        <span>{updated_badge}</span>
+        {("<span>" + stale_badge + "</span>") if stale_badge else ""}
       </div>
     </header>
     {warn}
@@ -1765,6 +1948,9 @@ tr:target td { background:rgba(242,201,76,.08); }
 .badge.warn { color:#ffe59b; background:rgba(242,201,76,.15); border-color:rgba(242,201,76,.42); }
 .badge.muted { color:#c3ccd8; background:#2a3440; border-color:#3a4654; }
 .badge.neutral { color:#dbe9ff; background:#1d2938; border-color:#34465c; }
+.banner { margin:10px 0; padding:10px 14px; border-radius:8px; font-size:13px; font-weight:800; border:1px solid var(--line); }
+.banner.bad { color:#ffd0d5; background:rgba(255,92,105,.14); border-color:rgba(255,92,105,.55); }
+.banner.warn { color:#ffe59b; background:rgba(242,201,76,.12); border-color:rgba(242,201,76,.5); }
 .why summary { list-style:none; cursor:pointer; }
 .why summary::-webkit-details-marker { display:none; }
 .why p { color:var(--blue); margin:8px 0 4px; white-space:normal; max-width:520px; }
@@ -1788,6 +1974,37 @@ tr:target td { background:rgba(242,201,76,.08); }
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _dashboard_auth_ok(self) -> bool:
+        if not DASH_AUTH_ENABLED:
+            return True
+        if not DASH_AUTH_TOKEN:
+            return False
+        provided = (self.headers.get("X-Dashboard-Token") or "").strip()
+        if provided and hmac.compare_digest(provided, DASH_AUTH_TOKEN):
+            return True
+        auth_header = (self.headers.get("Authorization") or "").strip()
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:].strip()
+            return bool(token) and hmac.compare_digest(token, DASH_AUTH_TOKEN)
+        if auth_header.lower().startswith("basic "):
+            try:
+                decoded = base64.b64decode(auth_header[6:].strip()).decode("utf-8")
+                _user, pwd = decoded.split(":", 1)
+            except Exception:
+                return False
+            return bool(pwd) and hmac.compare_digest(pwd, DASH_AUTH_TOKEN)
+        return False
+
+    def _auth_challenge(self):
+        body = {"ok": False, "error": "unauthorized"}
+        raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Bearer realm="hermx-dashboard"')
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
     def send_bytes(self, status, body, content_type):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -1797,22 +2014,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path in {"/", "/shadow/dashboard", "/api", "/shadow/dashboard/api"} and not self._dashboard_auth_ok():
+            self._auth_challenge()
+            return
         if path in {"/", "/shadow/dashboard"}:
             self.send_bytes(200, render().encode("utf-8"), "text/html; charset=utf-8")
         elif path in {"/api", "/shadow/dashboard/api"}:
-            model = dashboard_model()
-            loaded = model["loaded"]
-            sim = model["sim"]
-            payload = {
-                "generated_at": model["generated_at"],
-                "source_counts": {k: loaded[k] for k in ("historical_count", "backfill_count", "live_count")},
-                "backfill": loaded["backfill"],
-                "policies": {key: sim[key]["stats"] for key, _ in POLICIES},
-                "strategies": model.get("strategies") or [],
-                "strategy_alerts": model.get("strategy_alerts") or [],
-                "okx_live": model.get("okx_live"),
-                "okx_executions": model.get("okx_executions") or [],
-            }
+            payload = api_payload()
             self.send_bytes(200, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
         elif path in {"/health", "/shadow/health"}:
             self.send_bytes(200, json.dumps(health_payload(), ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
@@ -1824,4 +2032,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    if DASH_AUTH_ENABLED and not DASH_AUTH_TOKEN:
+        print("[dashboard] HERMX_DASH_AUTH enabled but HERMX_DASH_AUTH_TOKEN is blank; failing closed with 401 for protected routes.", file=sys.stderr)
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

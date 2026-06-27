@@ -15,7 +15,7 @@ import webhook_receiver as wr
 
 def _norm_order(state, *, cl_ord_id="cl-1", ord_id="ord-1", inst_id="XRP-USDT-SWAP", acc=0.0, avg=None):
     return {
-        "exchange": "okx_demo",
+        "exchange": "ccxt",
         "inst_id": inst_id,
         "ord_id": ord_id,
         "cl_ord_id": cl_ord_id,
@@ -128,10 +128,10 @@ def test_symbol_pause_blocks_submit_path(wr, monkeypatch):
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "1")
 
-    with mock.patch.object(wr.subprocess, "run") as run_mock:
+    with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
         result = wr.execute_okx_if_enabled(_armed_record())
 
-    run_mock.assert_not_called()
+    create_mock.assert_not_called()  # symbol pause blocks before any submit
     assert result["mode"] == "not_submitted"
     assert result["reason"] == "symbol_paused"
 

@@ -1,313 +1,227 @@
-"""Observe-only OKX query interface tests (REFACTOR_PLAN.md:207, :209-212, :237).
+"""Venue-neutral observe-only query-contract tests (REFACTOR_PLAN.md:207, :209-212,
+:237) exercised through CcxtExecutor with a FAKE ccxt client (no network).
 
-Three layers, all WITHOUT network:
-
-(a) The PURE normalizer (raw OKX v5 envelope -> venue-neutral shape) maps the
-    success / partial / not-found / aged-out fixtures to the correct normalized
-    shapes. This is the heart of acceptance :237.
-(b) The CLI verb dispatch + argument parsing works without creds and without
-    network, by monkeypatching ``require_env`` and ``OkxClient.get`` to return
-    fixture envelopes. Read-only verbs never call POST and never arm submission.
-(c) ``OkxDemoExecutor`` query methods (the venue-neutral contract) return
-    normalized shapes given a stubbed subprocess, and force OKX_SUBMIT_ORDERS=false.
-
-The fixtures are the hash-stamped corpus under tests/fixtures/okx_query/.
+Post P5-07 the OKX-CLI executor and its pure normalizer were removed; CCXT is the
+sole backend. The venue-neutral query CONTRACT is unchanged, so the coverage that
+matters -- normalized order/position/balance shapes, the order state mapping
+(live / partially_filled / filled / canceled), and not_found-is-not-an-exception --
+is preserved here against CcxtExecutor's query methods. The OKX-v5-envelope pure
+normalizer and CLI-dispatch cases were CLI-specific and have no target anymore.
 """
 from __future__ import annotations
 
-import json
-import subprocess
 from pathlib import Path
 
-import pytest
-
-import okx_demo_executor as okx
-from executors.okx_demo import OkxDemoExecutor
-
-FIXTURES = Path(__file__).resolve().parent / "fixtures" / "okx_query"
+from executors.base import BaseExecutor
+from executors.ccxt_adapter import CcxtExecutor
 
 
-def _load(name: str) -> dict:
-    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+class _FakeQueryClient:
+    """In-memory ccxt client: serves canned unified orders/positions/balance and
+    records calls. No network, no submission (read-only verbs only)."""
+
+    def __init__(self, *, order=None, open_orders=None, closed_orders=None,
+                 positions=None, balance=None, fetch_order_error=None):
+        self._order = order
+        self._open = open_orders or []
+        self._closed = closed_orders or []
+        self._positions = positions or []
+        self._balance = balance or {"total": {"USDT": 1000.0}, "free": {"USDT": 900.0}, "info": {}}
+        self._fetch_order_error = fetch_order_error
+        self.calls = []
+
+    def fetch_order(self, order_id, symbol=None):
+        self.calls.append(("fetch_order", order_id, symbol))
+        if self._fetch_order_error is not None:
+            raise self._fetch_order_error
+        return self._order
+
+    def fetch_open_orders(self, symbol=None):
+        self.calls.append(("fetch_open_orders", symbol))
+        return list(self._open)
+
+    def fetch_closed_orders(self, symbol=None, limit=100):
+        self.calls.append(("fetch_closed_orders", symbol, limit))
+        return list(self._closed)
+
+    def fetch_positions(self, symbols=None):
+        self.calls.append(("fetch_positions", symbols))
+        return list(self._positions)
+
+    def fetch_balance(self):
+        self.calls.append(("fetch_balance",))
+        return self._balance
+
+
+def _executor() -> CcxtExecutor:
+    return CcxtExecutor(
+        {"execution": {"exchange": "ccxt", "ccxt_exchange": "okx", "simulated_trading": True}},
+        Path("."),
+    )
+
+
+def _order(*, status, side="buy", filled=3, amount=3, average=63000.5, cl="cid-1", pos_side="long"):
+    return {
+        "id": "688577747503788032",
+        "symbol": "BTC/USDT:USDT",
+        "clientOrderId": cl,
+        "status": status,
+        "side": side,
+        "type": "market",
+        "average": average,
+        "filled": filled,
+        "amount": amount,
+        "timestamp": 1719300001000,
+        "info": {"instId": "BTC-USDT-SWAP", "clOrdId": cl, "posSide": pos_side},
+    }
 
 
 # ---------------------------------------------------------------------------
-# (a) PURE normalizer -- no client, no network.
+# (a) Normalized order shape + state mapping (the heart of acceptance :237).
 # ---------------------------------------------------------------------------
 
-
-def test_normalize_order_filled():
-    out = okx.normalize_order(_load("order_filled.json"))
-    assert out["exchange"] == "okx_demo"
+def test_get_order_filled(monkeypatch):
+    ex = _executor()
+    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(order=_order(status="closed")))
+    out = ex.get_order("BTC-USDT-SWAP", ord_id="688577747503788032")
+    assert out["exchange"] == "ccxt"
     assert out["state"] == "filled"
     assert out["inst_id"] == "BTC-USDT-SWAP"
     assert out["ord_id"] == "688577747503788032"
-    assert out["cl_ord_id"] == "mxc1a1b2c3d4e5f6a7b8c9"
+    assert out["cl_ord_id"] == "cid-1"
     assert out["acc_fill_sz"] == 3.0
     assert isinstance(out["acc_fill_sz"], float)
     assert out["avg_px"] == 63000.5
     assert out["side"] == "buy"
     assert out["pos_side"] == "long"
     assert out["ord_type"] == "market"
-    assert out["ts"] == "1719300001000"
 
 
-def test_normalize_order_partially_filled():
-    out = okx.normalize_order(_load("order_partially_filled.json"))
+def test_get_order_partially_filled(monkeypatch):
+    # status closed but 0 < filled < amount => partially_filled (-> FILLED+partial in Task 4).
+    ex = _executor()
+    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(order=_order(status="closed", filled=1, amount=3, average=3010.25)))
+    out = ex.get_order("BTC-USDT-SWAP", ord_id="x")
     assert out["state"] == "partially_filled"
     assert out["acc_fill_sz"] == 1.0
-    # Partial: 0 < accFillSz < ordered size (3) -- the signal Task 4 maps to FILLED+partial.
-    ordered = float(out["raw"]["sz"])
-    assert 0.0 < out["acc_fill_sz"] < ordered
+    assert 0.0 < out["acc_fill_sz"] < float(out["raw"]["amount"])
     assert out["avg_px"] == 3010.25
 
 
-def test_normalize_order_canceled_zero_fill():
-    out = okx.normalize_order(_load("order_canceled_zero_fill.json"))
-    # canceled + accFillSz==0 -> REJECTED later (:211).
+def test_get_order_live_pending(monkeypatch):
+    # status open + zero fill => live.
+    ex = _executor()
+    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(order=_order(status="open", filled=0, average=None)))
+    out = ex.get_order("BTC-USDT-SWAP", ord_id="x")
+    assert out["state"] == "live"
+    assert out["acc_fill_sz"] == 0.0
+
+
+def test_get_order_canceled_zero_fill(monkeypatch):
+    # canceled + accFillSz == 0 -> REJECTED later (:211). Empty avgPx -> None, not 0.0.
+    ex = _executor()
+    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(order=_order(status="canceled", filled=0, average=None)))
+    out = ex.get_order("BTC-USDT-SWAP", ord_id="x")
     assert out["state"] == "canceled"
     assert out["acc_fill_sz"] == 0.0
-    assert out["avg_px"] is None  # empty avgPx normalizes to None, not 0.0
+    assert out["avg_px"] is None
 
 
-def test_normalize_order_not_found_is_not_an_exception():
-    envelope = _load("order_not_found.json")
-    out = okx.normalize_order(envelope)
-    assert out["state"] == "not_found"  # -> REJECTED later (:212), never raises
-    assert out["raw"] == envelope  # the raw error is preserved for reconciliation
+def test_get_order_not_found_is_not_an_exception(monkeypatch):
+    # cl_ord_id lookup with nothing in open/closed -> normalized not_found, never raises.
+    ex = _executor()
+    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(open_orders=[], closed_orders=[]))
+    out = ex.get_order("BTC-USDT-SWAP", cl_ord_id="missing-cid")
+    assert out["state"] == "not_found"
+    assert out["exchange"] == "ccxt"
     assert out["acc_fill_sz"] == 0.0
     assert out["ord_id"] is None
 
 
-def test_normalize_orders_history_archive_aged_out():
-    # An order that has aged out of the live set but is found, filled, in archive.
-    rows = okx.normalize_orders(_load("orders_history_archive_aged.json"))
-    assert len(rows) == 1
-    aged = rows[0]
-    assert aged["state"] == "filled"
-    assert aged["acc_fill_sz"] == 2.0
-    assert aged["avg_px"] == 61500.0
-    assert aged["inst_id"] == "BTC-USDT-SWAP"
+def test_get_order_by_cl_ord_id_matches_closed(monkeypatch):
+    ex = _executor()
+    fake = _FakeQueryClient(open_orders=[], closed_orders=[_order(status="closed", cl="cid-match")])
+    monkeypatch.setattr(ex, "_client", lambda: fake)
+    out = ex.get_order("BTC-USDT-SWAP", cl_ord_id="cid-match")
+    assert out["state"] == "filled"
+    assert out["cl_ord_id"] == "cid-match"
+    # Fallback chain: open orders consulted before closed orders.
+    kinds = [c[0] for c in fake.calls]
+    assert kinds == ["fetch_open_orders", "fetch_closed_orders"]
 
 
-def test_normalize_orders_pending_live():
-    rows = okx.normalize_orders(_load("orders_pending.json"))
-    assert len(rows) == 1
-    assert rows[0]["state"] == "live"
-    assert rows[0]["acc_fill_sz"] == 0.0
+def test_get_order_error_degrades_safely(monkeypatch):
+    # A generic client error -> normalized error state, never raises.
+    ex = _executor()
+    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(fetch_order_error=RuntimeError("boom")))
+    out = ex.get_order("BTC-USDT-SWAP", ord_id="x")
+    assert out["state"] == "error"
+    assert out["exchange"] == "ccxt"
 
 
-def test_normalize_positions_open_is_signed():
-    rows = okx.normalize_positions(_load("positions_open.json"))
+def test_get_order_not_found_error_text_maps_not_found(monkeypatch):
+    # An explicit "order does not exist" venue error maps to not_found, not error.
+    ex = _executor()
+    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(fetch_order_error=RuntimeError("Order does not exist")))
+    out = ex.get_order("BTC-USDT-SWAP", ord_id="x")
+    assert out["state"] == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# (b) Positions + balances normalized shapes.
+# ---------------------------------------------------------------------------
+
+def test_get_positions_open_is_signed(monkeypatch):
+    ex = _executor()
+    positions = [{
+        "symbol": "BTC/USDT:USDT", "side": "long", "contracts": 3,
+        "entryPrice": 60000.0, "unrealizedPnl": 12.5,
+        "info": {"instId": "BTC-USDT-SWAP", "posSide": "long"},
+    }]
+    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(positions=positions))
+    rows = ex.get_positions("BTC-USDT-SWAP")
     assert len(rows) == 1
     pos = rows[0]
-    assert pos["exchange"] == "okx_demo"
+    assert pos["exchange"] == "ccxt"
     assert pos["inst_id"] == "BTC-USDT-SWAP"
-    assert pos["pos_side"] == "long"
     assert pos["pos"] == 3.0  # long -> positive signed contracts
     assert pos["upl"] == 12.5
 
 
-def test_normalize_positions_flat_is_empty():
-    assert okx.normalize_positions(_load("positions_flat.json")) == []
-
-
-def test_normalize_balance():
-    rows = okx.normalize_balances(_load("balance.json"))
+def test_get_balance(monkeypatch):
+    ex = _executor()
+    balance = {"total": {"USDT": 100012.5}, "free": {"USDT": 99000.0}, "info": {}}
+    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(balance=balance))
+    rows = ex.get_balance("USDT")
     assert len(rows) == 1
     bal = rows[0]
-    assert bal["exchange"] == "okx_demo"
+    assert bal["exchange"] == "ccxt"
     assert bal["ccy"] == "USDT"
     assert bal["eq"] == 100012.5
     assert bal["avail"] == 99000.0
 
 
-def test_normalize_balance_ccy_filter():
-    assert okx.normalize_balances(_load("balance.json"), ccy="BTC") == []
-    assert len(okx.normalize_balances(_load("balance.json"), ccy="USDT")) == 1
+def test_get_balance_ccy_filter(monkeypatch):
+    ex = _executor()
+    balance = {"total": {"USDT": 100012.5, "BTC": 0.0}, "free": {"USDT": 99000.0, "BTC": 0.0}, "info": {}}
+    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(balance=balance))
+    assert [r["ccy"] for r in ex.get_balance("USDT")] == ["USDT"]
 
 
 # ---------------------------------------------------------------------------
-# (b) CLI verb dispatch -- no creds, no network. Monkeypatch require_env +
-#     OkxClient.get to serve fixtures; assert read-only (POST forbidden).
+# (c) Base-executor query defaults degrade, never crash (venue-neutral default).
 # ---------------------------------------------------------------------------
-
-# Map a request path substring -> fixture envelope.
-_PATH_FIXTURES = [
-    ("/api/v5/trade/order?", "order_filled.json"),
-    ("/api/v5/trade/orders-pending", "orders_pending.json"),
-    ("/api/v5/trade/orders-history-archive", "orders_history_archive_aged.json"),
-    ("/api/v5/account/positions", "positions_open.json"),
-    ("/api/v5/account/balance", "balance.json"),
-]
-
-
-@pytest.fixture
-def offline_okx(monkeypatch):
-    """OkxClient that needs no creds and serves fixtures over a fake GET; POST raises."""
-    monkeypatch.setattr(okx, "require_env", lambda name: "test-" + name)
-
-    def fake_get(self, path, *, private=True):
-        for needle, fixture in _PATH_FIXTURES:
-            if needle in path:
-                return {"http_status": 200, "elapsed_ms": 1, "payload": _load(fixture)}
-        raise AssertionError(f"unexpected GET path: {path}")
-
-    def forbidden_post(self, path, body):  # read-only invariant guard
-        raise AssertionError(f"read-only verb must never POST (path={path})")
-
-    monkeypatch.setattr(okx.OkxClient, "get", fake_get, raising=True)
-    monkeypatch.setattr(okx.OkxClient, "post", forbidden_post, raising=True)
-    return okx
-
-
-def _run_cli(monkeypatch, capsys, argv):
-    monkeypatch.setattr("sys.argv", ["okx_demo_executor.py", *argv])
-    rc = okx.main()
-    assert rc == 0
-    return json.loads(capsys.readouterr().out)
-
-
-def test_cli_query_order_dispatch(offline_okx, monkeypatch, capsys):
-    out = _run_cli(monkeypatch, capsys, ["query-order", "--inst-id", "BTC-USDT-SWAP", "--ord-id", "688577747503788032"])
-    assert out["state"] == "filled"
-    assert out["exchange"] == "okx_demo"
-    assert out["acc_fill_sz"] == 3.0
-
-
-def test_cli_query_order_requires_identifier(offline_okx, monkeypatch):
-    monkeypatch.setattr("sys.argv", ["okx_demo_executor.py", "query-order", "--inst-id", "BTC-USDT-SWAP"])
-    with pytest.raises(SystemExit):  # argparse parser.error -> SystemExit
-        okx.main()
-
-
-def test_cli_orders_pending_dispatch(offline_okx, monkeypatch, capsys):
-    out = _run_cli(monkeypatch, capsys, ["orders-pending", "--inst-id", "XRP-USDT-SWAP"])
-    assert out["exchange"] == "okx_demo"
-    assert [o["state"] for o in out["orders"]] == ["live"]
-
-
-def test_cli_orders_history_archive_dispatch(offline_okx, monkeypatch, capsys):
-    out = _run_cli(monkeypatch, capsys, ["orders-history-archive", "--inst-id", "BTC-USDT-SWAP", "--limit", "10"])
-    assert out["orders"][0]["state"] == "filled"
-    assert out["orders"][0]["acc_fill_sz"] == 2.0
-
-
-def test_cli_positions_dispatch(offline_okx, monkeypatch, capsys):
-    out = _run_cli(monkeypatch, capsys, ["positions"])
-    assert out["positions"][0]["pos"] == 3.0
-
-
-def test_cli_balance_dispatch(offline_okx, monkeypatch, capsys):
-    out = _run_cli(monkeypatch, capsys, ["balance", "--ccy", "USDT"])
-    assert out["balances"][0]["ccy"] == "USDT"
-    assert out["balances"][0]["eq"] == 100012.5
-
-
-def test_cli_query_verbs_are_submission_independent(offline_okx, monkeypatch, capsys):
-    """Read-only verbs never arm submission: SUBMIT_ORDERS is irrelevant and POST is forbidden.
-
-    The offline_okx fixture makes OkxClient.post raise, so a clean rc==0 across
-    all query verbs proves no submission path was taken regardless of env.
-    """
-    monkeypatch.setenv("OKX_SUBMIT_ORDERS", "true")  # even if armed, queries must not submit
-    for argv in (
-        ["query-order", "--inst-id", "BTC-USDT-SWAP", "--cl-ord-id", "mxc1a1b2c3d4e5f6a7b8c9"],
-        ["orders-pending"],
-        ["positions"],
-        ["balance"],
-    ):
-        _run_cli(monkeypatch, capsys, argv)  # asserts rc==0; forbidden_post would have raised
-
-
-# ---------------------------------------------------------------------------
-# (c) OkxDemoExecutor venue-neutral query methods -- stubbed subprocess.
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def stub_subprocess(monkeypatch, repo_root):
-    """Capture argv/env and return canned normalized JSON instead of running the CLI."""
-    calls = {}
-
-    def make(stdout_obj):
-        def fake_run(argv, **kwargs):
-            calls["argv"] = argv
-            calls["env"] = kwargs.get("env") or {}
-            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(stdout_obj), stderr="")
-
-        monkeypatch.setattr("executors.okx_demo.subprocess.run", fake_run)
-        return calls
-
-    return make
-
-
-def _executor(repo_root):
-    # Root must point at the repo so the real src/okx_demo_executor.py exists()
-    # (the subprocess itself is stubbed, so nothing actually runs).
-    return OkxDemoExecutor({"execution": {"exchange": "okx_demo"}}, repo_root)
-
-
-def test_executor_get_order_returns_normalized(stub_subprocess, repo_root):
-    normalized = okx.normalize_order(_load("order_filled.json"))
-    calls = stub_subprocess(normalized)
-    ex = _executor(repo_root)
-    out = ex.get_order("BTC-USDT-SWAP", ord_id="688577747503788032")
-    assert out["state"] == "filled"
-    assert out["exchange"] == "okx_demo"
-    # Read-only invariant: the subprocess env must NEVER arm submission.
-    assert calls["env"].get("OKX_SUBMIT_ORDERS") == "false"
-    assert "query-order" in calls["argv"]
-    assert "--inst-id" in calls["argv"]
-
-
-def test_executor_get_positions_returns_list(stub_subprocess, repo_root):
-    envelope = okx._query_list_envelope(okx.normalize_positions(_load("positions_open.json")), "positions")
-    calls = stub_subprocess(envelope)
-    ex = _executor(repo_root)
-    out = ex.get_positions()
-    assert isinstance(out, list)
-    assert out[0]["pos"] == 3.0
-    assert calls["env"].get("OKX_SUBMIT_ORDERS") == "false"
-
-
-def test_executor_get_balance_returns_list(stub_subprocess, repo_root):
-    envelope = okx._query_list_envelope(okx.normalize_balances(_load("balance.json")), "balances")
-    stub_subprocess(envelope)
-    ex = _executor(repo_root)
-    out = ex.get_balance("USDT")
-    assert out[0]["ccy"] == "USDT"
-
-
-def test_executor_query_failure_degrades_safely(monkeypatch, repo_root):
-    # Subprocess fails -> get_order returns a normalized error, never raises.
-    def fake_run(argv, **kwargs):
-        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom")
-
-    monkeypatch.setattr("executors.okx_demo.subprocess.run", fake_run)
-    ex = _executor(repo_root)
-    out = ex.get_order("BTC-USDT-SWAP", ord_id="x")
-    assert out["state"] == "error"
-    assert out["exchange"] == "okx_demo"
-
 
 def test_base_executor_query_defaults_are_safe():
-    # A venue with no query path must degrade, not crash (venue-neutral default).
-    from executors.base import BaseExecutor
-
     class Bare(BaseExecutor):
         key = "bare"
 
         def execute(self, readiness):  # only abstract method
             return self.normalized_result(ok=True, mode="noop")
 
-    ex = Bare({}, repo_root_placeholder())
+    ex = Bare({}, Path(__file__).resolve().parents[1])
     assert ex.get_order("X")["state"] == "not_implemented"
     assert ex.get_open_orders() == []
     assert ex.get_order_history_archive() == []
     assert ex.get_positions() == []
     assert ex.get_balance() == []
-
-
-def repo_root_placeholder() -> Path:
-    return Path(__file__).resolve().parents[1]

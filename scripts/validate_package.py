@@ -19,7 +19,6 @@ def main() -> int:
         "src/webhook_receiver.py",
         "src/dashboard.py",
         "src/dashboard_core.py",
-        "src/okx_demo_executor.py",
         "schemas/strategy.schema.json",
         "schemas/tradingview-alert.schema.json",
         "config/runtime.demo.json",
