@@ -176,6 +176,17 @@ class CcxtExecutor(BaseExecutor):
                     "options": {"defaultType": str(self.execution_cfg.get("ccxt_default_type") or "swap")},
                 }
             )
+        elif exchange_id.startswith("hyperliquid"):
+            # Hyperliquid uses wallet-based auth (ccxt requiredCredentials:
+            # walletAddress + privateKey), NOT the apiKey/secret/password shape.
+            # Keys come ONLY from the hyperliquid credential resolver, which fails
+            # closed on a partial set, so a missing key leaves these blank -> disarmed.
+            kwargs.update(
+                {
+                    "walletAddress": creds.get("HYPERLIQUID_WALLET_ADDRESS", ""),
+                    "privateKey": creds.get("HYPERLIQUID_PRIVATE_KEY", ""),
+                }
+            )
 
         client = exchange_cls(kwargs)
 

@@ -6,6 +6,37 @@ import time
 from pathlib import Path
 
 
+def resolve_execution_config(config: dict, readiness: dict | None = None) -> dict:
+    """PURE: the execution config the write/reconcile path actually resolves.
+
+    Two independent selectors are applied:
+
+    * ``execution.exchange`` selects the *adapter class* (post CCXT cutover this is
+      ``ccxt``); an explicit ``HERMX_EXEC_BACKEND`` overrides it, honored identically
+      by submit and reconcile so the two can never diverge.
+    * ``execution.ccxt_exchange`` selects the *active CCXT venue* and is resolved
+      from the strategy instrument block (``readiness['instrument']['exchange']``,
+      the Phase 6 / M1 selection) when present, so a v2 strategy picks its own venue.
+
+    BACKWARD COMPATIBLE: a v1/OKX strategy resolves ``instrument.exchange == 'okx'``
+    via ``strategy_instrument()``, so ``ccxt_exchange`` is set to ``okx`` -- exactly
+    the existing value -- and the config is byte-identical. When the instrument block
+    is absent/empty the config's existing ``ccxt_exchange`` (default okx) is preserved.
+    A venue NEVER changes the adapter selector, only which CCXT venue it targets.
+    """
+    cfg = dict(config or {})
+    execution_cfg = dict(cfg.get("execution") or {})
+    backend = (os.environ.get("HERMX_EXEC_BACKEND") or "").strip()
+    if backend:
+        execution_cfg["exchange"] = backend
+    instrument = (readiness or {}).get("instrument") or {}
+    venue = str(instrument.get("exchange") or "").strip().lower()
+    if venue:
+        execution_cfg["ccxt_exchange"] = venue
+    cfg["execution"] = execution_cfg
+    return cfg
+
+
 class ExecutionService:
     """Controlled execution API surface for submission + post-submit reconciliation.
 
@@ -23,14 +54,8 @@ class ExecutionService:
     def _h(self, name: str):
         return self.hooks[name]
 
-    def _execution_config(self) -> dict:
-        cfg = dict(self.config or {})
-        execution_cfg = dict((cfg.get("execution") or {}))
-        backend = (os.environ.get("HERMX_EXEC_BACKEND") or "").strip()
-        if backend:
-            execution_cfg["exchange"] = backend
-        cfg["execution"] = execution_cfg
-        return cfg
+    def _execution_config(self, readiness: dict | None = None) -> dict:
+        return resolve_execution_config(self.config, readiness)
 
     def execute(self, record: dict) -> dict:
         submit_kill_switch_armed = self._h("submit_kill_switch_armed")
@@ -138,7 +163,7 @@ class ExecutionService:
         try:
             if self.executor_factory is None:
                 raise RuntimeError("executor_factory_unavailable")
-            executor = self.executor_factory.create(self._execution_config(), self.root)
+            executor = self.executor_factory.create(self._execution_config(readiness), self.root)
             adapter_result = executor.execute(readiness)
             elapsed_ms = int((adapter_result or {}).get("elapsed_ms") or round((time.time() - started) * 1000))
 

@@ -80,6 +80,20 @@ def resolve_exchange_credentials(exchange: str, source_env: dict | None = None) 
             out["BYBIT_SECRET_KEY"] = secret_key
         return out
 
+    if key in {"hyperliquid", "hyperliquid_testnet"}:
+        # Hyperliquid auth differs from the apiKey/secret/passphrase venues: it is a
+        # wallet address + private key (NO passphrase). Namespaced env names mirror
+        # the existing <EXCHANGE>_<SANDBOX>_<FIELD> -> <EXCHANGE>_<FIELD> convention
+        # (cf. BYBIT_TESTNET_* -> BYBIT_*), with TESTNET as Hyperliquid's sandbox tag.
+        # FAIL CLOSED: only return the pair when BOTH are present, so a partial set
+        # yields {} (disarmed) and can NEVER borrow another venue's keys.
+        wallet = _pick_first(env, "HYPERLIQUID_TESTNET_WALLET_ADDRESS", "HYPERLIQUID_WALLET_ADDRESS")
+        private_key = _pick_first(env, "HYPERLIQUID_TESTNET_PRIVATE_KEY", "HYPERLIQUID_PRIVATE_KEY")
+        if wallet and private_key:
+            out["HYPERLIQUID_WALLET_ADDRESS"] = wallet
+            out["HYPERLIQUID_PRIVATE_KEY"] = private_key
+        return out
+
     return out
 
 
@@ -112,6 +126,10 @@ def redact_secrets(text: str | None) -> str:
         "KUCOIN_PASSPHRASE",
         "BYBIT_API_KEY",
         "BYBIT_SECRET_KEY",
+        "HYPERLIQUID_WALLET_ADDRESS",
+        "HYPERLIQUID_PRIVATE_KEY",
+        "HYPERLIQUID_TESTNET_WALLET_ADDRESS",
+        "HYPERLIQUID_TESTNET_PRIVATE_KEY",
     ):
         value = os.environ.get(key)
         if _truthy(value):
