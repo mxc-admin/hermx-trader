@@ -99,8 +99,8 @@ def test_schema_is_well_formed():
 
 
 @pytest.mark.parametrize("path", sorted(LIVE_STRATEGIES_DIR.glob("*.json")), ids=lambda p: p.name)
-def test_live_v1_strategy_files_still_validate(path):
-    """The four production v1 files MUST keep validating (no migration yet)."""
+def test_live_strategy_files_validate(path):
+    """The four production strategy files (now schema_version 2) MUST validate."""
     assert _is_valid(json.loads(path.read_text(encoding="utf-8")))
 
 
