@@ -8,6 +8,8 @@ Do not use real-money API keys during first install.
 
 If an AI agent is reading this repository, give it `setup/AGENT_INSTALL_PROMPT.md` first. The prompt forces the agent to explain the system and safety gates before executing anything.
 
+> **Execution layer note.** Orders are routed through CCXT — the sole execution backend — behind the `ExecutionService` chokepoint. **OKX demo is the only configured and verified path today** (the concrete flow below). Multi-venue support (e.g. KuCoin, Hyperliquid) is **planned** (`REFACTOR_PLAN.md` Phase 6): each venue will use its own per-venue *namespaced* credentials (`OKX_*`, `KUCOIN_*`, `BYBIT_*`, …) with no exchange borrowing another's keys, and a missing/partial set fails closed. There are no KuCoin/Hyperliquid setup steps yet — follow the OKX-demo flow below as the current path.
+
 ## 1. Requirements
 
 - Windows, macOS, Linux, or VPS with Python 3.11+

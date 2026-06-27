@@ -31,6 +31,54 @@ That means:
 11. Dashboard updates from logs and exchange readback.
 ```
 
+## Layered Execution Architecture
+
+Execution is organized as four layers. The lower three are built and tested today; the top layer is a planned reasoning cap. The brain only ever calls *down* into the deterministic stack — it cannot bypass any gate or journal.
+
+```text
+Layer 1  [PLANNED]  Hermes Agent brain (Nous Research)
+                    venue/action selection, learning, cron scans — advisory ONLY
+   │  emits {venue, intent}; the layer below validates and may VETO it
+   ▼
+Layer 2  [BUILT]    HermesExecutionSkill   (src/skills/hermes_execution.py)
+                    only agent-facing execution surface; deterministic.
+                    Builds a normalized execution_intent, calls Layer 3.
+                    Owns no intelligence and no money-safety policy of its own.
+   ▼
+Layer 3  [BUILT]    ExecutionService       (src/execution/service.py)
+                    single chokepoint for all money-safety: kill-switch +
+                    gate precedence, write-ahead PLANNED->SUBMITTED journal,
+                    idempotency, FILLED/REJECTED/UNKNOWN outcome state machine,
+                    post-submit reconciliation, secret redaction.
+   ▼
+Layer 4  [BUILT]    CCXT adapter           (src/executors/ccxt_adapter.py)
+                    selected by ExecutorFactory; OKX demo LIVE-verified.
+                    kucoin/hyperliquid/bybit supported by CCXT but unconfigured.
+```
+
+This is the deterministic substrate: all risk policy (idempotency, journal transitions, reconciliation semantics, symbol pause, kill switches) lives in first-party HermX code at Layers 2–3. CCXT (Layer 4) is transport and venue normalization only — it owns no risk policy. The planned brain (Layer 1) adds no money-safety; the deterministic layer can veto any brain recommendation. See `docs/HERMES_AGENT_DESIGN.md`.
+
+## Venue Selection & Multi-Exchange
+
+- **The strategy selects the exchange via its instrument**, never by carrying secrets. A strategy file picks its venue + instrument; the execution stack resolves which exchange to talk to from that selection. (Today the strategy schema is still OKX-pinned; the exchange-agnostic `instrument.exchange` shape is Phase 6 — see `REFACTOR_PLAN.md`.)
+- **Credentials are resolved per-exchange, namespaced** (`src/security/credentials.py`, per `REFACTOR_PLAN.md` §0.4). Each exchange has its own credential set under a stable prefix (`OKX_*`, `KUCOIN_*`, `BYBIT_*`). No exchange borrows another's keys; a missing/partial set fails closed (disarmed, no fallback). OKX, KuCoin, and Bybit are wired in the resolver today; Hyperliquid is **not** yet.
+- **CCXT is the transport.** One unified adapter (`src/executors/ccxt_adapter.py`) handles exchange I/O and normalization across venues. Adding a venue is a config + credential-namespacing change, not new connector code.
+- **Configured/verified today: OKX demo only.** Other CCXT-supported venues are planned and unverified.
+
+## Built vs Planned
+
+| Capability | Status | Where |
+|---|---|---|
+| HermesExecutionSkill (agent-facing, deterministic) | **Built** | `src/skills/hermes_execution.py`, `skills/hermes-execution.md` |
+| ExecutionService chokepoint (gates, journal, idempotency, reconcile, redaction) | **Built** | `src/execution/service.py` |
+| CCXT adapter as sole execution backend (read + write contract) | **Built** | `src/executors/ccxt_adapter.py`, `factory.py` |
+| Per-exchange namespaced credentials (OKX, KuCoin, Bybit) | **Built** | `src/security/credentials.py` |
+| OKX demo live-verified submit → query → close | **Built** | `tests/test_okx_paper_integration.py` (gated) |
+| Hyperliquid credential resolution + adapter auth (wallet/key) | **Planned** | Phase 6 (`REFACTOR_PLAN.md`) |
+| Multi-venue LIVE routing (KuCoin / Hyperliquid configured + verified) | **Planned** | Phase 6 |
+| Exchange-agnostic strategy/alert schema (instrument block, widened enums) | **Planned** | Phase 6 (M1/M2/M3) |
+| Hermes Agent brain (venue selection, learning, cron, autonomous skills) | **Planned** | Phase 8 (`docs/HERMES_AGENT_DESIGN.md`) |
+
 ## Current Trial Runtime
 
 The current operating trial is strategy-file-driven Duo Base Dev.
@@ -99,6 +147,8 @@ It should produce an instruction:
 ```
 
 The exchange adapter translates that instruction into exchange-specific API calls.
+
+Today this is the **CCXT unified adapter** (`src/executors/ccxt_adapter.py`), selected by `ExecutorFactory` from `config.execution.exchange` / `execution.ccxt_exchange`. CCXT is the sole execution backend — `ExecutorFactory.available() == ['ccxt']`; there is no hand-rolled OKX connector anymore (the former `src/okx_demo_executor.py` was removed in the P5 cutover). The adapter implements both the write path (`execute`) and the normalized read/query contract (`get_order`, `get_open_orders`, `get_positions`, `get_balance`, history), and maps a submit timeout to a first-class `UNKNOWN` outcome. New venues are added by registering them in the factory and namespacing their credentials — not by writing new connector code.
 
 ## State Sources
 

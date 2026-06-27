@@ -6,18 +6,52 @@ Strategy-file-driven execution system for Kinetic Flow / MXC TradingView signals
 
 This repository is designed to be cloned, configured, tested in OKX demo, and then deployed to a VPS. It does not include private credentials and it does not approve real-money execution by default.
 
+## Vision & Architecture (3 layers)
+
+The system is a layered "Hermes Agent + CCXT multi-exchange" design. A deterministic execution stack (built today) is capped by a planned reasoning layer (the Hermes Agent brain). The brain sits **above** the deterministic stack and only ever *calls down* into it — it never bypasses the money-safety gates or journals.
+
+Legend: **[BUILT]** exists and is tested · **[PLANNED]** roadmap, not yet implemented.
+
+```text
+Layer 1  [PLANNED]  Hermes Agent brain (Nous Research)
+                    decide best venue + action, learn from outcomes, cron scans
+                    — advisory/routing ONLY; calls Layer 2, never bypasses safety
+   │  (emits {venue, intent} recommendations; can be VETOED by the layer below)
+   ▼
+Layer 2  [BUILT]    HermesExecutionSkill  (src/skills/hermes_execution.py)
+                    the only agent-facing execution surface; DETERMINISTIC.
+                    Builds a normalized execution_intent and calls Layer 3.
+                    Owns NO intelligence and NO money-safety policy of its own.
+   ▼
+Layer 3  [BUILT]    ExecutionService + journals  (src/execution/service.py)
+                    single chokepoint for ALL money-safety: kill-switch + gate
+                    precedence, write-ahead PLANNED->SUBMITTED journal,
+                    idempotency, outcome state machine (FILLED/REJECTED/UNKNOWN),
+                    post-submit reconciliation, secret redaction.
+   ▼
+Layer 4  [BUILT]    CCXT adapters  (src/executors/ccxt_adapter.py + factory.py)
+                    okx  — LIVE-verified on OKX demo
+                    kucoin, hyperliquid, bybit, … — PLANNED / unconfigured
+```
+
+The planned Layer 1 brain is documented in `docs/HERMES_AGENT_DESIGN.md`. It is a **name only** today — there is no LLM, decision, learning, or scheduling code yet. See `REFACTOR_PLAN.md` Phase 8.
+
 ## What It Does
 
 ```text
 TradingView alert
   -> webhook receiver
   -> strategy_id validation
-  -> strategy JSON lookup
-  -> execution planner
-  -> OKX demo order route
+  -> strategy JSON lookup  (selects the exchange via its instrument)
+  -> HermesExecutionSkill  (builds normalized execution_intent)
+  -> ExecutionService      (gates, journal, idempotency, reconciliation)
+  -> CCXT adapter          (venue translation + transport)
+  -> exchange              (OKX demo is the current live-verified venue)
   -> execution ledger
   -> clean dashboard
 ```
+
+CCXT is the sole execution backend; the venue is selected per strategy. OKX demo is the only venue configured and verified today (a real OKX-demo submit → query → close passes through CCXT). KuCoin / Hyperliquid / Bybit are supported by CCXT but **not** yet configured or verified.
 
 ## Current Demo Trial
 
@@ -51,7 +85,10 @@ src/
   webhook_receiver.py      TradingView webhook intake and strategy routing
   dashboard.py             clean dashboard server
   dashboard_core.py        dashboard helper layer
-  okx_demo_executor.py     OKX demo/sandbox adapter
+  skills/                  HermesExecutionSkill — the only agent-facing execution surface
+  execution/               ExecutionService — single chokepoint owning all money-safety
+  executors/               CCXT adapter (sole execution backend) + ExecutorFactory
+  security/                per-exchange namespaced credential scoping + redaction
 
 strategies/                one JSON file per active strategy
 schemas/                   JSON validation contracts

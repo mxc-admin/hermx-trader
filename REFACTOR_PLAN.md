@@ -166,9 +166,13 @@ P2  Security Hardening             (auth, HMAC, queue bounds)       ~1 wk
 P3  Execution Engine Stabilization (idempotency, timeouts, atomic)  ~1–2 wk
 P4  Dashboard Reliability          (safe reads, dynamic cards)      ~1 wk
 P5  Execution API + CCXT Cutover   (skill+API+risk+ccxt write path) ~1–2 wk
-P6  Schema Modernization           (exchange-agnostic)              ~1 wk
+P6  Exchange-Agnostic Schemas      (schema v2 + multi-exchange       ~1–2 wk
+    + Multi-Exchange Enablement     enablement: creds, profiles, sandbox writes)
 P7  Test Strategy & CI Hardening   (coverage gates, pipeline)       ongoing
+P8  Hermes Agent Brain (Nous)      (advisory venue/action routing)  gated behind P6
 ```
+
+> P8 is a planned reasoning layer, not deterministic infrastructure; it is gated behind P6 (multi-exchange) and a clean OKX live track record. See `docs/HERMES_AGENT_DESIGN.md`.
 
 > Sequencing note: P2 (security) is placed before P3 because the bot is reachable via a public tunnel and the auth gap (S1/S2) is exploitable *today*; it is cheap and isolated. P1 is first because it is the only class of bug that can lose money silently.
 
@@ -404,11 +408,13 @@ Skill contract: `skills/hermes-execution.md`.
 
 ---
 
-### Phase 6 — Schema Modernization (Exchange-Agnostic)
+### Phase 6 — Exchange-Agnostic Schemas + Multi-Exchange Enablement
 
-**Goal:** Strategies and alerts stop hardcoding OKX. Fixes M1–M3. Depends on P5's adapter contract.
+**Goal:** Strategies and alerts stop hardcoding OKX (M1–M3), and a second/third venue can be driven end-to-end with no code change. Depends on P5's adapter contract.
 
-**Tasks**
+> Status note: M1/M2/M3 are **not yet done** — the strategy schema still requires `okx_inst_id` / `okx_submit_orders` with an `*USDT` regex, the alert `exchange` enum is still `["okx"]`, and the readiness payload still uses OKX-named keys (`okx_inst_id`, `td_mode`). Per-exchange credentials exist today for OKX/KuCoin/Bybit (`src/security/credentials.py`), but only OKX demo is configured and verified; Hyperliquid is not in `credentials.py` and the CCXT adapter has no Hyperliquid auth branch yet.
+
+**Tasks (Schema Modernization)**
 1. **Strategy schema v2 (M1).** Introduce `schema_version: 2`: replace `okx_inst_id` with a generic `instrument` block (e.g. `{ "exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap" }`), replace `okx_submit_orders` with `submit_orders`, relax the `asset`/quote regex beyond `*USDT`. Keep a **v1→v2 loader shim** so existing `strategies/*.json` keep working until migrated. The `instrument.exchange` (and optional endpoint/profile) is how a strategy **selects its exchange**; credentials are NOT stored in the strategy — they are resolved by the adapter from the per-exchange namespaced env (§0.4). The schema must forbid inline credential fields.
 2. **Alert schema (M2).** Widen the `exchange` enum; keep `okx` valid. Validate alerts against the schema at intake (currently the schema file exists but enforcement should be explicit).
 3. **Generic instruction wire format (M3).** Make the readiness/instruction the exchange-agnostic shape from `ARCHITECTURE.md` (`strategy_id, asset, target_side, target_notional_usd, margin_mode, leverage`); let the adapter translate to OKX `inst_id`/`td_mode`. OKX-specific fields move *inside* the OKX adapter.
@@ -416,7 +422,12 @@ Skill contract: `skills/hermes-execution.md`.
 
    - Plan v2 requirement: support CCXT-unified symbol expression where possible (for example `BTC/USDT:USDT`) with optional exchange-native override fields for edge cases.
 
-**Risk:** MEDIUM — schema changes can break matching/validation. Mitigation: dual-version loader, validate both schemas in CI, migrate strategy files last and one at a time on the demo account.
+**Tasks (Multi-Exchange Enablement)**
+5. **Add Hyperliquid to the credential + redaction path.** Extend `src/security/credentials.py` `resolve_exchange_credentials` with a namespaced `hyperliquid` branch and add its keys to the `redact_secrets` key list. Hyperliquid auth **differs** — it uses a wallet address + private key, **no passphrase** — so add a corresponding `hyperliquid` branch in `ccxt_adapter._client` kwargs (wallet/key auth) rather than reusing the OKX-style api_key/secret/passphrase shape.
+6. **Per-venue runtime profiles.** Add `config/runtime.<venue>.demo.json` profiles (e.g. `runtime.kucoin.demo.json`, `runtime.hyperliquid.demo.json`) and resolve the venue from the strategy `instrument.exchange` (depends on the M1 schema v2 `instrument` block).
+7. **Per-venue sandbox WRITE verification.** Add gated tests that mirror the OKX-demo write test (`tests/test_okx_paper_integration.py`), one per venue (KuCoin, Hyperliquid), each behind an explicit env flag **and** the global kill switch, asserting a real sandbox submit → query → close on that venue.
+
+**Risk:** MEDIUM — schema changes can break matching/validation; new venue auth (esp. Hyperliquid wallet/key) is untested ground. Mitigation: dual-version loader, validate both schemas in CI, migrate strategy files last and one at a time on the demo account; each new venue stays disarmed until its gated sandbox write test passes, with credentials per-exchange fail-closed.
 
 **Rollback:** Loader accepts v1 and v2 simultaneously; revert individual strategy files to v1 if needed.
 
@@ -427,6 +438,9 @@ Skill contract: `skills/hermes-execution.md`.
 - [ ] Alerts are schema-validated at intake; invalid alerts are quarantined (per existing `quarantine_invalid_strategy_alerts` config).
 - [ ] All four production strategies migrated to v2 with identical resulting orders vs v1 (diff test).
 - [ ] A strategy selecting a second exchange (e.g. KuCoin) resolves that exchange's namespaced credentials + endpoint end-to-end in dry-run with **no code change**; a strategy with no/partial credentials for its selected exchange is disarmed with an operator alert and never borrows another exchange's keys (§0.4).
+- [ ] A KuCoin strategy **and** a Hyperliquid strategy each route end-to-end in dry-run with **no code change**.
+- [ ] Per-venue credentials are isolated and fail-closed (extends §0.4): each venue resolves only its own namespaced set; a missing/partial set disarms that venue and never borrows another's keys. Hyperliquid resolves via wallet/private-key auth (no passphrase).
+- [ ] Each venue's sandbox WRITE is verified by a gated submit → query → close test (behind env flag + kill switch) before that venue is considered live-capable.
 
 ---
 
@@ -459,6 +473,25 @@ Skill contract: `skills/hermes-execution.md`.
 - [ ] Secret scan blocks commits containing key-shaped strings.
 - [ ] Demo-integration job runs on schedule and reports idempotency + reconciliation status.
 - [ ] Demo-integration job uses masked **demo-only** credentials (asserted non-live, fork PRs excluded) and asserts the kill switch (`HERMX_SUBMIT_ENABLED=false` → zero submissions) before any armed test runs.
+
+---
+
+### Phase 8 — Hermes Agent Brain (Nous) — PLANNED, not started
+
+**Goal:** Add the Layer 1 reasoning cap — a Hermes Agent brain (Nous Research) that, from a signal + live market context, recommends the best `{venue, action}`, schedules periodic scans (cron), and learns which venues/strategies perform best from execution-ledger outcomes. **This is a name only today** — there is no LLM, decision, learning, or scheduling code.
+
+Full design: **`docs/HERMES_AGENT_DESIGN.md`**.
+
+**Hard boundary:** the brain is advisory/routing ONLY. It emits a `{venue, intent}` recommendation and **must** execute exclusively through `HermesExecutionSkill → ExecutionService` — it never touches CCXT directly and never bypasses gates or journals. The deterministic layer validates and can **VETO** any brain recommendation. Money-safety never moves into the LLM.
+
+**Gating (do not start until both hold):**
+- P6 multi-exchange enablement is complete (multiple venues route end-to-end), since venue *selection* is the brain's core value and is meaningless with one venue.
+- A clean OKX live track record exists (deterministic stack proven in real use).
+- Roll out advisory/shadow first (log recommendations without acting) before the brain is allowed to influence routing.
+
+**Risk:** N/A yet (not started). The design doc enumerates the inputs/outputs contract, learning loop, cron model, failure posture (brain down/uncertain → fall back to the strategy file's default venue; never block safety), and observability.
+
+(Phase 7 remains the ongoing test/CI track; Phase 8 sits above all deterministic phases.)
 
 ---
 
