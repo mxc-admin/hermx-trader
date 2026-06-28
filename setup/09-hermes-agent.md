@@ -20,10 +20,9 @@ The agent uses only the local loopback API that already runs:
   there is no size/notional/leverage field — the receiver computes notional from the
   strategy file).
 
-> Port note: the receiver listens on `SHADOW_PORT` (code default 8891). The skill is
-> written for 8891. If `setup/env.example` / `scripts/start_webhook.ps1` keep
-> `SHADOW_PORT=8888`, either change those to 8891 or update the skill's port. See
-> `SETUP.md` section 7.
+> Port note: the receiver listens on `SHADOW_PORT` (default 8891 everywhere — code,
+> `setup/env.example`, the scripts, and this skill). If you override `SHADOW_PORT` in
+> your `.env`, update the skill's port to match. See `SETUP.md` section 7.
 
 ## Steps
 

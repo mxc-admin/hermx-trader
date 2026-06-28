@@ -39,7 +39,7 @@ if (Test-Path (Join-Path $Root ".venv\Scripts\python.exe")) {
 }
 
 # --- defaults ---------------------------------------------------------------
-if (-not $env:SHADOW_PORT) { $env:SHADOW_PORT = "8888" }
+if (-not $env:SHADOW_PORT) { $env:SHADOW_PORT = "8891" }
 if (-not $env:CLEAN_DASHBOARD_PORT) { $env:CLEAN_DASHBOARD_PORT = "8098" }
 
 # --- load .env (ignore comments / blank lines) ------------------------------

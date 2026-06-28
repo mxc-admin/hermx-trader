@@ -33,7 +33,7 @@ else
 fi
 
 # --- defaults ---------------------------------------------------------------
-: "${SHADOW_PORT:=8888}"
+: "${SHADOW_PORT:=8891}"
 : "${CLEAN_DASHBOARD_PORT:=8098}"
 
 usage() {

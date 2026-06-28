@@ -20,6 +20,6 @@ Get-Content ".env" | ForEach-Object {
 }
 
 $env:SHADOW_ROOT = $Root
-if (-not $env:SHADOW_PORT) { $env:SHADOW_PORT = "8888" }
+if (-not $env:SHADOW_PORT) { $env:SHADOW_PORT = "8891" }
 
 python "src/webhook_receiver.py"

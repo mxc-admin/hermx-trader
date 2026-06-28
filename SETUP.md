@@ -148,10 +148,9 @@ string), matched against `SHADOW_WEBHOOK_SECRET`; an HMAC signature
 `HERMX_WEBHOOK_HMAC_KEY` is set. Public TradingView alerts reach this loopback port
 only through the Cloudflare Tunnel (section 11), never directly.
 
-> **Port consistency.** `setup/env.example` and `scripts/start_webhook.ps1` currently
-> pin `SHADOW_PORT=8888`, which overrides the 8891 code default. Pick one value and keep
-> it consistent everywhere — and note the Hermes Agent skill (`skills/hermx-control/SKILL.md`,
-> section 13) is written for **8891**, so if you keep 8888 you must update the skill to match.
+> **Port consistency.** The code default, `setup/env.example`, the start/smoke scripts,
+> and the Hermes Agent skill (`skills/hermx-control/SKILL.md`, section 13) all use
+> **8891**. If you override `SHADOW_PORT` in your `.env`, update the skill's port to match.
 
 ## 8. Create TradingView Alerts
 
