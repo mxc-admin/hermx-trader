@@ -14,7 +14,7 @@ def main() -> int:
 
     required = [
         "README.md",
-        "SETUP.md",
+        "INSTALL.md",
         "ARCHITECTURE.md",
         "src/webhook_receiver.py",
         "src/dashboard.py",
