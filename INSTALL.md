@@ -1,7 +1,20 @@
-# HermX — Interactive AI-Agent Installation Guide
+# HermX — Install Guide
 
-> **How to use this file:** Paste this entire document into your AI assistant (Claude, Windsurf,
-> Cursor, etc.). The assistant will read these instructions and walk you through installing HermX
+## Two ways to use this file
+
+**Option A (recommended): Let Hermes do it**
+1. Install Hermes Agent: `curl -fsSL https://hermes-agent.nousresearch.com/install.sh | sh`
+2. Add your API key to `~/.hermes/.env`: `XAI_API_KEY=xai-...`
+3. Paste this file to Hermes: `cat INSTALL.md | hermes -z --skills hermx-control`
+   Hermes will execute all steps interactively — asking you for credentials, reviewing strategies, and deploying everything.
+
+**Option B: Paste into any AI assistant**
+Paste this entire file into Claude, Windsurf, Cursor, or any capable AI assistant.
+The assistant will walk you through the install step by step.
+
+---
+
+> **How it works:** The assistant reads the instructions below and walks you through installing HermX
 > on a fresh VPS (or locally), one verified step at a time. You only need to answer its questions
 > and approve commands.
 

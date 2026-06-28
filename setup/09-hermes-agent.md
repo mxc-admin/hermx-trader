@@ -22,7 +22,7 @@ The agent uses only the local loopback API that already runs:
 
 > Port note: the receiver listens on `SHADOW_PORT` (default 8891 everywhere — code,
 > `setup/env.example`, the scripts, and this skill). If you override `SHADOW_PORT` in
-> your `.env`, update the skill's port to match. See `SETUP.md` section 7.
+> your `.env`, update the skill's port to match. See `INSTALL.md` (Phase 2 / Phase 5).
 
 ## Steps
 

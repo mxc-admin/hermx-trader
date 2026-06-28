@@ -18,7 +18,7 @@ Important rules:
 
 Read the repository in this order:
 1. README.md
-2. SETUP.md
+2. INSTALL.md
 3. ARCHITECTURE.md
 4. docs/ALERT_CONTRACT.md
 5. docs/EXECUTION_RULES.md

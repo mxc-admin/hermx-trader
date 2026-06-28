@@ -1,163 +1,96 @@
-# Kinetic Flow Execution System
+# HermX
 
-> Agent-first install: lee `setup/AGENT_INSTALL_PROMPT.md` y usalo como guia unica para entender, validar e instalar este sistema en OKX demo seguro.
+**Deterministic crypto signal execution, operated by an AI assistant.**
 
-Strategy-file-driven execution system for Kinetic Flow / MXC TradingView signals.
+HermX turns TradingView strategy alerts into safe, gated exchange orders. A deterministic Python
+stack owns all money-safety — validation, idempotency, journaling, kill switches — and submits
+demo/sandbox orders only when every safety gate is open. On top of that sits the optional **Hermes
+Agent**: a natural-language operator that *reads* state and *relays* sanctioned signals over Telegram.
+It can never size a trade, override a gate, or call an exchange directly.
 
-This repository is designed to be cloned, configured, tested in OKX demo, and then deployed to a VPS. It does not include private credentials and it does not approve real-money execution by default.
+Execution runs through CCXT, with **OKX** as the live-verified venue (KuCoin, Bybit, and Hyperliquid
+are wired in the resolver and planned). Public TradingView alerts reach a loopback-only receiver
+through a **Tailscale Funnel** — a stable HTTPS URL with no domain to buy and no firewall ports to open.
 
-## Vision & Architecture (3 layers)
-
-The system is a layered "Hermes Agent + CCXT multi-exchange" design. A deterministic execution stack (built today) is capped by a planned reasoning layer (the Hermes Agent brain). The brain sits **above** the deterministic stack and only ever *calls down* into it — it never bypasses the money-safety gates or journals.
-
-Legend: **[BUILT]** exists and is tested · **[PLANNED]** roadmap, not yet implemented.
-
-```text
-Layer 1  [PLANNED]  Hermes Agent brain (Nous Research)
-                    decide best venue + action, learn from outcomes, cron scans
-                    — advisory/routing ONLY; calls Layer 2, never bypasses safety
-   │  (emits {venue, intent} recommendations; can be VETOED by the layer below)
-   ▼
-Layer 2  [BUILT]    HermesExecutionSkill  (src/skills/hermes_execution.py)
-                    the only agent-facing execution surface; DETERMINISTIC.
-                    Builds a normalized execution_intent and calls Layer 3.
-                    Owns NO intelligence and NO money-safety policy of its own.
-   ▼
-Layer 3  [BUILT]    ExecutionService + journals  (src/execution/service.py)
-                    single chokepoint for ALL money-safety: kill-switch + gate
-                    precedence, write-ahead PLANNED->SUBMITTED journal,
-                    idempotency, outcome state machine (FILLED/REJECTED/UNKNOWN),
-                    post-submit reconciliation, secret redaction.
-   ▼
-Layer 4  [BUILT]    CCXT adapters  (src/executors/ccxt_adapter.py + factory.py)
-                    okx  — LIVE-verified on OKX demo
-                    kucoin, hyperliquid, bybit, … — PLANNED / unconfigured
-```
-
-The planned Layer 1 brain is documented in `docs/HERMES_AGENT_DESIGN.md`. It is a **name only** today — there is no LLM, decision, learning, or scheduling code yet. See `REFACTOR_PLAN.md` Phase 8.
-
-## What It Does
+## How it works
 
 ```text
 TradingView alert
-  -> webhook receiver
-  -> strategy_id validation
-  -> strategy JSON lookup  (selects the exchange via its instrument)
-  -> HermesExecutionSkill  (builds normalized execution_intent)
-  -> ExecutionService      (gates, journal, idempotency, reconciliation)
-  -> CCXT adapter          (venue translation + transport)
-  -> exchange              (OKX demo is the current live-verified venue)
-  -> execution ledger
-  -> clean dashboard
+  -> Tailscale Funnel (stable public HTTPS URL)
+  -> Webhook receiver  (loopback 127.0.0.1:8891; validates strategy_id + schema)
+  -> Gate chain        (kill switch + 3 safety gates; idempotency, journal, reconcile)
+  -> CCXT adapter      (venue translation)
+  -> Exchange          (OKX demo — live-verified)
+  -> Execution ledger -> Dashboard (loopback 127.0.0.1:8098, read-only)
 ```
 
-CCXT is the sole execution backend; the venue is selected per strategy. OKX demo is the only venue configured and verified today (a real OKX-demo submit → query → close passes through CCXT). KuCoin / Hyperliquid / Bybit are supported by CCXT but **not** yet configured or verified.
+The **Hermes Agent** reads the dashboard/health state and relays operator questions and sanctioned
+signals over Telegram. All risk policy stays in Python — the LLM is advisory and read/relay only.
 
-## Current Demo Trial
+## Key properties
 
-Total assigned demo budget: `$6,500`.
-
-| Strategy ID | Asset | TF | Upper | Lower | Budget | Leverage | Mode |
-|---|---|---:|---:|---:|---:|---:|---|
-| `solusdt_duo_base_dev_3h` | SOLUSDT | 3h | 1.05 | 0.95 | 1500 | 2x | OKX demo |
-| `ethusdt_duo_base_dev_2h` | ETHUSDT | 2h | 1.40 | 0.95 | 2000 | 2x | OKX demo |
-| `xrpusdt_duo_base_dev_4h` | XRPUSDT | 4h | 1.20 | 0.95 | 1500 | 2x | OKX demo |
-| `btcusdt_duo_base_dev_2h` | BTCUSDT | 2h | 1.40 | 0.95 | 1500 | 2x | OKX demo |
-
-All current strategies use:
-
-- Heikin Ashi charts
-- Duo Base Dev / duo-base-2.5
-- isolated margin
-- 2x leverage
-- OKX demo/sandbox execution
-- one BUY and one SELL TradingView alert per strategy
-
-## Repository Map
-
-```text
-README.md                  start here
-SETUP.md                   full installation and validation guide
-ARCHITECTURE.md            system design and runtime flow
-requirements.txt           Python dependency entrypoint
-
-src/
-  webhook_receiver.py      TradingView webhook intake and strategy routing
-  dashboard.py             clean dashboard server
-  dashboard_core.py        dashboard helper layer
-  skills/                  HermesExecutionSkill — the only agent-facing execution surface
-  execution/               ExecutionService — single chokepoint owning all money-safety
-  executors/               CCXT adapter (sole execution backend) + ExecutorFactory
-  security/                per-exchange namespaced credential scoping + redaction
-
-strategies/                one JSON file per active strategy
-schemas/                   JSON validation contracts
-config/                    runtime profiles, including config/runtime.demo.json
-setup/                     focused setup guides
-setup/AGENT_INSTALL_PROMPT.md handoff prompt for Codex, Claude, or Hermes Agent
-docs/                      operational details
-skills/                    agent/operator playbooks
-scripts/                   validation and local start helpers
-```
+- **Fail-closed safety** — orders submit only when all three gates are open; anything missing disarms.
+- **Loopback-only servers** — receiver and dashboard bind `127.0.0.1`; nothing is exposed directly.
+- **Stable URL, no domain** — Tailscale Funnel gives a free, reboot-surviving HTTPS endpoint.
+- **Supervised services** — runs under systemd (VPS) or Docker, auto-restarting on failure.
+- **Low-frequency by design** — 1–2 signals/day on 2h–4h strategies; not a high-frequency bot.
 
 ## Quick Start
 
-If an AI agent is installing or auditing this repo, start with `setup/AGENT_INSTALL_PROMPT.md`.
+### Step 1 — Install Hermes Agent (your AI assistant)
 
-Human quick start:
-
-1. Read `SETUP.md`.
-2. Copy `setup/env.example` to `.env`.
-3. Fill only demo/sandbox credentials.
-4. Copy `config/runtime.demo.json` to `shadow-config.json`.
-5. Validate the package:
-
-```powershell
-python scripts/validate_package.py
+```bash
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | sh
+# Add your xAI API key to ~/.hermes/.env:
+# XAI_API_KEY=xai-...
 ```
 
-6. Start the dashboard:
+### Step 2 — Let Hermes set up HermX for you
 
-```powershell
-.\scripts\start_dashboard.ps1
+```bash
+# Clone this repo, then:
+cat INSTALL.md | hermes -z --skills hermx-control
+# Or paste INSTALL.md directly into your AI assistant (Claude, Windsurf, etc.)
 ```
 
-7. Start the webhook receiver:
+The agent walks you through the entire install interactively — asking for credentials, reviewing
+strategies, setting up Tailscale, deploying services, and configuring TradingView alerts. See
+[INSTALL.md](INSTALL.md) for the full guide and a manual path.
 
-```powershell
-.\scripts\start_webhook.ps1
-```
+## What you'll have after install
 
-8. Create TradingView alerts using `setup/04-tradingview-alerts.md`.
-9. Confirm every alert has `strategy_id`.
-10. Confirm every alert is open-ended or uses the maximum available expiration.
+- A stable public webhook URL (`https://hermx.<tailnet>.ts.net/webhook`)
+- TradingView alerts configured for each enabled strategy (BUY + SELL)
+- Hermes available on Telegram to query state and relay signals
+- Webhook receiver + dashboard supervised by systemd or Docker
 
-## Important Safety Rules
+## Strategies
 
-- Do not commit `.env`.
-- Do not put API keys in strategy files.
-- Do not use real-money credentials during first install.
-- Do not enable real-money execution until `docs/REAL_MONEY_CHECKLIST.md` is complete.
-- If an alert is missing `strategy_id`, quarantine it.
-- If a signal is same-direction, do not pyramid.
-- If a signal is opposite-direction, close current position, verify close, then open reverse.
+Four default strategies ship ready to run — BTC, ETH, SOL, and XRP USDT perpetuals on OKX, 2h–4h
+timeframes, isolated margin, 2x leverage, ~$6,500 total demo budget. **All are demo/sandbox by
+default**, and the strategy file (never the alert) owns position sizing. During install you review
+and confirm each strategy's risk parameters before anything is enabled. See
+[docs/STRATEGIES.md](docs/STRATEGIES.md) for detail.
 
-## Order Submission Safety Gates
+## Architecture
 
-The repository is prepared for OKX demo execution, but new installs are blocked by the `.env` master switch until the operator enables it.
+A four-layer design: a deterministic execution substrate (built and tested) capped by a planned
+reasoning layer that only ever calls *down* into it. See [ARCHITECTURE.md](ARCHITECTURE.md) for the
+full design, runtime flow, and built-vs-planned status.
 
-All three layers must allow submission before any OKX demo order can be sent:
+## Safety
 
-| Layer | Field | Initial package value | Purpose |
-|---|---|---:|---|
-| `.env` | `OKX_SUBMIT_ORDERS` | `false` | Master local safety switch |
-| `shadow-config.json` | `execution.submit_orders` | `true` | Runtime profile allows demo execution |
-| strategy JSON | `okx_submit_orders` | `true` | Individual strategy allows demo execution |
+Every demo order must pass a **three-gate** model — a master `.env` switch (`OKX_SUBMIT_ORDERS`),
+a runtime-profile gate (`execution.submit_orders`), and a per-strategy gate (`submit_orders`). All
+three must be `true` to submit; any one `false` blocks submission by design, and fresh installs ship
+with the master switch off. Sizing, idempotency, journaling, and reconciliation all live in
+first-party Python — **the LLM never touches sizing or money-safety**.
 
-Recommended install flow:
+## Requirements
 
-1. Keep `OKX_SUBMIT_ORDERS=false`.
-2. Run validation and synthetic webhook tests.
-3. Confirm dashboard and quarantine behavior.
-4. Set `OKX_SUBMIT_ORDERS=true` only when ready to submit OKX demo orders.
-5. Never use real-money credentials unless the real-money checklist is complete and explicitly approved.
+- A VPS (fresh Ubuntu 22.04) **or** a local Mac
+- Python 3.11+
+- OKX **demo** API keys (or KuCoin/Bybit/Hyperliquid testnet keys)
+- TradingView Pro+ (needed to send webhook request headers)
+- A free Tailscale account
+- An xAI API key (only for the optional Hermes Agent)
