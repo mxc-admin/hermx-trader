@@ -1765,7 +1765,7 @@ def status_banners(model):
     elif execu.get("stale"):
         out.append(banner(f"EXECUTOR DATA STALE — last exchange read {human_age(execu.get('age_seconds'))} ago", "warn"))
     if ledger.get("total_skipped"):
-        out.append(banner(f"{ledger['total_skipped']} ledger lines skipped (corrupt) — see /api ledger_health", "warn"))
+        out.append(banner(f"{ledger['total_skipped']} ledger lines skipped (corrupt) — see /dashboard/api ledger_health", "warn"))
     if fresh.get("stale"):
         if fresh.get("no_data"):
             out.append(banner("No recent data — dashboard has not received any alerts yet", "warn"))
@@ -2049,12 +2049,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
-        if path in {"/", "/shadow/dashboard", "/api", "/shadow/dashboard/api"} and not self._dashboard_auth_ok():
+        if path in {"/dashboard", "/dashboard/", "/dashboard/api", "/dashboard/api/", "/", "/shadow/dashboard", "/api", "/shadow/dashboard/api"} and not self._dashboard_auth_ok():
             self._auth_challenge()
             return
-        if path in {"/", "/shadow/dashboard"}:
+        if path in {"/dashboard", "/dashboard/", "/", "/shadow/dashboard"}:
             self.send_bytes(200, render().encode("utf-8"), "text/html; charset=utf-8")
-        elif path in {"/api", "/shadow/dashboard/api"}:
+        elif path in {"/dashboard/api", "/dashboard/api/", "/api", "/shadow/dashboard/api"}:
             payload = api_payload()
             self.send_bytes(200, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
         elif path in {"/health", "/shadow/health"}:

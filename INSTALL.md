@@ -55,7 +55,7 @@ to a fully operational install, interactively.
   and a JSON schema, runs a safety-gate chain, and only when all gates are open submits demo orders
   to the chosen exchange. Writes append-only ledgers under `logs/`.
 - **Dashboard** (`src/dashboard.py`) — binds `127.0.0.1:8098`, endpoints `GET /health`, `GET /api`,
-  `GET /shadow/dashboard`. Read-only view of positions, PnL, executor health, and gate state.
+  `GET /dashboard/`. Read-only view of positions, PnL, executor health, and gate state.
 - **Strategy files** (`strategies/*.json`) — per-asset config. An alert is only acted on if its
   `strategy_id` exactly matches a strategy file (and symbol/timeframe also match). The strategy file
   owns the risk (budget, leverage) — an alert can never set position size.
@@ -482,7 +482,7 @@ sudo tailscale funnel --bg --https=8443 8098
 
 The dashboard is then reachable at:
 
-> `https://hermx.<tailnet>.ts.net:8443/shadow/dashboard`
+> `https://hermx.<tailnet>.ts.net:8443/dashboard/`
 
 Because this URL is public, it **still requires the unified secret** — send the
 `HERMX_SECRET` value from `.env` (Phase 2.3a) as the `X-Dashboard-Token` header,
@@ -492,7 +492,7 @@ runs; both save the URL to `DASHBOARD_URL.txt`. Save it manually otherwise:
 
 ```bash
 # Replace the placeholder with the real hostname from `tailscale funnel status`:
-echo "https://hermx.<tailnet>.ts.net:8443/shadow/dashboard" > DASHBOARD_URL.txt
+echo "https://hermx.<tailnet>.ts.net:8443/dashboard/" > DASHBOARD_URL.txt
 cat DASHBOARD_URL.txt
 ```
 
@@ -819,7 +819,7 @@ curl -s -X POST http://127.0.0.1:8891/webhook \
   }'
 ```
 
-Then open the dashboard (`http://127.0.0.1:8098/shadow/dashboard`, via Tailscale or an SSH tunnel)
+Then open the dashboard (`http://127.0.0.1:8098/dashboard/`, via Tailscale or an SSH tunnel)
 and confirm the alert appears. A `401` means the `X-Webhook-Secret` is wrong/blank; a **quarantine**
 means a field (`strategy_id`/`symbol`/`timeframe`) didn't match the strategy file.
 
@@ -851,7 +851,7 @@ Then print the final summary (fill in the real values):
 ```text
 === HermX Installation Complete ===
 Webhook URL:    https://hermx.XXXXX.ts.net/webhook
-Dashboard URL:  https://hermx.XXXXX.ts.net:8443/shadow/dashboard  (needs HERMX_SECRET)
+Dashboard URL:  https://hermx.XXXXX.ts.net:8443/dashboard/  (needs HERMX_SECRET)
 Dashboard (local): http://localhost:8098
 Receiver:       http://localhost:8891
 Strategies:   btcusdt_duo_base_dev_2h, ethusdt_duo_base_dev_2h, solusdt_duo_base_dev_3h, xrpusdt_duo_base_dev_4h

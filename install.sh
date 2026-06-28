@@ -414,13 +414,13 @@ if have tailscale; then
       sudo tailscale funnel --bg --https=8443 8098 || warn "Dashboard Funnel command failed — enable Funnel for your tailnet first, then re-run."
       DASH_HOST="$(tailscale funnel status 2>/dev/null | grep -oE 'https://[a-zA-Z0-9._-]+\.ts\.net' | head -1 || true)"
       if [[ -n "$DASH_HOST" ]]; then
-        DASHBOARD_URL="${DASH_HOST}:8443/shadow/dashboard"
+        DASHBOARD_URL="${DASH_HOST}:8443/dashboard/"
         echo "$DASHBOARD_URL" > "$REPO_ROOT/DASHBOARD_URL.txt"
         ok "Dashboard URL: $DASHBOARD_URL"
         info "(Saved to DASHBOARD_URL.txt — this public URL still requires HERMX_SECRET from .env.)"
       else
         warn "Could not parse a dashboard Funnel URL. Run 'tailscale funnel status' and use"
-        warn "https://hermx.<tailnet>.ts.net:8443/shadow/dashboard (needs HERMX_SECRET)."
+        warn "https://hermx.<tailnet>.ts.net:8443/dashboard/ (needs HERMX_SECRET)."
       fi
     else
       info "Skipped the dashboard Funnel — the dashboard stays loopback-only on :8098."
