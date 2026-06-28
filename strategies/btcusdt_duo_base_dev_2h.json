@@ -22,5 +22,5 @@
   "submit_orders": true,
   "status": "active_demo",
   "validation_source": "research/branches/tv-opt-founder-2026-06-23-current-duobase25/TRUTH_TEST_BTC_FIXED_CANDIDATES_REPORT.md",
-  "notes": "Active OKX sandbox/demo candidate when deployed with the Duo Base Dev VPS demo config. It remains inert under configs where strategy_engine.submit_orders=false."
+  "notes": "Executes to OKX demo sandbox (execution_mode=demo). Inert until OKX demo API credentials are configured."
 }

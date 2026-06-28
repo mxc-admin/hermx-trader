@@ -1,8 +1,13 @@
-"""Kill-switch tests (REFACTOR_PLAN.md:168, :180 -- Phase 0 task 6).
+"""Kill-switch / execution-mode tests for the Phase A refactor.
 
-Asserts ``HERMX_SUBMIT_ENABLED`` hard-blocks OKX order submission at the top of
-``execute_okx_if_enabled`` regardless of config, and that its unset default is
-inert (existing config-driven behavior preserved).
+The old 6-flag arming chain is gone. Two operative controls remain:
+  * per-strategy ``execution_mode`` ("demo" | "live"), surfaced via readiness, and
+  * the single global ``HERMX_LIVE_TRADING`` kill switch (``live_trading_enabled``).
+
+In Phase A every order routes to the demo sandbox, so a demo-mode strategy submits
+WITHOUT ``HERMX_LIVE_TRADING`` armed -- the switch is scaffolded for Phase B, which
+will gate ``execution_mode == "live"`` strategies on it. The per-strategy submit flag
+(surfaced as ``readiness.live_execution_enabled``) is what arms paper submission.
 """
 from __future__ import annotations
 
@@ -12,16 +17,8 @@ import webhook_receiver as wr
 
 
 def _armed_config() -> dict:
-    """A config where every gate is affirmative, so submission WOULD proceed."""
-    return {
-        "execution": {
-            "enabled": True,
-            "submit_orders": True,
-            "simulated_trading": True,
-            "force_ipv4": True,
-        },
-        "risk": {"allow_live_execution": True},
-    }
+    """No arming flags: in Phase A the per-strategy submit flag arms paper submission."""
+    return {"execution": {"exchange": "ccxt"}}
 
 
 def _armed_record() -> dict:
@@ -46,34 +43,11 @@ def _fake_executor():
     return fake
 
 
-def test_kill_switch_false_blocks_submit(monkeypatch):
-    """HERMX_SUBMIT_ENABLED=false => no executor submit at all."""
+def test_demo_mode_submits_with_kill_switch_off(monkeypatch):
+    """Demo mode does NOT need the kill switch armed: with HERMX_LIVE_TRADING=false
+    a demo strategy still submits to the sandbox (the switch gates only live mode)."""
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "false")
-
-    with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
-        result = wr.execute_okx_if_enabled(_armed_record())
-
-    create_mock.assert_not_called()
-    assert result["mode"] == "not_submitted"
-    assert "kill switch" in result["reason"].lower()
-
-
-def test_kill_switch_falsey_variants_block(monkeypatch):
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
-    for value in ("false", "0", "no", ""):
-        monkeypatch.setenv("HERMX_SUBMIT_ENABLED", value)
-        with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
-            result = wr.execute_okx_if_enabled(_armed_record())
-        create_mock.assert_not_called()
-        assert result["mode"] == "not_submitted", f"value={value!r} should block"
-
-
-def test_kill_switch_unset_is_inert_armed_config_submits(monkeypatch):
-    """Positive control: with the switch unset and config armed, the executor submit
-    IS invoked -- proving it is the kill switch (not the config) that blocks above."""
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
-    monkeypatch.delenv("HERMX_SUBMIT_ENABLED", raising=False)
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "false")
 
     fake = _fake_executor()
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):
@@ -82,14 +56,40 @@ def test_kill_switch_unset_is_inert_armed_config_submits(monkeypatch):
     fake.execute.assert_called_once()
 
 
-def test_submit_kill_switch_armed_helper(monkeypatch):
-    monkeypatch.delenv("HERMX_SUBMIT_ENABLED", raising=False)
-    assert wr.submit_kill_switch_armed()[0] is True  # unset => inert/armed
+def test_demo_mode_submits_with_kill_switch_unset(monkeypatch):
+    monkeypatch.setattr(wr, "CONFIG", _armed_config())
+    monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
 
-    for blocked in ("false", "0", "no", "", "  ", "False", "NO"):
-        monkeypatch.setenv("HERMX_SUBMIT_ENABLED", blocked)
-        assert wr.submit_kill_switch_armed()[0] is False, blocked
+    fake = _fake_executor()
+    with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):
+        wr.execute_okx_if_enabled(_armed_record())
 
-    for armed in ("true", "1", "yes"):
-        monkeypatch.setenv("HERMX_SUBMIT_ENABLED", armed)
-        assert wr.submit_kill_switch_armed()[0] is True, armed
+    fake.execute.assert_called_once()
+
+
+def test_per_strategy_submit_flag_blocks(monkeypatch):
+    """The per-strategy submit flag is the paper arm: live_execution_enabled=False
+    (strategy.submit_orders=false) => no executor is ever built and nothing submits."""
+    monkeypatch.setattr(wr, "CONFIG", _armed_config())
+    rec = _armed_record()
+    rec["execution_readiness"]["live_execution_enabled"] = False
+
+    with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
+        result = wr.execute_okx_if_enabled(rec)
+
+    create_mock.assert_not_called()
+    assert result["mode"] == "not_submitted"
+
+
+def test_live_trading_enabled_helper(monkeypatch):
+    """HERMX_LIVE_TRADING is a fail-closed positive enable flag (Phase B gate input)."""
+    monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
+    assert wr.live_trading_enabled()[0] is False  # unset => live disabled (fail closed)
+
+    for disabled in ("false", "0", "no", "", "  ", "False", "NO"):
+        monkeypatch.setenv("HERMX_LIVE_TRADING", disabled)
+        assert wr.live_trading_enabled()[0] is False, disabled
+
+    for enabled in ("true", "1", "yes", "TRUE", "Yes"):
+        monkeypatch.setenv("HERMX_LIVE_TRADING", enabled)
+        assert wr.live_trading_enabled()[0] is True, enabled

@@ -149,6 +149,9 @@ def test_flag_off_invalid_alert_logged_but_processed_byte_identical(wr, monkeypa
     alert["exchange"] = "binance"
 
     monkeypatch.setitem(wr.STRATEGY_ENGINE, "enforce_alert_schema", False)
+    # Dry-run posture (per-strategy submit flag off) so the corpus strategy does not
+    # arm a real sandbox submit -- keeps both runs deterministic and byte-identical.
+    monkeypatch.setitem(wr.STRATEGIES["btcusdt_duo_base_dev_2h"], "submit_orders", False)
 
     # Baseline = the schema feature effectively absent (pre-M2): validator says
     # valid, so the M2 block is a no-op.
@@ -159,6 +162,9 @@ def test_flag_off_invalid_alert_logged_but_processed_byte_identical(wr, monkeypa
     # the flag OFF. Reset dedupe so the replay isn't flagged a duplicate.
     monkeypatch.undo()
     monkeypatch.setitem(wr.STRATEGY_ENGINE, "enforce_alert_schema", False)
+    # Dry-run posture (per-strategy submit flag off) so the corpus strategy does not
+    # arm a real sandbox submit -- keeps both runs deterministic and byte-identical.
+    monkeypatch.setitem(wr.STRATEGIES["btcusdt_duo_base_dev_2h"], "submit_orders", False)
     _reset_dedupe(wr)
     before = dict(wr.ALERT_SCHEMA_METRICS)
     off_status, off_record = wr.build_record(alert, RECEIVED_AT)

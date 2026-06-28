@@ -30,9 +30,9 @@ os.environ["SHADOW_ROOT"] = str(_SHADOW_ROOT)
 os.environ.setdefault("SHADOW_WEBHOOK_SECRET", "test-webhook-secret")
 os.environ.setdefault("HERMX_DASH_AUTH_TOKEN", "test-dashboard-token")
 
-# Ensure the kill switch starts from its inert default for every test process,
-# unless an individual test opts in via monkeypatch.
-os.environ.pop("HERMX_SUBMIT_ENABLED", None)
+# Ensure the live-trading kill switch starts disabled (fail-closed) for every test
+# process, unless an individual test opts in via monkeypatch.
+os.environ.pop("HERMX_LIVE_TRADING", None)
 
 # Make `import webhook_receiver` resolve against src/.
 if str(SRC_DIR) not in sys.path:
@@ -112,7 +112,7 @@ def wr(wr_root, monkeypatch):
 
     orig_shadow_root = os.environ.get("SHADOW_ROOT")
     os.environ["SHADOW_ROOT"] = str(wr_root)
-    os.environ.pop("HERMX_SUBMIT_ENABLED", None)
+    os.environ.pop("HERMX_LIVE_TRADING", None)
     importlib.reload(module)
     try:
         yield module
@@ -159,7 +159,7 @@ def reload_wr():
             os.environ["HERMX_STATE_BACKEND"] = backend
         else:
             os.environ.pop("HERMX_STATE_BACKEND", None)
-        os.environ.pop("HERMX_SUBMIT_ENABLED", None)
+        os.environ.pop("HERMX_LIVE_TRADING", None)
         importlib.reload(module)
         return module
 

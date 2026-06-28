@@ -29,10 +29,18 @@ def resolve_execution_config(config: dict, readiness: dict | None = None) -> dic
     backend = (os.environ.get("HERMX_EXEC_BACKEND") or "").strip()
     if backend:
         execution_cfg["exchange"] = backend
-    instrument = (readiness or {}).get("instrument") or {}
+    rd = readiness or {}
+    instrument = rd.get("instrument") or {}
     venue = str(instrument.get("exchange") or "").strip().lower()
     if venue:
         execution_cfg["ccxt_exchange"] = venue
+    # Phase A: per-strategy execution_mode controls sandbox routing. The readiness block
+    # carries the resolved ``simulated_trading`` (always True in Phase A) and the
+    # ``execution_mode`` so the adapter sandboxes accordingly.
+    if "simulated_trading" in rd:
+        execution_cfg["simulated_trading"] = bool(rd["simulated_trading"])
+    if "execution_mode" in rd:
+        execution_cfg["execution_mode"] = rd["execution_mode"]
     cfg["execution"] = execution_cfg
     return cfg
 
@@ -58,24 +66,10 @@ class ExecutionService:
         return resolve_execution_config(self.config, readiness)
 
     def execute(self, record: dict) -> dict:
-        submit_kill_switch_armed = self._h("submit_kill_switch_armed")
         append_jsonl = self._h("append_jsonl")
         execution_ledger = self._h("execution_ledger")
 
-        armed, kill_switch_raw = submit_kill_switch_armed()
-        if not armed:
-            result = {
-                "ok": True,
-                "mode": "not_submitted",
-                "reason": "HERMX_SUBMIT_ENABLED kill switch engaged",
-                "kill_switch": kill_switch_raw,
-            }
-            append_jsonl(execution_ledger, {"received_at": record.get("received_at"), "okx_execution": result})
-            return result
-
         readiness = record.get("execution_readiness") or {}
-        execution_cfg = self.config.get("execution", {}) or {}
-        risk_cfg = self.config.get("risk", {}) or {}
 
         webhook_auth_config_healthy = self._h("webhook_auth_config_healthy")
         watchdog_submission_state = self._h("watchdog_submission_state")
@@ -83,11 +77,16 @@ class ExecutionService:
         auth_healthy = bool(record.get("auth_healthy", True)) and webhook_auth_config_healthy()
         watchdog_ok, watchdog_reason = watchdog_submission_state()
 
+        # Phase A gate: paper/sandbox only. Arms on the single per-strategy submit flag
+        # (readiness.live_execution_enabled, derived from strategy.submit_orders) plus
+        # auth + watchdog health. The dead config-flag arming chain (execution.enabled/
+        # submit_orders, risk.allow_live_execution) is gone. The global HERMX_LIVE_TRADING
+        # kill switch is intentionally NOT consulted here: in Phase A every order routes to
+        # the demo sandbox, so the live-trading switch is inert.
+        # Phase B: live mode gate goes here -- for execution_mode == "live", additionally
+        # require live_trading_enabled().
         should_execute = (
             bool(readiness.get("live_execution_enabled"))
-            and bool(execution_cfg.get("enabled"))
-            and bool(execution_cfg.get("submit_orders"))
-            and bool(risk_cfg.get("allow_live_execution"))
             and bool(auth_healthy)
             and bool(watchdog_ok)
         )

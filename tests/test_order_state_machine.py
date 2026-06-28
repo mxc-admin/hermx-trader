@@ -85,17 +85,15 @@ def test_record_order_state_rejects_illegal(wr):
 # ---------------------------------------------------------------------------
 
 def _armed_config() -> dict:
-    return {
-        "execution": {"enabled": True, "submit_orders": True, "simulated_trading": True, "force_ipv4": True},
-        "risk": {"allow_live_execution": True},
-    }
+    # Phase A: no config arming flags -- the per-strategy submit flag arms paper submission.
+    return {"execution": {"exchange": "ccxt"}}
 
 
-def _disabled_config() -> dict:
-    return {
-        "execution": {"enabled": False, "submit_orders": False, "simulated_trading": True, "force_ipv4": True},
-        "risk": {"allow_live_execution": False},
-    }
+def _blocked_record(cl: str = "mxc-xrpusdt-buy-blocked0000000de") -> dict:
+    """An otherwise-armed record whose per-strategy submit flag is off (gate blocked)."""
+    rec = _armed_record(cl)
+    rec["execution_readiness"]["live_execution_enabled"] = False
+    return rec
 
 
 def _armed_record(cl: str = "mxc-xrpusdt-buy-abc0123456789de") -> dict:
@@ -248,13 +246,12 @@ def test_planned_record_carries_minimal_intent(wr, monkeypatch):
 # (c) Disabled production config is observe-only inert.
 # ---------------------------------------------------------------------------
 
-def test_disabled_gates_write_no_order_journal(wr, monkeypatch):
-    """Default/disabled config: gates fail => not_submitted, ZERO order-journal writes."""
-    monkeypatch.setattr(wr, "CONFIG", _disabled_config())
-    monkeypatch.delenv("HERMX_SUBMIT_ENABLED", raising=False)  # unset => kill switch inert/armed
+def test_blocked_gate_writes_no_order_journal(wr, monkeypatch):
+    """Blocked gate (per-strategy submit flag off): not_submitted, ZERO order-journal writes."""
+    monkeypatch.setattr(wr, "CONFIG", _armed_config())
 
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
-        result = wr.execute_okx_if_enabled(_armed_record())
+        result = wr.execute_okx_if_enabled(_blocked_record())
 
     create_mock.assert_not_called()  # no executor built => no submit
     assert result["mode"] == "not_submitted"
@@ -262,15 +259,14 @@ def test_disabled_gates_write_no_order_journal(wr, monkeypatch):
     assert wr.load_open_orders() == []
 
 
-def test_kill_switch_branch_writes_no_order_journal(wr, monkeypatch):
-    """Even with config armed, the kill switch not_submitted branch writes no record."""
+def test_not_submitted_branch_writes_no_order_journal(wr, monkeypatch):
+    """The not_submitted branch returns before any order-journal record is written."""
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "false")
 
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
-        result = wr.execute_okx_if_enabled(_armed_record())
+        result = wr.execute_okx_if_enabled(_blocked_record())
 
-    create_mock.assert_not_called()  # kill switch blocks before any executor build
+    create_mock.assert_not_called()
     assert result["mode"] == "not_submitted"
     assert not wr.ORDER_JOURNAL_LEDGER.exists()
 

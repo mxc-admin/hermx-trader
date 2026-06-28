@@ -17,7 +17,6 @@
     "enabled": []
   },
   "execution": {
-    "enabled": true,
     "mode": "demo_live",
     "exchange": "ccxt",
     "ccxt_exchange": "binance",
@@ -27,15 +26,12 @@
     "route": "binance_api",
     "account": "testnet",
     "td_mode": "isolated",
-    "simulated_trading": true,
-    "force_ipv4": true,
-    "submit_orders": false
+    "force_ipv4": true
   },
   "strategy_engine": {
     "enabled": true,
     "strategies_dir": "strategies",
     "default_status": "trial_candidate",
-    "submit_orders": false,
     "allow_strategy_alerts": true,
     "require_strategy_id": true,
     "quarantine_invalid_strategy_alerts": true,
@@ -59,7 +55,6 @@
     }
   },
   "risk": {
-    "allow_live_execution": false,
     "duplicate_protection": true,
     "paper_uses_signal_price_until_okx_fill": false
   },

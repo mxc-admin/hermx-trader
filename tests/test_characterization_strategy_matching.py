@@ -69,16 +69,21 @@ def test_all_four_active_strategies_match(wr):
 
 # --- end-to-end via build_record (status codes + record shape) ---------------
 
-def test_build_record_valid_match_is_trial(wr):
+def test_build_record_valid_match_is_trial(wr, monkeypatch):
+    # An unpromoted trial strategy: per-strategy submit flag off => dry-run posture.
+    monkeypatch.setitem(wr.STRATEGIES["btcusdt_duo_base_dev_2h"], "submit_orders", False)
     status, record = wr.build_record(load_alert("strategy/btcusdt_buy.json"), RECEIVED_AT)
     assert status == 200
     assert record["mode"] == "strategy_file_trial"
     assert record["ok"] is True
     assert record.get("quarantined") is not True
     assert record["strategy_config"]["strategy_id"] == "btcusdt_duo_base_dev_2h"
-    # Trial alerts never paper-trade and never arm OKX (dry-run posture).
+    # Trial alerts never paper-trade and never arm OKX (dry-run posture). The readiness
+    # now also surfaces the operative execution_mode (demo => sandbox routing).
     assert record["okx_execution"]["mode"] == "not_submitted"
     assert record["execution_readiness"]["live_execution_enabled"] is False
+    assert record["execution_readiness"]["execution_mode"] == "demo"
+    assert record["execution_readiness"]["simulated_trading"] is True
 
 
 def test_build_record_malformed_bad_side_rejected(wr):

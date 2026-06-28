@@ -10,8 +10,11 @@ The hotfix was the EXECUTION_PLAN_LEDGER / EXECUTION_LEDGER constants (module
 lines 37-38). Previously the readiness/execution writers referenced undefined
 OKX_*_LEDGER names and raised NameError silently. Here we drive real alerts all
 the way through the readiness builders + execute_okx_if_enabled and assert both
-ledgers got valid JSON lines with no exception -- with the kill switch ENGAGED
-so NO executor submit can ever run.
+ledgers got valid JSON lines with no exception.
+
+Post the Phase A execution-mode refactor the submit path always routes through
+ExecutionService -> ExecutorFactory. We stub that single submit seam with a benign
+in-process executor so the ledger path runs end-to-end WITHOUT reaching any exchange.
 
 test_ledger_constants.py is the static guard against reintroduction (:147);
 this is the dynamic, end-to-end proof.
@@ -19,6 +22,7 @@ this is the dynamic, end-to-end proof.
 from __future__ import annotations
 
 import json
+from unittest import mock
 
 from conftest import load_alert
 
@@ -34,21 +38,27 @@ def _read_jsonl(path):
     return rows
 
 
-def _no_subprocess(monkeypatch, wr):
-    """Guard that NO submit is attempted while the kill switch is engaged. Post the
-    CCXT cutover the single submit call is ExecutorFactory.create(...).execute(); we
-    make even building the executor blow up so any submit attempt is caught."""
-    def _boom(*args, **kwargs):  # pragma: no cover - must never be called
-        raise AssertionError("executor submit was attempted while kill switch engaged")
-
+def _stub_executor(monkeypatch, wr):
+    """Install a benign in-process executor for the single submit seam, so the ledger
+    path runs end-to-end without reaching a real exchange. Post the CCXT cutover that
+    seam is ExecutorFactory.create(...).execute()."""
+    fake = mock.Mock()
+    fake.execute = mock.Mock(return_value={
+        "ok": True, "mode": "submit_enabled", "exchange": "ccxt", "elapsed_ms": 5,
+        "fill_summary": {"status": "submitted", "order_id": "ord-1", "client_order_id": None},
+        "payload": {},
+    })
     if wr.ExecutorFactory is not None:
-        monkeypatch.setattr(wr.ExecutorFactory, "create", _boom)
+        monkeypatch.setattr(wr.ExecutorFactory, "create", lambda cfg, root: fake)
+    return fake
 
 
-def test_strategy_alert_writes_both_ledgers_no_subprocess(wr, wr_root, monkeypatch):
-    """Strategy path: build_strategy_execution_readiness + execute_okx_if_enabled."""
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "false")  # kill switch engaged
-    _no_subprocess(monkeypatch, wr)
+def test_strategy_alert_writes_both_ledgers(wr, wr_root, monkeypatch):
+    """Strategy path: build_strategy_execution_readiness + execute_okx_if_enabled.
+
+    The corpus strategy is execution_mode=demo with submit_orders=true, so it is armed
+    for sandbox submission; the stubbed executor stands in for the exchange call."""
+    _stub_executor(monkeypatch, wr)
 
     status, record = wr.build_record(load_alert("strategy/btcusdt_buy.json"), RECEIVED_AT)
     assert status == 200
@@ -61,17 +71,19 @@ def test_strategy_alert_writes_both_ledgers_no_subprocess(wr, wr_root, monkeypat
     # execution-plan.jsonl carries the readiness intent.
     assert plan_rows[0]["received_at"] == RECEIVED_AT
     assert "execution_readiness" in plan_rows[0]
+    # The readiness now surfaces the operative execution_mode + sandbox routing.
+    assert plan_rows[0]["execution_readiness"]["execution_mode"] == "demo"
+    assert plan_rows[0]["execution_readiness"]["simulated_trading"] is True
 
-    # executions.jsonl shows the kill switch blocked submission (no order sent).
-    okx = exec_rows[0]["okx_execution"]
-    assert okx["mode"] == "not_submitted"
-    assert "kill switch" in okx["reason"].lower()
+    # executions.jsonl shows the (sandboxed) submission outcome.
+    assert exec_rows[0]["okx_execution"]["mode"] == "submit_enabled"
 
 
-def test_shadow_alert_writes_both_ledgers_no_subprocess(wr, wr_root, monkeypatch):
-    """Shadow path: build_okx_execution_readiness + execute_okx_if_enabled."""
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "false")
-    _no_subprocess(monkeypatch, wr)
+def test_shadow_alert_writes_both_ledgers_no_submit(wr, wr_root, monkeypatch):
+    """Shadow path: build_okx_execution_readiness + execute_okx_if_enabled. The duo
+    shadow readiness is dry-run under the demo config (no live execution keys), so it
+    is not_submitted and the stubbed executor is never reached."""
+    _stub_executor(monkeypatch, wr)
 
     status, record = wr.build_record(load_alert("shadow/btcusdt_shadow_buy.json"), RECEIVED_AT)
     assert status == 200
@@ -83,11 +95,9 @@ def test_shadow_alert_writes_both_ledgers_no_subprocess(wr, wr_root, monkeypatch
 
 
 def test_execute_okx_directly_appends_execution_ledger(wr, wr_root, monkeypatch):
-    """Direct call to the patched-constant writer proves the symbol resolves."""
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "false")
-    _no_subprocess(monkeypatch, wr)
-
-    record = {"received_at": RECEIVED_AT, "execution_readiness": {"live_execution_enabled": True}}
+    """Direct call to the patched-constant writer proves the symbol resolves. A
+    gate-blocked record (per-strategy submit flag off) stays not_submitted."""
+    record = {"received_at": RECEIVED_AT, "execution_readiness": {"live_execution_enabled": False}}
     result = wr.execute_okx_if_enabled(record)  # would NameError pre-hotfix
 
     assert result["mode"] == "not_submitted"
@@ -98,8 +108,7 @@ def test_execute_okx_directly_appends_execution_ledger(wr, wr_root, monkeypatch)
 def test_async_path_logs_no_nameerror(wr, wr_root, monkeypatch):
     """:145 -- run the full swallow-and-log async path; assert the error ledger
     contains no NameError (it should not exist at all for a clean alert)."""
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "false")
-    _no_subprocess(monkeypatch, wr)
+    _stub_executor(monkeypatch, wr)
 
     wr.process_payload_async(load_alert("strategy/btcusdt_buy.json"), RECEIVED_AT)
 

@@ -7,8 +7,8 @@
 #
 #   bash install.sh
 #
-# Safe by default: writes OKX_SUBMIT_ORDERS=false and copies a DISARMED runtime
-# profile. Nothing is ever sent to an exchange by this script. INSTALL.md remains
+# Safe by default: writes HERMX_LIVE_TRADING=false and copies a demo runtime
+# profile. Nothing is ever sent to a live exchange by this script. INSTALL.md remains
 # the reference for every decision made here — consult it when a step fails.
 #
 set -euo pipefail
@@ -151,11 +151,13 @@ pick_exchange() {
   set_env "HERMX_EXCHANGE" "$ex_id"
   set_env "HERMX_CCXT_EXCHANGE" "$ex_id"
 
-  # OKX keeps its legacy gate naming; preserve the safe master switch.
+  # Global live-trading kill switch -- written false for every venue, so a fresh
+  # install is always demo/sandbox until the operator deliberately goes live.
+  set_env "HERMX_LIVE_TRADING" "false"
+
+  # OKX keeps its legacy IPv4 pin.
   if [[ "$ex_id" == "okx" ]]; then
-    set_env "OKX_SIMULATED_TRADING" "1"
     set_env "OKX_FORCE_IPV4" "1"
-    set_env "OKX_SUBMIT_ORDERS" "false"
   fi
 
   # Select the matching DISARMED runtime profile -> shadow-config.json.
@@ -476,7 +478,7 @@ info "Webhook URL:  $WEBHOOK_DISPLAY"
 info "Dashboard:    http://127.0.0.1:8098"
 info "Receiver:     http://127.0.0.1:8891"
 info "Enabled:      $enabled_count strategies (ENABLED_STRATEGIES.txt)"
-info "Submit gate:  OKX_SUBMIT_ORDERS=false  (demo — nothing sent to exchange)"
+info "Submit gate:  HERMX_LIVE_TRADING=false  (demo — nothing sent to live exchange)"
 echo
 info "Next: create the TradingView alerts (INSTALL.md Phase 7) and fire a test alert."
 

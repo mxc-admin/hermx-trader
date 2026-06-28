@@ -202,17 +202,15 @@ def test_wall_clock_budget_bounds_attempts(wr):
 # ---------------------------------------------------------------------------
 
 def _armed_config() -> dict:
-    return {
-        "execution": {"enabled": True, "submit_orders": True, "simulated_trading": True, "force_ipv4": True},
-        "risk": {"allow_live_execution": True},
-    }
+    # Phase A: no config arming flags -- the per-strategy submit flag arms paper submission.
+    return {"execution": {"exchange": "ccxt"}}
 
 
-def _disabled_config() -> dict:
-    return {
-        "execution": {"enabled": False, "submit_orders": False, "simulated_trading": True, "force_ipv4": True},
-        "risk": {"allow_live_execution": False},
-    }
+def _blocked_record(cl="mxc-xrpusdt-buy-blocked0000000de") -> dict:
+    """An otherwise-armed record whose per-strategy submit flag is off (gate blocked)."""
+    rec = _armed_record(cl)
+    rec["execution_readiness"]["live_execution_enabled"] = False
+    return rec
 
 
 def _armed_record(cl="mxc-xrpusdt-buy-abc0123456789de") -> dict:
@@ -397,17 +395,17 @@ def test_expected_positions_uses_side_when_direction_absent(wr):
 # ---------------------------------------------------------------------------
 
 def test_disabled_config_no_reconcile_no_journal(wr, monkeypatch):
-    monkeypatch.setattr(wr, "CONFIG", _disabled_config())
-    monkeypatch.delenv("HERMX_SUBMIT_ENABLED", raising=False)
-    # Even if the reconcile flag is set, the disabled gate returns before any submit.
+    monkeypatch.setattr(wr, "CONFIG", _armed_config())
+    # Even if the reconcile flag is set, the blocked gate (per-strategy submit flag off)
+    # returns before any submit.
     monkeypatch.setenv("HERMX_RECONCILE_ENABLED", "1")
 
     def boom():
-        raise AssertionError("reconciliation executor must not be built on the disabled path")
+        raise AssertionError("reconciliation executor must not be built on the blocked path")
 
     monkeypatch.setattr(wr, "_reconciliation_executor", boom)
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
-        result = wr.execute_okx_if_enabled(_armed_record())
+        result = wr.execute_okx_if_enabled(_blocked_record())
 
     create_mock.assert_not_called()
     assert result["mode"] == "not_submitted"

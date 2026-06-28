@@ -10,10 +10,21 @@ out to ``hermes -z --skills hermx-control``) so no real agent is ever invoked, a
 flip the module-level advisor globals on the reloaded ``wr`` module per case.
 """
 
+import pytest
+
 from conftest import load_alert
 
 RECEIVED_AT = "2026-06-24T00:00:00Z"
 ALERT = "strategy/btcusdt_buy.json"
+
+
+@pytest.fixture(autouse=True)
+def _dryrun_strategy(wr, monkeypatch):
+    """Keep the corpus strategy in dry-run posture (per-strategy submit flag off) so the
+    advisor's veto/proceed/fail-open behaviour is exercised against a deterministic
+    not_submitted execution, never a real sandbox order. The advisor sits ABOVE the
+    submit gate, so this does not change what these tests assert."""
+    monkeypatch.setitem(wr.STRATEGIES["btcusdt_duo_base_dev_2h"], "submit_orders", False)
 
 
 def _enable(wr, monkeypatch):

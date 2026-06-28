@@ -2448,15 +2448,15 @@ def build_strategy_execution_readiness(record: dict) -> dict:
     strategy = record.get("strategy_config") or {}
     execution_cfg = CONFIG.get("execution", {}) or {}
     risk_cfg = CONFIG.get("risk", {}) or {}
-    strategy_submit = bool(STRATEGY_ENGINE.get("submit_orders")) and bool(
-        strategy.get("submit_orders", strategy.get("okx_submit_orders"))
-    )
-    live_allowed = (
-        strategy_submit
-        and bool(execution_cfg.get("enabled"))
-        and bool(execution_cfg.get("submit_orders"))
-        and bool(risk_cfg.get("allow_live_execution"))
-    )
+    # Phase A: execution_mode is now operative. ``sandbox`` is always True here
+    # (paper/demo); Phase B will set it False for execution_mode=live. The single
+    # per-strategy ``submit_orders`` flag is what arms paper submission -- the old
+    # config-flag arming chain (execution.enabled/submit_orders, strategy_engine.
+    # submit_orders, risk.allow_live_execution) is gone.
+    execution_mode = str((strategy or {}).get("execution_mode") or "demo").lower()
+    sandbox = True  # Phase A: always sandbox; Phase B will set False for live mode
+    live_execution_enabled = bool((strategy or {}).get("submit_orders", False))
+    live_allowed = live_execution_enabled
     direction = "long" if normalized.get("side") == "buy" else "short"
     signal_identity = _signal_identity(normalized)
     client_order_id = stable_client_order_id(signal_identity, role="open")
@@ -2469,6 +2469,8 @@ def build_strategy_execution_readiness(record: dict) -> dict:
     plan = {
         "mode": "strategy_file_live_order_enabled" if live_allowed else "strategy_file_trial_no_order",
         "live_execution_enabled": live_allowed,
+        "execution_mode": execution_mode,
+        "simulated_trading": sandbox,
         "execution_policy": f"strategy_file:{normalized.get('strategy_id')}",
         "execution_policy_label": strategy.get("name") or normalized.get("strategy_id"),
         "exchange": execution_cfg.get("exchange", "okx"),
@@ -2521,24 +2523,26 @@ def build_strategy_execution_readiness(record: dict) -> dict:
     return plan
 
 
-def submit_kill_switch_armed() -> tuple[bool, str]:
-    """Global hard kill switch for OKX order submission.
+def live_trading_enabled() -> tuple[bool, str]:
+    """Global live-trading kill switch (Phase A: scaffolded, NOT yet wired into the gate).
 
-    ``HERMX_SUBMIT_ENABLED`` gates ALL order submission regardless of config:
-      - unset      -> inert; preserve existing config-driven behavior (armed).
-      - falsey      -> hard-block submission ("false", "0", "no", "" / blank).
-      - anything else -> armed (config gates still apply downstream).
+    ``HERMX_LIVE_TRADING`` is the single global switch for real-money submission. It is
+    a positive enable flag, so live trading is permitted ONLY when it is explicitly set
+    to a truthy value ("true", "1", "yes"):
+      - unset      -> live trading DISABLED (safe default; fail-closed).
+      - falsey     -> live trading DISABLED ("false", "0", "no", "" / blank).
+      - truthy     -> live trading enabled.
 
-    Returns ``(armed, raw_value)``. ``armed`` False means submission must be
-    refused before any subprocess is spawned. The unset default is inert so the
-    switch's absence cannot arm submission (Phase 0 rollback note).
+    Returns ``(enabled, raw_value)``. In Phase A every submission routes to the demo
+    sandbox, so this switch is informational only; Phase B wires it into the gate for
+    ``execution_mode == "live"`` strategies (``... and live_trading_enabled()``).
     """
-    raw = os.environ.get("HERMX_SUBMIT_ENABLED")
+    raw = os.environ.get("HERMX_LIVE_TRADING")
     if raw is None:
-        return True, "<unset>"
-    if raw.strip().lower() in {"false", "0", "no", ""}:
-        return False, raw
-    return True, raw
+        return False, "<unset>"
+    if raw.strip().lower() in {"true", "1", "yes"}:
+        return True, raw
+    return False, raw
 
 
 # ---------------------------------------------------------------------------
@@ -3277,7 +3281,6 @@ def _execute_okx_via_service(record: dict) -> dict:
         executor_factory=ExecutorFactory,
         submit_timeout_seconds=HERMX_SUBMIT_TIMEOUT_SECONDS,
         hooks={
-            "submit_kill_switch_armed": submit_kill_switch_armed,
             "append_jsonl": append_jsonl,
             "execution_ledger": EXECUTION_LEDGER,
             "webhook_auth_config_healthy": webhook_auth_config_healthy,
@@ -3826,28 +3829,28 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def log_execution_arm_state() -> None:
-    """Startup self-check: print the effective order-submission arm state.
+    """Startup self-check: print the effective order-submission posture.
 
-    Surfaces every gate that controls live submission so the operator can see at
-    a glance whether the bot is armed or inert. All gates must be affirmative for
-    a real order to be sent (see execute_okx_if_enabled / gate-precedence).
+    Phase A surfaces the two operative controls: per-strategy ``execution_mode``
+    (demo vs live counts across the loaded strategy files) and the single global
+    ``HERMX_LIVE_TRADING`` kill switch. Every Phase-A submission routes to the demo
+    sandbox, so the live switch is informational until Phase B wires the live gate.
     """
-    execution_cfg = CONFIG.get("execution", {}) or {}
-    risk_cfg = CONFIG.get("risk", {}) or {}
-    armed, kill_switch_raw = submit_kill_switch_armed()
+    modes = [str((s or {}).get("execution_mode") or "demo").lower() for s in STRATEGIES.values()]
+    demo_count = sum(1 for m in modes if m != "live")
+    live_count = sum(1 for m in modes if m == "live")
+    live_enabled, live_raw = live_trading_enabled()
     logging.info(
-        "EXECUTION ARM STATE: HERMX_SUBMIT_ENABLED=%s (kill_switch_armed=%s) "
-        "execution.submit_orders=%s risk.allow_live_execution=%s "
-        "execution.enabled=%s execution.simulated_trading=%s "
+        "EXECUTION ARM STATE: execution_mode demo=%s live=%s (total_strategies=%s) "
+        "HERMX_LIVE_TRADING=%s (live_trading_enabled=%s) "
         "reconcile_post_submit=%s unknown_resolver_enabled=%s startup_reconcile_complete=%s "
         "auth_config_healthy=%s require_hmac=%s queue_maxsize=%s "
         "worker_pool_size=%s submit_timeout_s=%s watchdog_enabled=%s",
-        kill_switch_raw,
-        armed,
-        execution_cfg.get("submit_orders"),
-        risk_cfg.get("allow_live_execution"),
-        execution_cfg.get("enabled"),
-        execution_cfg.get("simulated_trading"),
+        demo_count,
+        live_count,
+        len(modes),
+        live_raw,
+        live_enabled,
         reconcile_post_submit_enabled(),
         unknown_resolver_enabled(),
         RECONCILE_STARTUP_COMPLETE,

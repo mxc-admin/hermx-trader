@@ -6,15 +6,8 @@ import webhook_receiver as wr
 
 
 def _armed_config() -> dict:
-    return {
-        "execution": {
-            "enabled": True,
-            "submit_orders": True,
-            "simulated_trading": True,
-            "force_ipv4": True,
-        },
-        "risk": {"allow_live_execution": True},
-    }
+    # Phase A: no config arming flags -- the per-strategy submit flag arms paper submission.
+    return {"execution": {"exchange": "ccxt"}}
 
 
 def _armed_record(cl: str = "cid") -> dict:
@@ -42,7 +35,6 @@ def test_submit_timeout_maps_to_unknown(monkeypatch):
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setattr(wr, "SECRET", "phase3-secret")
     monkeypatch.setattr(wr, "HERMX_SUBMIT_TIMEOUT_SECONDS", 1.0)
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "1")
 
     cl = "mxcstabletimeoutid0000000000000001"
     # The CCXT adapter maps a ccxt client timeout to mode "submit_timeout"; the
@@ -67,7 +59,6 @@ def test_submit_timeout_maps_to_unknown(monkeypatch):
 def test_watchdog_pause_blocks_submission(monkeypatch):
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setattr(wr, "SECRET", "phase3-secret")
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "1")
     wr._set_watchdog_submission_paused(True, "watchdog_degraded")
 
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:

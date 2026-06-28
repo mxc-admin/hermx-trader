@@ -14,10 +14,9 @@ import webhook_receiver as wr
 
 
 def _armed_config() -> dict:
-    return {
-        "execution": {"enabled": True, "submit_orders": True, "simulated_trading": True, "force_ipv4": True, "exchange": "ccxt"},
-        "risk": {"allow_live_execution": True},
-    }
+    # Phase A: no config arming flags. The per-strategy submit flag (surfaced as
+    # readiness.live_execution_enabled) plus auth + watchdog health is the whole gate.
+    return {"execution": {"exchange": "ccxt"}}
 
 
 def _record(*, live_execution_enabled=True, auth_healthy=True):
@@ -58,20 +57,16 @@ def test_any_gate_false_means_not_submitted(monkeypatch):
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setattr(wr, "SECRET", "phase2-test-secret")
     monkeypatch.setattr(wr, "HERMX_REQUIRE_HMAC", False)
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "1")
 
+    # Phase A gate inputs: the per-strategy submit flag (readiness.live_execution_enabled,
+    # the equivalent of strategy.submit_orders=false) and the auth-health gate. If EITHER
+    # is false the executor is never built and nothing submits.
     cases = [
-        (_record(live_execution_enabled=False), _armed_config(), "1"),
-        (_record(auth_healthy=False), _armed_config(), "1"),
-        (_record(), {"execution": {"enabled": False, "submit_orders": True}, "risk": {"allow_live_execution": True}}, "1"),
-        (_record(), {"execution": {"enabled": True, "submit_orders": False}, "risk": {"allow_live_execution": True}}, "1"),
-        (_record(), {"execution": {"enabled": True, "submit_orders": True}, "risk": {"allow_live_execution": False}}, "1"),
-        (_record(), _armed_config(), "false"),
+        _record(live_execution_enabled=False),
+        _record(auth_healthy=False),
     ]
 
-    for rec, cfg, kill in cases:
-        monkeypatch.setattr(wr, "CONFIG", cfg)
-        monkeypatch.setenv("HERMX_SUBMIT_ENABLED", kill)
+    for rec in cases:
         fake = _fake_executor()
         with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake) as create_mock:
             out = wr.execute_okx_if_enabled(rec)
@@ -85,7 +80,6 @@ def test_all_gates_true_can_submit(monkeypatch):
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setattr(wr, "SECRET", "phase2-test-secret")
     monkeypatch.setattr(wr, "HERMX_REQUIRE_HMAC", False)
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "1")
 
     fake = _fake_executor()
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):

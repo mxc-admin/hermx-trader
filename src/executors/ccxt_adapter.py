@@ -190,11 +190,17 @@ class CcxtExecutor(BaseExecutor):
 
         client = exchange_cls(kwargs)
 
-        if bool(self.execution_cfg.get("simulated_trading", True)) and hasattr(client, "set_sandbox_mode"):
+        if bool(self.execution_cfg.get("simulated_trading", True)):
+            if not hasattr(client, "set_sandbox_mode"):
+                raise RuntimeError(
+                    f"execution_mode=demo requested but {exchange_id} has no sandbox support in CCXT"
+                )
             try:
                 client.set_sandbox_mode(True)
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError(
+                    f"execution_mode=demo: failed to enable sandbox for {exchange_id}: {exc}"
+                ) from exc
 
         self._cached_client = client
         return client

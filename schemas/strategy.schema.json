@@ -88,7 +88,8 @@
         },
         "execution_mode": {
           "type": "string",
-          "enum": ["demo", "paper", "shadow"]
+          "description": "Operative execution control. Routes order submission: 'demo'/'paper'/'shadow' go to the exchange sandbox; 'live' targets the real exchange and additionally requires the global HERMX_LIVE_TRADING=true kill switch before any real-money order is sent.",
+          "enum": ["demo", "paper", "live", "shadow"]
         },
         "okx_submit_orders": {
           "type": "boolean",
@@ -179,7 +180,8 @@
         },
         "execution_mode": {
           "type": "string",
-          "enum": ["demo", "paper", "shadow"]
+          "description": "Operative execution control. Routes order submission: 'demo'/'paper'/'shadow' go to the exchange sandbox; 'live' targets the real exchange and additionally requires the global HERMX_LIVE_TRADING=true kill switch before any real-money order is sent.",
+          "enum": ["demo", "paper", "live", "shadow"]
         },
         "submit_orders": {
           "type": "boolean",
