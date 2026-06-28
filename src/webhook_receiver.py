@@ -358,6 +358,43 @@ def strategy_instrument(row: dict) -> dict:
     return {}
 
 
+# Instrument-type suffixes that are NOT part of the BASE+QUOTE asset symbol.
+_INSTRUMENT_TYPE_SUFFIXES = {"SWAP", "FUTURES", "FUTURE", "PERP", "SPOT", "MARGIN", "OPTION"}
+
+
+def strategy_asset(strategy: dict) -> str:
+    """PURE: the BASE+QUOTE asset symbol for a strategy (e.g. ``BTCUSDT``).
+
+    The v3 strategy shape dropped the explicit ``asset`` field; the symbol is now
+    derived from the canonical ``instrument.inst_id``. An OKX-native id
+    (``BTC-USDT-SWAP``) or a CCXT-unified id (``BTC/USDT:USDT``) both resolve to
+    ``BTCUSDT`` so the alert-symbol match (uppercased, separators stripped) keeps
+    working. A still-present top-level ``asset`` is honored as an override.
+    """
+    explicit = str((strategy or {}).get("asset") or "").strip().upper()
+    if explicit:
+        return explicit
+    inst_id = str((strategy_instrument(strategy) or {}).get("inst_id") or "")
+    if not inst_id:
+        return ""
+    core = inst_id.split(":", 1)[0].replace("/", "-")  # drop settle ccy, unify sep
+    parts = [p for p in core.split("-") if p]
+    if len(parts) >= 3 and parts[-1].upper() in _INSTRUMENT_TYPE_SUFFIXES:
+        parts = parts[:-1]
+    return "".join(parts).upper()
+
+
+def strategy_budget_usd(strategy: dict) -> float:
+    """Read budget from capital.budget_usd (v2 nested) with flat fallback."""
+    cap = strategy.get("capital")
+    if isinstance(cap, dict):
+        v = cap.get("budget_usd")
+        if v is not None:
+            return float(v)
+    v = strategy.get("budget_usd")
+    return float(v) if v is not None else 0.0
+
+
 def normalize_strategy_record(row: dict) -> dict:
     """v2 loader shim (REFACTOR_PLAN.md Phase 6 / Layer C).
 
@@ -396,7 +433,9 @@ def load_strategy_files() -> dict:
             row = normalize_strategy_record(row)
             row["_path"] = str(path)
             row["timeframe"] = canonical_timeframe(row.get("timeframe"))
-            row["asset"] = str(row.get("asset") or "").upper()
+            # v3 dropped the explicit asset field; derive the BASE+QUOTE symbol from
+            # the canonical instrument so alert-symbol matching keeps working.
+            row["asset"] = strategy_asset(row)
             strategies[sid] = row
         except Exception as exc:
             logging.warning("Failed to load strategy file %s: %s", path, exc)
@@ -1096,8 +1135,9 @@ def validate_strategy_alert(normalized: dict) -> tuple[bool, dict | None, str | 
         return False, strategy, "strategy_symbol_mismatch"
     if canonical_timeframe(strategy.get("timeframe")) != canonical_timeframe(normalized.get("timeframe")):
         return False, strategy, "strategy_timeframe_mismatch"
-    if str(strategy.get("status") or "") not in {"trial_candidate", "active_demo"}:
-        return False, strategy, "strategy_not_active"
+    # A strategy is active when it is permitted to submit orders (submit_orders=true).
+    # The legacy `status` gate is gone; `submit_orders=false` simply makes a matched
+    # strategy inert (dry-run) rather than quarantining the alert.
     return True, strategy, None
 
 
@@ -2384,7 +2424,10 @@ def build_okx_execution_readiness(record: dict, paper_events: list[dict]) -> dic
     shadow_event = find_policy_event(paper_events, shadow_policy)
     asset_cfg = CONFIG.get("assets", {}).get(normalized.get("symbol"), {}) or {}
     inst_id = asset_cfg.get("inst_id")
-    live_allowed = bool(execution_cfg.get("enabled")) and bool(risk_cfg.get("allow_live_execution"))
+    # The shadow / duo_raw path is observe-only: only a per-strategy submit_orders
+    # flag arms submission, and that lives on the strategy-file path. The dead config
+    # arming flags (execution.enabled / risk.allow_live_execution) are gone.
+    live_allowed = False
     signal_identity = _signal_identity(normalized)
     client_order_id = stable_client_order_id(signal_identity, role="open")
     weight = float((execution_event or {}).get("risk_weight") or 0.0)
@@ -2454,13 +2497,13 @@ def build_strategy_execution_readiness(record: dict) -> dict:
     # config-flag arming chain (execution.enabled/submit_orders, strategy_engine.
     # submit_orders, risk.allow_live_execution) is gone.
     execution_mode = str((strategy or {}).get("execution_mode") or "demo").lower()
-    sandbox = True  # Phase A: always sandbox; Phase B will set False for live mode
+    sandbox = (execution_mode != "live")  # demo/paper/shadow -> True; live -> False
     live_execution_enabled = bool((strategy or {}).get("submit_orders", False))
     live_allowed = live_execution_enabled
     direction = "long" if normalized.get("side") == "buy" else "short"
     signal_identity = _signal_identity(normalized)
     client_order_id = stable_client_order_id(signal_identity, role="open")
-    base_notional = float(strategy.get("budget_usd") or 0.0) * float(strategy.get("leverage") or 1.0)
+    base_notional = strategy_budget_usd(strategy) * float(strategy.get("leverage") or 1.0)
     planned_notional = float(dec_notional(base_notional))
     # Exchange-agnostic instruction contract (Phase 6 / M3, ARCHITECTURE.md). ``td_mode``
     # below is the OKX translation of this same value, so derive both from one expression.
@@ -2503,7 +2546,7 @@ def build_strategy_execution_readiness(record: dict) -> dict:
             "risk_weight": 1.0,
             "target_direction": direction,
             "actions": ["CLOSE_OPPOSITE_IF_ANY", f"OPEN_{direction.upper()}"],
-            "base_notional_usd": float(strategy.get("budget_usd") or 0.0),
+            "base_notional_usd": strategy_budget_usd(strategy),
             "planned_notional_usd": planned_notional,
             "client_order_id": client_order_id,
         },
@@ -3380,8 +3423,7 @@ def _advisor_state_snapshot(record: dict) -> dict:
         "timeframe": normalized.get("timeframe"),
         "signal_price": normalized.get("tv_signal_price"),
         "strategy_id": normalized.get("strategy_id"),
-        "strategy_status": strategy.get("status"),
-        "budget_usd": strategy.get("budget_usd"),
+        "budget_usd": strategy_budget_usd(strategy),
         "leverage": strategy.get("leverage"),
         "planned_notional_usd": intent.get("planned_notional_usd") or readiness.get("planned_notional_usd"),
         "live_execution_enabled": readiness.get("live_execution_enabled"),
@@ -3600,15 +3642,12 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
                 "strategy_engine": STRATEGY_ENGINE,
                 "strategy": {
                     "strategy_id": strategy_config.get("strategy_id"),
-                    "asset": strategy_config.get("asset"),
                     "timeframe": strategy_config.get("timeframe"),
-                    "upper_band_mult": strategy_config.get("upper_band_mult"),
-                    "lower_band_mult": strategy_config.get("lower_band_mult"),
-                    "budget_usd": strategy_config.get("budget_usd"),
+                    "budget_usd": strategy_budget_usd(strategy_config),
                     "leverage": strategy_config.get("leverage"),
                     "margin_mode": strategy_config.get("margin_mode"),
                     "submit_orders": strategy_config.get("submit_orders", strategy_config.get("okx_submit_orders")),
-                    "status": strategy_config.get("status"),
+                    "execution_mode": strategy_config.get("execution_mode"),
                 },
             },
             "ok": True,

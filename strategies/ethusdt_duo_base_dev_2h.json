@@ -2,25 +2,20 @@
   "schema_version": 2,
   "strategy_id": "ethusdt_duo_base_dev_2h",
   "name": "ETHUSDT Duo Base Dev 2H",
-  "asset": "ETHUSDT",
+  "indicator": "mxc duo-base v2.5",
+  "timeframe": "2h",
   "instrument": {
     "exchange": "okx",
     "inst_id": "ETH-USDT-SWAP",
     "type": "swap"
   },
-  "timeframe": "2h",
-  "chart_type": "heikin_ashi",
-  "indicator": "mxc duo-base",
-  "indicator_version": "duo-base-2.5",
-  "upper_band_mult": 1.40,
-  "lower_band_mult": 0.95,
-  "auto_alpha": false,
-  "budget_usd": 2000,
-  "leverage": 2,
-  "margin_mode": "isolated",
+  "capital": {
+    "budget_usd": 1500,
+    "reinvest": true
+  },
   "execution_mode": "demo",
   "submit_orders": true,
-  "status": "active_demo",
-  "validation_source": "research/branches/tv-opt-founder-2026-06-23-current-duobase25/TRUTH_TEST_ETH_FIXED_CANDIDATES_REPORT.md",
-  "notes": "Executes to OKX demo sandbox (execution_mode=demo). Inert until OKX demo API credentials are configured."
+  "leverage": 2,
+  "margin_mode": "isolated",
+  "notes": "Active OKX sandbox/demo candidate. submit_orders=false makes it inert."
 }

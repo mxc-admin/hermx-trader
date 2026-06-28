@@ -226,16 +226,16 @@ def test_cards_appear_and_disappear_with_strategy_files(dash):
     html = dash_mod.render()
     assert "BTCUSDT" in html and "ETHUSDT" in html
 
-    # Disable one via status — its card must disappear.
-    _write_strategy(strategies_dir, "eth_strat", asset="ETHUSDT", status="disabled")
+    # Disable one via submit_orders=false — its card must disappear.
+    _write_strategy(strategies_dir, "eth_strat", asset="ETHUSDT", submit_orders=False)
     _bust_cache(dash_mod)
     model = dash_mod.dashboard_model()
     active = [s["strategy_id"] for s in model["active_strategies"]]
     assert active == ["btc_strat"]
     assert "ETHUSDT" not in dash_mod.render()
 
-    # Disable via explicit enabled:false too.
-    _write_strategy(strategies_dir, "btc_strat", asset="BTCUSDT", enabled=False)
+    # Disabling the last active strategy clears the board.
+    _write_strategy(strategies_dir, "btc_strat", asset="BTCUSDT", submit_orders=False)
     _bust_cache(dash_mod)
     model = dash_mod.dashboard_model()
     assert model["active_strategies"] == []
@@ -243,12 +243,10 @@ def test_cards_appear_and_disappear_with_strategy_files(dash):
 
 def test_active_strategy_helpers(dash):
     dash_mod, _core, _root = dash
-    assert dash_mod.is_strategy_active({"status": "active_demo"}) is True
-    assert dash_mod.is_strategy_active({"status": "active_live"}) is True
-    assert dash_mod.is_strategy_active({"status": "disabled"}) is False
-    assert dash_mod.is_strategy_active({"status": "paused"}) is False
-    assert dash_mod.is_strategy_active({"enabled": False, "status": "active_demo"}) is False
-    assert dash_mod.is_strategy_active({"active": False}) is False
+    # A strategy renders a card iff it is permitted to submit orders.
+    assert dash_mod.is_strategy_active({"submit_orders": True}) is True
+    assert dash_mod.is_strategy_active({"submit_orders": False}) is False
+    assert dash_mod.is_strategy_active({}) is False
 
 
 # ---------------------------------------------------------------------------

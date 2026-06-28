@@ -111,20 +111,13 @@
         "schema_version",
         "strategy_id",
         "name",
-        "asset",
         "instrument",
         "timeframe",
-        "chart_type",
         "indicator",
-        "indicator_version",
-        "upper_band_mult",
-        "lower_band_mult",
-        "auto_alpha",
-        "budget_usd",
+        "capital",
         "leverage",
         "margin_mode",
-        "execution_mode",
-        "status"
+        "execution_mode"
       ],
       "properties": {
         "schema_version": { "type": "integer", "const": 2 },
@@ -133,11 +126,6 @@
           "pattern": "^[a-z0-9]+(?:_[a-z0-9]+)*$"
         },
         "name": { "type": "string", "minLength": 1 },
-        "asset": {
-          "comment": "Relaxed beyond *USDT: accepts plain (BTCUSDT), dashed (BTC-USDT) and slashed (BTC/USDT) quote pairs while staying uppercase/alnum and validated.",
-          "type": "string",
-          "pattern": "^[A-Z0-9]+(?:[-/][A-Z0-9]+)*$"
-        },
         "instrument": {
           "type": "object",
           "additionalProperties": false,
@@ -163,16 +151,15 @@
           "type": "string",
           "enum": ["30m", "1h", "2h", "3h", "4h"]
         },
-        "chart_type": {
-          "type": "string",
-          "enum": ["heikin_ashi"]
-        },
         "indicator": { "type": "string", "minLength": 1 },
-        "indicator_version": { "type": "string", "minLength": 1 },
-        "upper_band_mult": { "type": "number", "exclusiveMinimum": 0 },
-        "lower_band_mult": { "type": "number", "exclusiveMinimum": 0 },
-        "auto_alpha": { "type": "boolean" },
-        "budget_usd": { "type": "number", "exclusiveMinimum": 0 },
+        "capital": {
+          "type": "object",
+          "properties": {
+            "budget_usd": { "type": "number", "exclusiveMinimum": 0 },
+            "reinvest": { "type": "boolean", "default": true }
+          },
+          "required": ["budget_usd"]
+        },
         "leverage": { "type": "number", "exclusiveMinimum": 0 },
         "margin_mode": {
           "type": "string",
@@ -180,19 +167,14 @@
         },
         "execution_mode": {
           "type": "string",
-          "description": "Operative execution control. Routes order submission: 'demo'/'paper'/'shadow' go to the exchange sandbox; 'live' targets the real exchange and additionally requires the global HERMX_LIVE_TRADING=true kill switch before any real-money order is sent.",
+          "description": "Operative — controls sandbox routing. demo=OKX sandbox/paper account. live=real account, requires HERMX_LIVE_TRADING=true (Phase B).",
           "enum": ["demo", "paper", "live", "shadow"]
         },
         "submit_orders": {
           "type": "boolean",
           "default": false
         },
-        "status": {
-          "type": "string",
-          "enum": ["trial_candidate", "active_demo", "paper_only", "disabled"]
-        },
-        "notes": { "type": "string" },
-        "validation_source": { "type": "string" }
+        "notes": { "type": "string" }
       }
     }
   }

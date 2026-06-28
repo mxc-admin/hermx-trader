@@ -55,21 +55,15 @@ V2_TWIN = {
     "schema_version": 2,
     "strategy_id": "btcusdt_duo_base_dev_2h",
     "name": "BTCUSDT Duo Base Dev 2H",
-    "asset": "BTCUSDT",
-    "instrument": {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap"},
+    "indicator": "mxc duo-base v2.5",
     "timeframe": "2h",
-    "chart_type": "heikin_ashi",
-    "indicator": "mxc duo-base",
-    "indicator_version": "duo-base-2.5",
-    "upper_band_mult": 1.40,
-    "lower_band_mult": 0.95,
-    "auto_alpha": False,
-    "budget_usd": 1500,
-    "leverage": 2,
-    "margin_mode": "isolated",
+    "instrument": {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap"},
+    "capital": {"budget_usd": 1500, "reinvest": True},
     "execution_mode": "demo",
     "submit_orders": True,
-    "status": "active_demo",
+    "leverage": 2,
+    "margin_mode": "isolated",
+    "notes": "Active OKX sandbox/demo candidate. submit_orders=false makes it inert.",
 }
 
 
@@ -95,14 +89,12 @@ def test_v2_strategy_validates():
 
 
 def test_v2_accepts_ccxt_unified_symbol_and_non_usdt_quote():
-    """Relaxed asset/instrument regex: not pinned to *USDT."""
+    """Relaxed instrument regex: not pinned to *USDT."""
     v2 = json.loads(json.dumps(V2_TWIN))
-    v2["asset"] = "BTC/USDT"
     v2["instrument"] = {"exchange": "okx", "inst_id": "BTC/USDT:USDT", "type": "swap"}
     assert _is_valid(v2)
 
     v2b = json.loads(json.dumps(V2_TWIN))
-    v2b["asset"] = "ETHBTC"
     v2b["instrument"] = {"exchange": "kucoin", "inst_id": "ETH-BTC", "type": "spot"}
     assert _is_valid(v2b)
 

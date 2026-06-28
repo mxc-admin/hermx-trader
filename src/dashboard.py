@@ -52,13 +52,6 @@ POLICIES = ()
 # this is considered stale for the freshness badge / executor banner (D7).
 REFRESH_INTERVAL_SECONDS = int(os.environ.get("HERMX_DASH_REFRESH_SECONDS") or "20")
 
-# Strategy statuses that mean "do not render a card" (D5). Anything else that is
-# not explicitly disabled is treated as active, preserving today's behaviour for
-# the four `active_demo` files while letting an operator hide one by status.
-DISABLED_STRATEGY_STATUSES = {
-    "disabled", "inactive", "paused", "archived", "off", "retired", "draft", "deleted",
-}
-
 MODEL_CACHE_TTL_SECONDS = 10
 _MODEL_CACHE = {"expires_at": 0.0, "model": None}
 OKX_LIVE_CACHE_TTL_SECONDS = 5
@@ -95,6 +88,30 @@ ASSET_META = {
 # and dashboard now share one implementation so the alias tables cannot drift.
 
 
+_INSTRUMENT_TYPE_SUFFIXES = {"SWAP", "FUTURES", "FUTURE", "PERP", "SPOT", "MARGIN", "OPTION"}
+
+
+def strategy_asset(row) -> str:
+    """BASE+QUOTE asset symbol for a strategy card (e.g. ``BTCUSDT``).
+
+    v3 dropped the explicit ``asset`` field; derive it from the canonical
+    ``instrument.inst_id`` (OKX-native ``BTC-USDT-SWAP`` or CCXT-unified
+    ``BTC/USDT:USDT``). A still-present top-level ``asset`` is honored.
+    """
+    explicit = str((row or {}).get("asset") or "").strip().upper()
+    if explicit:
+        return explicit
+    inst = (row or {}).get("instrument") or {}
+    inst_id = str(inst.get("inst_id") or (row or {}).get("inst_id") or "")
+    if not inst_id:
+        return ""
+    core = inst_id.split(":", 1)[0].replace("/", "-")
+    parts = [p for p in core.split("-") if p]
+    if len(parts) >= 3 and parts[-1].upper() in _INSTRUMENT_TYPE_SUFFIXES:
+        parts = parts[:-1]
+    return "".join(parts).upper()
+
+
 def load_strategy_files():
     rows = []
     if not STRATEGIES_DIR.exists():
@@ -103,7 +120,7 @@ def load_strategy_files():
         try:
             row = json.loads(path.read_text(encoding="utf-8"))
             row["_path"] = str(path)
-            row["asset"] = str(row.get("asset") or "").upper()
+            row["asset"] = strategy_asset(row)
             row["timeframe"] = canonical_timeframe(row.get("timeframe"))
             rows.append(row)
         except Exception:
@@ -116,17 +133,11 @@ def load_strategy_files():
 def is_strategy_active(strategy) -> bool:
     """Whether a strategy file should render a card (D5).
 
-    A card appears for any strategy that is not explicitly disabled — by a falsey
-    ``enabled``/``active`` flag or a disabling ``status``. This makes adding a
-    ``status: active_demo`` file surface a card with no code change, and flipping
-    a file to ``status: disabled`` (or ``enabled: false``) remove it.
+    A card appears for any strategy permitted to submit orders
+    (``submit_orders=true``). Flipping a file to ``submit_orders=false`` makes it
+    inert and removes its card, with no code change.
     """
-    if strategy.get("enabled") is False:
-        return False
-    if strategy.get("active") is False:
-        return False
-    status = str(strategy.get("status") or "").strip().lower()
-    return status not in DISABLED_STRATEGY_STATUSES
+    return bool(strategy.get("submit_orders", False))
 
 
 def active_strategies(strategies=None):
@@ -1569,12 +1580,12 @@ def strategy_card(strategy, okx_live, alerts):
     meta = ASSET_META.get(sym, {"name": sym, "logo": ""})
     live = (okx_live.get("positions") or {}).get(sym) or {}
     rows = [row for row in alerts if row.get("strategy_id") == strategy.get("strategy_id")]
-    submit_enabled = bool(strategy.get("okx_submit_orders"))
+    submit_enabled = bool(strategy.get("submit_orders", strategy.get("okx_submit_orders")))
     engine_label = "orders disabled" if not submit_enabled else "submit enabled"
     engine_kind = "warn" if not submit_enabled else "good"
     position = live.get("side") or "FLAT"
     is_live = position != "FLAT"
-    budget = as_float(strategy.get("budget_usd")) or 0.0
+    budget = as_float((strategy.get("capital") or {}).get("budget_usd") or strategy.get("budget_usd")) or 0.0
     upl = as_float(live.get("upl")) or 0.0
     realized = as_float(live.get("realized_pnl")) or 0.0
     pnl_now = realized + upl
@@ -1590,7 +1601,7 @@ def strategy_card(strategy, okx_live, alerts):
             <p>{esc(strategy.get('name') or meta.get('name'))}</p>
           </div>
         </div>
-        <div>{badge(strategy.get("status"), "neutral")} {badge(engine_label, engine_kind)} {live_badge}</div>
+        <div>{badge(strategy.get("execution_mode") or "demo", "neutral")} {badge(engine_label, engine_kind)} {live_badge}</div>
       </div>
       <div class="card-status">
         <div>

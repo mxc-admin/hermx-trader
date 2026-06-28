@@ -2,25 +2,20 @@
   "schema_version": 2,
   "strategy_id": "solusdt_duo_base_dev_3h",
   "name": "SOLUSDT Duo Base Dev 3H",
-  "asset": "SOLUSDT",
+  "indicator": "mxc duo-base v2.5",
+  "timeframe": "3h",
   "instrument": {
     "exchange": "okx",
     "inst_id": "SOL-USDT-SWAP",
     "type": "swap"
   },
-  "timeframe": "3h",
-  "chart_type": "heikin_ashi",
-  "indicator": "mxc duo-base",
-  "indicator_version": "duo-base-2.5",
-  "upper_band_mult": 1.05,
-  "lower_band_mult": 0.95,
-  "auto_alpha": false,
-  "budget_usd": 1500,
-  "leverage": 2,
-  "margin_mode": "isolated",
+  "capital": {
+    "budget_usd": 1500,
+    "reinvest": true
+  },
   "execution_mode": "demo",
   "submit_orders": true,
-  "status": "active_demo",
-  "validation_source": "research/branches/tv-opt-founder-2026-06-23-current-duobase25/TRUTH_TEST_SOL_FIXED_CANDIDATES_REPORT.md",
-  "notes": "Executes to OKX demo sandbox (execution_mode=demo). Inert until OKX demo API credentials are configured."
+  "leverage": 2,
+  "margin_mode": "isolated",
+  "notes": "Active OKX sandbox/demo candidate. submit_orders=false makes it inert."
 }

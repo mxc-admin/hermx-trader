@@ -143,7 +143,8 @@ def test_live_v2_readiness_stable_and_consistent(strategy_id, alert_rel, tmp_pat
         assert readiness_a["expected_leverage"] == v2["leverage"]
         assert readiness_a["signal_side"] in {"buy", "sell"}
         intent = readiness_a["execution_intent"]
-        assert intent["planned_notional_usd"] == float(v2["budget_usd"]) * float(v2["leverage"])
+        budget = float((v2.get("capital") or {}).get("budget_usd"))
+        assert intent["planned_notional_usd"] == budget * float(v2["leverage"])
         assert intent["client_order_id"]
         assert intent["actions"]
     finally:
