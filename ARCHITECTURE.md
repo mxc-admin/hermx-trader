@@ -117,8 +117,8 @@ This is the most important part of the system. All of it lives in `ExecutionServ
 
 | # | Invariant | Enforcement (in `ExecutionService.execute`) | On failure |
 |---|---|---|---|
-| 1 | **Kill switch** | `submit_kill_switch_armed()` reads `HERMX_SUBMIT_ENABLED`; falsey (`false`/`0`/`no`/blank) hard-blocks before anything else | `not_submitted` (`kill switch engaged`) |
-| 2 | **Gate precedence** | `readiness.live_execution_enabled ∧ execution.enabled ∧ execution.submit_orders ∧ risk.allow_live_execution ∧ auth_healthy ∧ watchdog_ok` must all be true | `not_submitted` (block reason names the failing gate) |
+| 1 | **Live kill switch** | for an `execution_mode: "live"` strategy, `live_trading_enabled()` reads `HERMX_LIVE_TRADING`; unless truthy (`true`/`1`/`yes`) the live order is hard-blocked. Demo strategies never consult it | `not_submitted` (`live_trading_disabled`) |
+| 2 | **Submission gate** | `readiness.live_execution_enabled` (= the strategy's `submit_orders`) ∧ `auth_healthy` ∧ `watchdog_ok` must all be true | `not_submitted` (block reason names the failing gate) |
 | 3 | **Symbol pause** | `symbol_pause_info(symbol)` consults the per-symbol pause registry | `not_submitted` (`symbol_paused`) |
 | 4 | **Idempotency** | `latest_order_record(cl_ord_id)` — a duplicate stable `cl_ord_id` is refused | `not_submitted` (`duplicate_cl_ord_id`) |
 | 5 | **Write-ahead journal** | `record_order_state(PLANNED)` then `record_order_state(SUBMITTED)` are fsync-durable *before* the adapter is called; an `OSError` here calls `fail_closed_state_write` and re-raises | submit never happens without a prior durable record |
@@ -127,17 +127,17 @@ This is the most important part of the system. All of it lives in `ExecutionServ
 
 The order journal enforces a strict state machine (`_ORDER_STATE_TRANSITIONS`): `None→PLANNED→{SUBMITTED,REJECTED}`, `SUBMITTED→{FILLED,REJECTED,UNKNOWN}`, `UNKNOWN→{FILLED,REJECTED,UNKNOWN}`; `FILLED` and `REJECTED` are terminal. `UNKNOWN` is a first-class state that *triggers* reconciliation — it is never treated as success or as a blind retry.
 
-### 3.2 Three-gate model (operator-facing)
+### 3.2 Two-control model (operator-facing)
 
-To actually submit, an operator must independently arm three levers. All must be affirmative; any one false blocks. (The runtime kill switch of §3.1 invariant 1 sits above all three.)
+Whether an order is placed — and where — is decided by exactly two controls. The dead config-flag arming chain (`execution.enabled`, `execution.submit_orders`, `risk.allow_live_execution`, `strategy_engine.submit_orders`) is gone.
 
-| Lever | Location | Key | Fresh-install posture |
+| Control | Location | Key | Fresh-install posture |
 |---|---|---|---|
-| Runtime kill switch | `.env` (environment) | `HERMX_SUBMIT_ENABLED` | unset = inert (armed); set `false` to hard-disarm |
-| Runtime profile | `config/runtime.*.json` / `shadow-config.json` | `execution.enabled` ∧ `execution.submit_orders` ∧ `risk.allow_live_execution` | demo profile: all true; KuCoin/Hyperliquid profiles: all **false** (disarmed) |
-| Per-strategy | `strategies/<id>.json` | `submit_orders` (v2) → bridged to `okx_submit_orders`, AND `strategy_engine.submit_orders` | strategy `submit_orders: true`, but inert wherever `strategy_engine.submit_orders=false` |
+| Per-strategy submission | `strategies/<id>.json` | `submit_orders` (`true`\|`false`) | `true` — a strategy with `submit_orders:false` is inert |
+| Per-strategy routing | `strategies/<id>.json` | `execution_mode` (`demo`\|`live`) | `demo` — routes to the exchange sandbox, no global switch needed |
+| Global live switch | `.env` (environment) | `HERMX_LIVE_TRADING` | unset/`false` = live disabled (fail-closed); must be truthy for any `execution_mode:"live"` order |
 
-> Note: install runbooks reference `OKX_SUBMIT_ORDERS=false` as a belt-and-suspenders operator convention. That variable is **not consumed by runtime code** — the authoritative env gate is `HERMX_SUBMIT_ENABLED`, and the config gates above are the runtime/strategy levers actually checked in `build_strategy_execution_readiness()` and `ExecutionService.execute()`.
+> A `demo` strategy always routes to the sandbox and never consults `HERMX_LIVE_TRADING`. A `live` strategy submits to the real account ONLY when `HERMX_LIVE_TRADING` is truthy; otherwise `ExecutionService.execute()` returns `not_submitted` (`live_trading_disabled`). The legacy `OKX_SUBMIT_ORDERS` / `OKX_SIMULATED_TRADING` env vars are **removed** and not consumed by runtime code.
 
 ### 3.3 Guards vs Interceptors
 
@@ -197,11 +197,11 @@ Strategies are validated against `schemas/strategy.schema.json` (a `oneOf` over 
   "upper_band_mult": 1.40,
   "lower_band_mult": 0.95,
   "auto_alpha": false,
-  "budget_usd": 1500,                           // notional = budget_usd × leverage
+  "capital": { "budget_usd": 1500, "reinvest": true },  // notional = capital.budget_usd × leverage
   "leverage": 2,
   "margin_mode": "isolated",                    // → adapter tdMode
   "execution_mode": "demo",
-  "submit_orders": true,                        // per-strategy gate (→ okx_submit_orders)
+  "submit_orders": true,                        // per-strategy submission gate
   "status": "active_demo"                       // gates whether alerts are accepted
 }
 ```
@@ -272,7 +272,7 @@ The agent **only calls down through the same HTTP API a human would use** — lo
 
 `skills/hermx-control/SKILL.md` defines the only agent surface:
 
-- **Reads:** `GET 127.0.0.1:8098/api` (positions, PnL, executor/ledger/freshness health), `GET :8098/health` (the `arm` block: `kill_switch_engaged`, `submit_orders`, `execution_enabled`, `allow_live_execution`, `armed_summary`), `GET :8891/health` and `:8891/latest`.
+- **Reads:** `GET 127.0.0.1:8098/api` (positions, PnL, executor/ledger/freshness health), `GET :8098/health` (the `arm` block: `kill_switch_engaged`, `live_trading_enabled`, `demo_strategies`, `live_strategies`, `armed`), `GET :8891/health` and `:8891/latest`.
 - **Relay:** `POST 127.0.0.1:8891/webhook` with an unaltered TradingView alert body.
 - **Hard constraints (in the skill prose, enforced in code below it):** cannot set size/notional/leverage (there is no such field — the receiver computes notional from the strategy file), cannot override a strategy or a gate, cannot call an exchange/shell/filesystem, must report a read failure as **UNKNOWN** (never "flat"), and must never relay a signal a human didn't ask for.
 
@@ -356,7 +356,7 @@ Every install is fully isolated: its own Tailscale tailnet/URL, its own `.env`, 
 1. Add the venue's credential resolution branch to `src/security/credentials.py` (`resolve_exchange_credentials`), namespaced and fail-closed.
 2. Add a client-construction branch to `CcxtExecutor._client()` for the venue's auth shape (apiKey/secret/passphrase, or wallet/key).
 3. Add any alias to `ExecutorFactory._aliases` if config may name it differently (the backend stays `ccxt`).
-4. Create a `config/runtime.<exchange>.demo.json` profile — ship it **disarmed** (`execution.submit_orders`, `strategy_engine.submit_orders`, `risk.allow_live_execution` all false).
+4. Create a `config/runtime.<exchange>.demo.json` profile — strategies stay in `execution_mode: "demo"` (sandbox) until the venue's gated write test passes; live execution additionally requires `HERMX_LIVE_TRADING=true`.
 5. Add a gated integration test mirroring `tests/test_okx_paper_integration.py` (run behind an env flag like `HERMX_RUN_<EXCHANGE>_WRITE_TESTS`).
 
 ### 9.2 Adding a new strategy

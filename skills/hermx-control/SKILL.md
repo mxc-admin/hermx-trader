@@ -58,11 +58,11 @@ All endpoints are on this VPS over loopback. No API key is required locally.
   - `okx_live.account` → balances/equity.
   - `okx_executions` / ledger views → what the system actually did (the money record).
   - `executor` health, `ledger_health`, `freshness` → data trust signals.
-- `GET http://127.0.0.1:8098/health` → includes `mode` (`paper_shadow` today),
-  `allow_live_execution`, and an `arm` object: `kill_switch_engaged`, `submit_orders`,
-  `execution_enabled`, `allow_live_execution`, and `armed_summary` (true only when the
-  kill switch is off AND all three config gates are live). This is read-only status,
-  not a control, and it shows the **global** gates only — see the gate chain below.
+- `GET http://127.0.0.1:8098/health` → includes `mode` (`paper_shadow` today) and an
+  `arm` object: `kill_switch_engaged`, `live_trading_enabled`, `demo_strategies`,
+  `live_strategies`, and `armed` (true only when at least one loaded strategy runs
+  `execution_mode: "live"` AND `HERMX_LIVE_TRADING` is on). This is read-only status,
+  not a control, and it shows the **global** posture only — see the gate chain below.
 - `GET http://127.0.0.1:8891/health` and `GET http://127.0.0.1:8891/latest` →
   receiver liveness and the last processed alert.
 
@@ -113,28 +113,26 @@ to *educate yourself* about a strategy; never copy numbers out of them into a re
 2. Summarize `okx_live.positions` (symbol, side, size, `upl`, `realized_pnl`).
 
 **"Are we armed / live?"**
-1. `GET /health` → read the `arm` block. `armed_summary` is the single honest
-   answer: true means the kill switch is off AND `submit_orders`, `execution_enabled`,
-   and `allow_live_execution` are all true. If it's false, name which of
-   `kill_switch_engaged` / `submit_orders` / `execution_enabled` /
-   `allow_live_execution` is blocking. Read `/api` `executor` health too.
-2. Be precise, not reassuring. `armed_summary` reflects only the kill switch and the
-   global config gates the dashboard can see. The receiver runs a stricter chain at
-   submit time, so "armed" means "all visible gates open", **not** "this next order
-   will definitely submit".
+1. `GET /health` → read the `arm` block. `armed` is the single honest answer: true
+   means at least one loaded strategy runs `execution_mode: "live"` AND the global
+   `HERMX_LIVE_TRADING` switch is on (`live_trading_enabled: true`). If it's false, say
+   why — either `kill_switch_engaged` (the global switch is off) or `live_strategies: 0`
+   (every loaded strategy is demo). Read `/api` `executor` health too.
+2. Be precise, not reassuring. `armed` reflects only the global switch and the loaded
+   strategies' `execution_mode` the dashboard can see. The receiver runs a stricter chain
+   at submit time, so "armed" means "the global posture permits live", **not** "this next
+   order will definitely submit".
 
-**The real submit-time gate chain (5 gates, all must pass, in this order):**
-1. **Kill switch** — `HERMX_SUBMIT_ENABLED` off → `not_submitted` (engaged). Hard stop.
-2. **`readiness.live_execution_enabled`** — per-signal readiness; computed by the
-   receiver from the matched strategy. **Not in the dashboard `arm` block** — this is
-   why "armed" ≠ "will submit".
-3. **`execution.enabled`** — global config (`execution_enabled` in `arm`).
-4. **`execution.submit_orders`** — global config (`submit_orders` in `arm`).
-5. **`risk.allow_live_execution`** — global config (`allow_live_execution` in `arm`).
+**The real submit-time gate chain (in this order):**
+1. **Submission gate** — `readiness.live_execution_enabled` (= the matched strategy's
+   `submit_orders`) ∧ auth-health ∧ watchdog must all hold, else `not_submitted`.
+2. **Live kill switch** — for an `execution_mode: "live"` strategy, `HERMX_LIVE_TRADING`
+   must be truthy, else `not_submitted` (`live_trading_disabled`). Demo strategies skip
+   this and route to the sandbox.
 
-After those 5, the receiver still enforces: auth-health, watchdog, symbol pause, and
-idempotency (duplicate `cl_ord_id`). Any failure → `not_submitted` with a `reason`.
-Report the chain honestly; never claim a gate is open that you cannot read.
+Beyond those, the receiver still enforces symbol pause and idempotency (duplicate
+`cl_ord_id`). Any failure → `not_submitted` with a `reason`. Report the chain honestly;
+never claim a gate is open that you cannot read.
 
 **Relaying a TradingView alert**
 1. Confirm the payload has all required fields and valid enums.

@@ -12,7 +12,7 @@ You are helping install and validate the Kinetic Flow Execution System.
 Important rules:
 - Do not start servers, install packages, send webhooks, create TradingView alerts, or submit OKX orders until you explain what you understand and receive approval.
 - Do not use real-money OKX credentials.
-- Keep OKX_SUBMIT_ORDERS=false during first install and synthetic tests.
+- Keep every strategy in execution_mode: "demo" and HERMX_LIVE_TRADING unset during first install and synthetic tests.
 - Treat OKX demo/sandbox as the only approved execution mode.
 - Never enable real-money execution unless docs/REAL_MONEY_CHECKLIST.md is complete and the operator explicitly approves it.
 
@@ -32,7 +32,7 @@ After reading, answer these before executing anything:
 1. What does the system do?
 2. What are the active strategies, assets, timeframes, budgets, leverage, and OKX instruments?
 3. What does strategy_id control?
-4. What are the three order submission gates?
+4. What are the order submission controls? (per-strategy `execution_mode` demo|live and `submit_orders`, plus the global `HERMX_LIVE_TRADING` kill switch)
 5. What must stay false during first install?
 6. How should TradingView alerts be configured?
 7. What synthetic tests should be run before enabling OKX demo execution?
@@ -53,7 +53,7 @@ Only after the operator approves your explanation, proceed step by step:
 10. Send one valid synthetic webhook per strategy.
 11. Send invalid tests: missing strategy_id, wrong timeframe, wrong symbol.
 12. Confirm accepted alerts, quarantine behavior, logs, and dashboard state.
-13. Ask for explicit approval before setting OKX_SUBMIT_ORDERS=true for OKX demo orders.
+13. Ask for explicit approval before switching any strategy to execution_mode: "live" or setting HERMX_LIVE_TRADING=true.
 
 When reporting results, separate:
 - verified facts
@@ -73,8 +73,8 @@ The correct summary should mention:
 - The active trial is Duo Base Dev, not a generic hardcoded strategy.
 - The four active strategies are SOL 3H, ETH 2H, XRP 4H, and BTC 2H.
 - OKX execution is demo/sandbox first.
-- Fresh installs keep `OKX_SUBMIT_ORDERS=false`.
-- OKX demo orders require all three gates to be enabled.
+- Fresh installs keep every strategy in `execution_mode: "demo"` with `HERMX_LIVE_TRADING` unset.
+- OKX demo orders route to the sandbox when `submit_orders` is true and `execution_mode: "demo"`; live orders additionally require `HERMX_LIVE_TRADING=true`.
 - TradingView alerts must be once per bar close and open-ended or maximum expiration.
 - Opposite signals close first, verify, then open reverse.
 - Same-direction signals do not pyramid.

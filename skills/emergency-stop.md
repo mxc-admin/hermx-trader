@@ -1,86 +1,79 @@
 # Skill: Emergency Stop
 
-Use this when execution must be paused immediately.
+Use this when execution must be paused immediately. The system has two operative
+controls — a per-strategy `execution_mode`/`submit_orders` and the global
+`HERMX_LIVE_TRADING` switch — so a stop can be global, per-strategy, or per-symbol.
 
 ## Stop Levels
 
-### Level 0: Global Kill Switch (fastest, no redeploy)
+### Level 0: Global live kill switch (fastest, no redeploy)
 
-A single environment variable, `HERMX_SUBMIT_ENABLED`, hard-blocks **all** OKX
-order submission regardless of runtime config. This is the fastest stop: no code
-change, no config edit, no redeploy — just set the var and restart the receiver.
+A single environment variable, `HERMX_LIVE_TRADING`, gates **all** real-money
+(`execution_mode: "live"`) submission. It is fail-closed and a positive enable
+flag — live trading is permitted ONLY when it is explicitly truthy:
 
-Verified behavior (`submit_kill_switch_armed()` in `src/webhook_receiver.py`):
+- **Unset** — live trading DISABLED (safe default).
+- **Falsey** (`false`, `0`, `no`, `""`/blank, case-insensitive) — DISABLED.
+- **Truthy** (`true`, `1`, `yes`) — live trading enabled.
 
-- **Unset** — inert. Existing config-driven behavior is preserved (the switch's
-  absence cannot, by itself, arm submission).
-- **Falsey** (`false`, `0`, `no`, `""`, or blank/whitespace, case-insensitive) —
-  **HARD-BLOCKS** submission before any subprocess is spawned.
-- **Anything else** — armed; the config gates below still apply.
+To stop all live submission instantly, set it false (or unset it) and restart the
+receiver:
 
-When engaged, `execute_okx_if_enabled()` returns mode `not_submitted` (with
-`reason: "HERMX_SUBMIT_ENABLED kill switch engaged"`) and writes that record to
-`logs/executions.jsonl` — no `okx_demo_executor` subprocess is ever launched.
+```
+HERMX_LIVE_TRADING=false
+```
 
-**Engage it:**
+```
+python src/webhook_receiver.py   # or the start script
+```
 
-1. Set the var in `.env` (or directly in the process environment):
+A `live` strategy then returns mode `not_submitted` (`reason: "live_trading_disabled"`)
+and writes that record to `logs/executions.jsonl` — no order is sent to the real
+account. (`live_trading_enabled()` in `src/hermx_shared.py` is the single source of
+truth, read by `ExecutionService.execute()` and mirrored in the dashboard `/health`
+`arm` block as `kill_switch_engaged`.)
 
-   ```
-   HERMX_SUBMIT_ENABLED=false
-   ```
+> Note: `demo` strategies route to the exchange **sandbox** and do not consult this
+> switch. To stop a demo strategy too, use Level 1 (per-strategy) below.
 
-2. Restart the receiver (`python src/webhook_receiver.py`, or the start script).
+### Level 1: Stop a single strategy
 
-**Confirm it:** on startup, `log_execution_arm_state()` (called from `main()`)
-emits an `EXECUTION ARM STATE:` log line. Check that `kill_switch_armed=False`:
+Set `submit_orders: false` in that strategy's `strategies/<id>.json` and restart the
+receiver. The strategy still validates and ledgers but places no order (demo or live).
 
-   ```
-   EXECUTION ARM STATE: HERMX_SUBMIT_ENABLED=false (kill_switch_armed=False) ...
-   ```
+To take a strategy off the real account but keep it running in sandbox, instead change
+`execution_mode: "live"` back to `execution_mode: "demo"`.
 
-To re-arm, unset the var (or set a non-falsey value) and restart; config gates
-then resume control.
+### Level 2: Pause a single symbol
 
-### Level 1: Pause New Alerts
+Use the per-symbol pause registry in `control-state.json` (`symbol_pauses`) — unchanged.
+A paused symbol returns `not_submitted` (`reason: "symbol_paused"`) regardless of mode.
 
-- disable execution in runtime config
-- keep dashboard and webhook alive
-- alerts are logged but no orders are sent
+### Level 3: Stop webhook processing
 
-### Level 2: Stop Webhook Processing
+Stop the receiver service. The dashboard may remain online for read-only status.
 
-- stop webhook service
-- dashboard may remain online
+### Level 4: Flatten exchange
 
-### Level 3: Flatten Exchange
+- close open positions on the venue,
+- verify flat,
+- set `HERMX_LIVE_TRADING=false` and/or each strategy's `submit_orders: false` to keep
+  it flat.
 
-- close open OKX positions
-- verify flat
-- disable order submission
+## Execution control model
 
-## Execution Gate Precedence
+Two controls decide whether and where an order is placed:
 
-For a **live** OKX order to actually submit, every gate below must be affirmative.
-They are evaluated in this real order inside `execute_okx_if_enabled()`
-(`src/webhook_receiver.py`); the first non-affirmative gate short-circuits to a
-`not_submitted` (dry-run) result:
+1. **Per-strategy** — `submit_orders` (true|false) and `execution_mode` (`demo`|`live`)
+   in `strategies/<id>.json`. `demo` always routes to the exchange sandbox; `live`
+   routes to the real account.
+2. **Global** — `HERMX_LIVE_TRADING` (env). Required truthy for any `live` order;
+   irrelevant to `demo`.
 
-1. **`HERMX_SUBMIT_ENABLED` not falsey** — the global kill switch is armed
-   (see Level 0). Falsey here blocks before any other gate is checked.
-2. **`readiness.live_execution_enabled == true`** — per-alert execution readiness
-   (derived from `execution.enabled` + `risk.allow_live_execution`).
-3. **`CONFIG.execution.enabled == true`** — execution subsystem enabled.
-4. **`CONFIG.execution.submit_orders == true`** — order submission enabled.
-5. **`CONFIG.risk.allow_live_execution == true`** — risk layer permits live trades.
-
-Any gate that is unset, ambiguous, or false ⇒ **dry-run / `not_submitted`**
-(fail-safe by design — the system never submits on uncertainty).
-
-**Current repo posture (dry-run during refactor):** `shadow-config.json` ships
-with `execution.submit_orders=false` and `risk.allow_live_execution=false`, so
-gates 4 and 5 are not affirmative and no live order can submit even with the kill
-switch armed.
+`ExecutionService.execute()` blocks submission (fail-safe `not_submitted`) on any of:
+`submit_orders` false / auth unhealthy / watchdog paused; a `live` strategy when
+`HERMX_LIVE_TRADING` is not truthy (`live_trading_disabled`); a paused symbol; or a
+duplicate `cl_ord_id`. The system never submits on uncertainty.
 
 ## Required Log
 
@@ -92,4 +85,3 @@ Every emergency stop must log:
 - strategies affected
 - exchange position before
 - exchange position after
-
