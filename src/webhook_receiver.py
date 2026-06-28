@@ -164,6 +164,18 @@ EXECUTION_LEDGER = LOG_DIR / "executions.jsonl"
 # SEPARATE monotonic seq counter from the position journal (the two must not collide).
 ORDER_JOURNAL_LEDGER = LOG_DIR / "order-journal.jsonl"
 ORDER_JOURNAL_SCHEMA_VERSION = 1
+# Order-journal lifecycle (mirrors the position-journal checkpoint+rotation, Phase 1
+# task 7). Without it _order_journal_next_seq() and latest_order_record() re-read the
+# WHOLE append-only journal on every submit -- O(n) per order, unbounded growth. The
+# checkpoint folds the journal into the bounded "latest record per cl_ord_id" index
+# (the dedupe/idempotency authority) plus each order's origin ts, so a load rebuilds
+# from (checkpoint + live-segment tail) instead of the full history, and rotation seals
+# the live segment so disk does not grow without limit. The segment-size / retention
+# knobs are SHARED with the position journal (HERMX_JOURNAL_SEGMENT_*). Unlike the
+# position journal this is NOT gated by HERMX_STATE_BACKEND -- the order journal is the
+# submission state machine and is always active.
+ORDER_JOURNAL_CHECKPOINT_FILE = LOG_DIR / "order-journal.checkpoint.json"
+ORDER_JOURNAL_CHECKPOINT_VERSION = 1
 ORDER_STATE_PLANNED = "PLANNED"
 ORDER_STATE_SUBMITTED = "SUBMITTED"
 ORDER_STATE_FILLED = "FILLED"
@@ -207,6 +219,12 @@ ORDER_NON_TERMINAL_STATES = frozenset({ORDER_STATE_PLANNED, ORDER_STATE_SUBMITTE
 RECONCILE_ALERT_LEDGER = LOG_DIR / "reconcile-alerts.jsonl"
 RECONCILE_ALERT_MISMATCH = "RECONCILE_MISMATCH"
 RECONCILE_ALERT_RESOLVER_TIMEOUT = "UNKNOWN_RESOLVER_TIMEOUT"
+# A PLANNED order that crashed before submission (never advanced to SUBMITTED) was, by
+# write-ahead ordering, NEVER sent to the venue -- the resolver rejects it never_submitted.
+RECONCILE_ALERT_PLANNED_ABANDONED = "PLANNED_ORDER_ABANDONED"
+# Anomaly: a PLANNED orphan that the venue unexpectedly DOES know about (should not
+# happen given write-ahead) -- promoted to SUBMITTED for normal reconciliation, alerted.
+RECONCILE_ALERT_PLANNED_ON_VENUE = "PLANNED_ORDER_ON_VENUE"
 # Concrete operator transport (Task 6): alerts are mirrored to a dedicated ledger
 # and optionally POSTed to an external webhook (HERMX_ALERT_WEBHOOK_URL).
 OPERATOR_ALERT_LEDGER = LOG_DIR / "operator-alerts.jsonl"
@@ -222,6 +240,11 @@ RECONCILE_HISTORY_LIMIT = 100
 UNKNOWN_RESOLVER_INTERVAL_SECONDS = float(os.environ.get("HERMX_UNKNOWN_RESOLVER_INTERVAL_SECONDS", "30") or "30")
 UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS = float(os.environ.get("HERMX_UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS", "900") or "900")
 UNKNOWN_RESOLVER_MAX_ORDERS_PER_TICK = int(os.environ.get("HERMX_UNKNOWN_RESOLVER_MAX_ORDERS_PER_TICK", "50") or "50")
+# PLANNED orphan backstop: a PLANNED order older than this (and unknown to the venue) is
+# resolved PLANNED->REJECTED (never_submitted). Shorter than the SUBMITTED/UNKNOWN timeout
+# because a PLANNED order was never sent -- there is no in-flight venue state to wait on,
+# only the small window of an in-process submit between the PLANNED and SUBMITTED writes.
+PLANNED_ORDER_TIMEOUT_SECONDS = float(os.environ.get("HERMX_PLANNED_ORDER_TIMEOUT_SECONDS", "300") or "300")
 # Queue saturation signaling threshold for early warning; hard rejection now uses
 # PROCESS_QUEUE.maxsize and returns 503 when full.
 QUEUE_SATURATION_ALERT_DEPTH = int(os.environ.get("HERMX_QUEUE_SATURATION_ALERT_DEPTH", "100") or "100")
@@ -2695,22 +2718,289 @@ def order_state_can_transition(old: "str | None", new: str) -> bool:
 
 
 # Monotonic seq for the ORDER journal -- a SEPARATE counter from _journal_next_seq
-# (the position journal). Derived once from the order journal's last seq at first use,
-# then incremented in-process; reset to None on module (re)load.
+# (the position journal). Derived once from the checkpoint floor + sealed-segment seqs
+# + live tail at first use, then incremented in-process; reset to None on module
+# (re)load. Survives rotation+restart because the floor folds in the checkpoint and the
+# sealed filenames (encoded seq, no file read), mirroring _journal_next_seq.
 _order_journal_seq_cache: "int | None" = None
+
+# In-memory index rebuilt once (lazily) from the bounded tail and updated on every
+# append, so latest_order_record() / load_open_orders() never re-read the whole journal
+# on the submit hot path. ``latest`` = newest record per cl_ord_id (ALL states -- the
+# idempotency/dedupe authority); ``origin`` = (seq, ts) of each order's FIRST record so
+# the lifecycle backstop measures age from origin, never reset by re-recording. None
+# until built; reset to None on module (re)load.
+_order_journal_index: "dict | None" = None
+
+
+def _read_order_journal_tail(path: Path) -> list:
+    """Tolerant per-line reader for the ORDER journal live segment.
+
+    Unlike read_jsonl_tolerant (which RAISES on mid-file corruption -- correct for the
+    position journal where corruption means money state is wrong), a single corrupt
+    order-journal line must NOT brick the index and block ALL submits. We log it loudly,
+    quarantine the offending line to ``<path>.corrupt`` for forensics, and skip it --
+    that one order is effectively failed-closed (absent from the index) while every other
+    order keeps flowing. A truncated trailing line is the expected torn-tail case."""
+    if not path.exists():
+        return []
+    raw = path.read_text(encoding="utf-8")
+    if not raw:
+        return []
+    lines = raw.split("\n")
+    last_idx = -1
+    for i, ln in enumerate(lines):
+        if ln.strip():
+            last_idx = i
+    out: list = []
+    corrupt: list = []
+    for i, ln in enumerate(lines):
+        if not ln.strip():
+            continue
+        try:
+            out.append(json.loads(ln))
+        except (json.JSONDecodeError, ValueError):
+            if i == last_idx:
+                logging.warning("order-journal: quarantined truncated trailing line in %s", path)
+            else:
+                logging.error("order-journal: skipping corrupt mid-file line %d in %s (order failed closed)", i, path)
+            corrupt.append(ln)
+    if corrupt:
+        try:
+            (path.parent / (path.name + ".corrupt")).write_text("\n".join(corrupt), encoding="utf-8")
+        except Exception:
+            pass
+    return out
+
+
+def _order_index_apply(index: dict, rec: dict) -> None:
+    """Fold one order-journal record into the index (latest-by-max-seq, origin-by-min-seq).
+    Idempotent in seq, so applying a record already folded in is a no-op."""
+    seq = rec.get("seq")
+    if not isinstance(seq, int):
+        return
+    cl = rec.get("cl_ord_id")
+    latest = index["latest"]
+    cur = latest.get(cl)
+    if cur is None or seq > int(cur.get("seq") or -1):
+        latest[cl] = rec
+    origin = index["origin"]
+    cur_origin = origin.get(cl)
+    if cur_origin is None or seq < cur_origin[0]:
+        origin[cl] = (seq, rec.get("ts"))
+
+
+def _build_order_index() -> dict:
+    """Rebuild the order index from the VERIFIED checkpoint (latest-per-cl + origin,
+    subsuming every sealed segment) plus the live-segment tail (records newer than the
+    checkpoint). Bounded: the live segment is rotation-capped and sealed segments are
+    folded into the checkpoint, so this never replays the full history."""
+    index = {"latest": {}, "origin": {}}
+    ckpt = _read_order_checkpoint()
+    last_seq = -1
+    if ckpt is not None:
+        last_seq = ckpt["last_seq"]
+        for rec in ckpt.get("index_records") or []:
+            _order_index_apply(index, rec)
+        for cl, seq, ts in ckpt.get("origins") or []:
+            cur = index["origin"].get(cl)
+            if cur is None or seq < cur[0]:
+                index["origin"][cl] = (seq, ts)
+    for rec in _read_order_journal_tail(ORDER_JOURNAL_LEDGER):
+        s = rec.get("seq")
+        if isinstance(s, int) and s > last_seq:
+            _order_index_apply(index, rec)
+    return index
+
+
+def _order_index() -> dict:
+    """The in-memory order index, built lazily on first use (under the journal lock)."""
+    global _order_journal_index
+    if _order_journal_index is None:
+        _order_journal_index = _build_order_index()
+    return _order_journal_index
 
 
 def _order_journal_next_seq() -> int:
     global _order_journal_seq_cache
     if _order_journal_seq_cache is None:
         last = -1
-        for rec in read_jsonl_tolerant(ORDER_JOURNAL_LEDGER):
+        cl = _order_checkpoint_last_seq_floor()
+        if cl is not None and cl > last:
+            last = cl
+        for seq, _path in _order_sealed_segment_paths():
+            if seq > last:
+                last = seq
+        for rec in _read_order_journal_tail(ORDER_JOURNAL_LEDGER):
             s = rec.get("seq")
             if isinstance(s, int) and s > last:
                 last = s
         _order_journal_seq_cache = last
     _order_journal_seq_cache += 1
     return _order_journal_seq_cache
+
+
+# --- Order-journal sealed segments + checkpoint (mirrors the position-journal helpers) ---
+
+def _parse_order_sealed_seq(name: str):
+    """The seq encoded in a sealed order segment ``order-journal.<seq>.jsonl`` (the last
+    seq it covers), or None if the name is not a sealed segment."""
+    prefix, suffix = "order-journal.", ".jsonl"
+    if name.startswith(prefix) and name.endswith(suffix):
+        mid = name[len(prefix):-len(suffix)]
+        if mid.isdigit():
+            return int(mid)
+    return None
+
+
+def _order_sealed_segment_paths() -> list:
+    """Sealed order-journal segments as (seq, path), ascending. The live segment and the
+    ``.corrupt`` quarantine file are excluded by the naming rule; the checkpoint (``.json``)
+    by suffix."""
+    out = []
+    for p in LOG_DIR.glob("order-journal.*.jsonl"):
+        seq = _parse_order_sealed_seq(p.name)
+        if seq is not None:
+            out.append((seq, p))
+    out.sort(key=lambda t: t[0])
+    return out
+
+
+def _read_all_order_records() -> list:
+    """Every order record across sealed segments (seq order) + the live segment, sorted
+    by seq. Used by the checkpoint fold; tolerant of corrupt/torn lines."""
+    records: list = []
+    for _seq, path in _order_sealed_segment_paths():
+        records.extend(_read_order_journal_tail(path))
+    records.extend(_read_order_journal_tail(ORDER_JOURNAL_LEDGER))
+    records.sort(key=lambda r: r.get("seq") if isinstance(r.get("seq"), int) else -1)
+    return records
+
+
+def _order_index_hash(index_records: list, origins: list) -> str:
+    payload = {
+        "index_records": sorted(index_records, key=lambda r: r.get("seq") if isinstance(r.get("seq"), int) else -1),
+        "origins": sorted(origins, key=lambda o: str(o[0])),
+    }
+    return hashlib.sha256(_canonical_state_json(payload).encode("utf-8")).hexdigest()
+
+
+def _order_checkpoint_last_seq_floor() -> "int | None":
+    """The checkpoint's last_seq used only as a monotonic seq floor (best-effort; a hash
+    mismatch is irrelevant here -- an over-high floor only skips seq numbers, never
+    reuses them), so read it without the full verify."""
+    if not ORDER_JOURNAL_CHECKPOINT_FILE.exists():
+        return None
+    try:
+        ckpt = json.loads(ORDER_JOURNAL_CHECKPOINT_FILE.read_text(encoding="utf-8"))
+        ls = ckpt.get("last_seq")
+        return ls if isinstance(ls, int) else None
+    except Exception:
+        return None
+
+
+def _read_order_checkpoint() -> "dict | None":
+    """Load the order checkpoint with VERIFY-BEFORE-TRUST: returns it only if it parses,
+    its versions are not from a newer writer, and its stored hash recomputes over the
+    stored index/origins. Any failure is loud and returns None (full-tail rebuild)."""
+    if not ORDER_JOURNAL_CHECKPOINT_FILE.exists():
+        return None
+    try:
+        ckpt = json.loads(ORDER_JOURNAL_CHECKPOINT_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logging.error("order-journal checkpoint unreadable (%s) -- DISCARDING", exc)
+        return None
+    sv = ckpt.get("schema_version")
+    cv = ckpt.get("checkpoint_version")
+    if not isinstance(sv, int) or not isinstance(cv, int) or sv > ORDER_JOURNAL_SCHEMA_VERSION or cv > ORDER_JOURNAL_CHECKPOINT_VERSION:
+        logging.error("order-journal checkpoint from a newer writer (schema=%r checkpoint=%r) -- DISCARDING", sv, cv)
+        return None
+    last_seq = ckpt.get("last_seq")
+    index_records = ckpt.get("index_records")
+    origins = ckpt.get("origins")
+    if not isinstance(last_seq, int) or not isinstance(index_records, list) or not isinstance(origins, list):
+        logging.error("order-journal checkpoint missing last_seq/index_records/origins -- DISCARDING")
+        return None
+    if ckpt.get("state_hash") != _order_index_hash(index_records, origins):
+        logging.error("order-journal checkpoint state_hash MISMATCH -- DISCARDING corrupt checkpoint")
+        return None
+    return ckpt
+
+
+def _rotate_order_live_segment(last_seq: int) -> None:
+    """Seal the live order segment to ``order-journal.<last_seq>.jsonl`` and start a fresh
+    one. Called only AFTER a verified checkpoint covering last_seq is fsync'd."""
+    if not ORDER_JOURNAL_LEDGER.exists():
+        return
+    sealed = LOG_DIR / f"order-journal.{last_seq}.jsonl"
+    os.replace(ORDER_JOURNAL_LEDGER, sealed)
+    ORDER_JOURNAL_LEDGER.touch()
+    _fsync_dir(LOG_DIR)
+
+
+def _enforce_order_segment_retention() -> None:
+    """Keep the last K sealed order segments; prune older ones (the checkpoint subsumes
+    them). HERMX_JOURNAL_SEGMENT_RETENTION < 0 keeps all."""
+    if HERMX_JOURNAL_SEGMENT_RETENTION < 0:
+        return
+    sealed = _order_sealed_segment_paths()
+    excess = len(sealed) - HERMX_JOURNAL_SEGMENT_RETENTION
+    for _seq, path in sealed[:max(0, excess)]:
+        try:
+            path.unlink()
+        except OSError as exc:
+            logging.warning("order-journal: could not prune sealed segment %s: %s", path, exc)
+
+
+def _order_checkpoint_and_rotate() -> None:
+    """Fold the full order history (sealed + live) into the latest-per-cl index + origins,
+    write a verified checkpoint, then seal the live segment and prune old sealed ones.
+    Simpler than the position-journal twin: the order index is a pure deterministic fold
+    of records by seq (no money-state math), so the from-scratch fold IS authoritative and
+    no dual-oracle equivalence check is needed. Fail-closed on any write OSError."""
+    records = _read_all_order_records()
+    if not records:
+        return
+    index = {"latest": {}, "origin": {}}
+    last_seq = -1
+    for rec in records:
+        s = rec.get("seq")
+        if isinstance(s, int) and s > last_seq:
+            last_seq = s
+        _order_index_apply(index, rec)
+    if last_seq < 0:
+        return
+    index_records = list(index["latest"].values())
+    origins = [[cl, seq, ts] for cl, (seq, ts) in index["origin"].items()]
+    ckpt = {
+        "schema_version": ORDER_JOURNAL_SCHEMA_VERSION,
+        "checkpoint_version": ORDER_JOURNAL_CHECKPOINT_VERSION,
+        "last_seq": last_seq,
+        "index_records": index_records,
+        "origins": origins,
+        "state_hash": _order_index_hash(index_records, origins),
+        "created_at": now_iso(),
+    }
+    try:
+        _atomic_json_dump(ORDER_JOURNAL_CHECKPOINT_FILE, ckpt)  # fsync'd before rotate
+        _rotate_order_live_segment(last_seq)
+    except OSError as exc:
+        _fail_closed_state_write("order-checkpoint-rotate", exc, context={"last_seq": last_seq})
+        raise
+    _enforce_order_segment_retention()
+    # The in-memory index already reflects every folded record; rebind it to the
+    # freshly-folded structure so it stays the single source of truth post-rotation.
+    global _order_journal_index
+    _order_journal_index = index
+
+
+def _maybe_order_checkpoint_and_rotate() -> None:
+    """Trigger an order-journal checkpoint+rotation once the live segment grows past
+    HERMX_JOURNAL_SEGMENT_MAX_RECORDS, keeping rebuild bounded and disk capped."""
+    live = _read_order_journal_tail(ORDER_JOURNAL_LEDGER)
+    if len(live) < HERMX_JOURNAL_SEGMENT_MAX_RECORDS:
+        return
+    _order_checkpoint_and_rotate()
 
 
 def record_order_state(
@@ -2728,6 +3018,9 @@ def record_order_state(
         logging.error("ILLEGAL order-state transition for %s: %s -> %s", cl_ord_id, prev_state, new_state)
         raise ValueError(f"illegal order-state transition {prev_state} -> {new_state} for {cl_ord_id}")
     with _ORDER_JOURNAL_LOCK:
+        # Ensure the index is built BEFORE appending so the build reads the pre-append
+        # live tail; the new record is then folded in explicitly (no double count).
+        index = _order_index()
         record = {
             "schema_version": ORDER_JOURNAL_SCHEMA_VERSION,
             "seq": _order_journal_next_seq(),
@@ -2739,6 +3032,10 @@ def record_order_state(
             "detail": canonicalize_decimal_fields(detail or {}),
         }
         append_jsonl_durable(ORDER_JOURNAL_LEDGER, record)
+        _order_index_apply(index, record)
+        # Bound the live segment: fold into a verified checkpoint + seal once it grows
+        # past the segment cap, so the journal does not grow without limit.
+        _maybe_order_checkpoint_and_rotate()
     return record
 
 
@@ -2768,46 +3065,32 @@ def load_open_orders() -> list[dict]:
 
     Each returned record is a COPY of the latest with an added ``origin_ts`` -- the ts of
     the order's FIRST (lowest-seq) journal record. The lifecycle backstop measures age
-    from origin_ts so re-recording (e.g. UNKNOWN->UNKNOWN) can never reset the clock."""
-    latest: dict = {}
-    origin: dict = {}  # cl -> (seq, ts) of the lowest-seq record seen
-    for rec in read_jsonl_tolerant(ORDER_JOURNAL_LEDGER):
-        seq = rec.get("seq")
-        if not isinstance(seq, int):
-            continue
-        cl = rec.get("cl_ord_id")
-        cur = latest.get(cl)
-        if cur is None or seq > cur.get("seq", -1):
-            latest[cl] = rec
-        cur_origin = origin.get(cl)
-        if cur_origin is None or seq < cur_origin[0]:
-            origin[cl] = (seq, rec.get("ts"))
-    out: list[dict] = []
-    for cl, rec in latest.items():
-        if rec.get("state") not in ORDER_NON_TERMINAL_STATES:
-            continue
-        enriched = dict(rec)
-        enriched["origin_ts"] = origin.get(cl, (None, rec.get("ts")))[1]
-        out.append(enriched)
+    from origin_ts so re-recording (e.g. UNKNOWN->UNKNOWN) can never reset the clock.
+
+    Reads from the bounded in-memory index (checkpoint + live tail), never the full
+    journal -- so it stays O(open orders) regardless of total journal length."""
+    with _ORDER_JOURNAL_LOCK:
+        index = _order_index()
+        latest = index["latest"]
+        origin = index["origin"]
+        out: list[dict] = []
+        for cl, rec in latest.items():
+            if rec.get("state") not in ORDER_NON_TERMINAL_STATES:
+                continue
+            enriched = dict(rec)
+            enriched["origin_ts"] = origin.get(cl, (None, rec.get("ts")))[1]
+            out.append(enriched)
     return out
 
 
 def latest_order_record(cl_ord_id: str | None) -> dict | None:
+    """Latest journal record for a clOrdId (the idempotency/dedupe authority). Reads the
+    in-memory index -- O(1) -- instead of re-folding the whole journal on every submit."""
     cl = str(cl_ord_id or "").strip()
     if not cl:
         return None
-    latest: dict | None = None
-    for rec in read_jsonl_tolerant(ORDER_JOURNAL_LEDGER):
-        if not isinstance(rec, dict):
-            continue
-        if str(rec.get("cl_ord_id") or "") != cl:
-            continue
-        seq = rec.get("seq")
-        if not isinstance(seq, int):
-            continue
-        if latest is None or seq > int(latest.get("seq") or -1):
-            latest = rec
-    return latest
+    with _ORDER_JOURNAL_LOCK:
+        return _order_index()["latest"].get(cl)
 
 
 # ---------------------------------------------------------------------------
@@ -3301,7 +3584,7 @@ def resolve_unknown_orders_once(executor=None, *, now_ts: "str | None" = None, m
     candidates = [
         rec
         for rec in load_open_orders()
-        if rec.get("state") in {ORDER_STATE_SUBMITTED, ORDER_STATE_UNKNOWN}
+        if rec.get("state") in {ORDER_STATE_PLANNED, ORDER_STATE_SUBMITTED, ORDER_STATE_UNKNOWN}
     ]
     candidates.sort(key=lambda r: r.get("seq", 0))
     for rec in candidates[: max(0, int(limit))]:
@@ -3314,6 +3597,10 @@ def resolve_unknown_orders_once(executor=None, *, now_ts: "str | None" = None, m
         # reset the lifecycle clock. Falls back to the latest ts if origin is missing.
         age_seconds = _order_age_seconds({"ts": rec.get("origin_ts") or rec.get("ts")}, now_ts=now_ts)
         lookup = {"inst_id": intent.get("inst_id"), "cl_ord_id": cl_ord_id}
+
+        if cur_state == ORDER_STATE_PLANNED:
+            _resolve_planned_orphan(executor, rec, lookup, age_seconds, summary)
+            continue
 
         if age_seconds is not None and age_seconds > UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS:
             # Lifecycle backstop: alert + pause the symbol, but NEVER auto-close the order

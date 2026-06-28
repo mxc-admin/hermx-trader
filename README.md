@@ -8,8 +8,11 @@ demo/sandbox orders only when every safety gate is open. On top of that sits the
 Agent**: a natural-language operator that *reads* state and *relays* sanctioned signals over Telegram.
 It can never size a trade, override a gate, or call an exchange directly.
 
-Execution runs through CCXT across eight venues — **OKX** (recommended, fully tested), Binance, Bybit,
-KuCoin, Bitget, Gate.io, Coinbase Advanced, and Hyperliquid — all implemented. Public TradingView alerts reach a loopback-only receiver
+Execution runs through CCXT. Four venues have wired authenticated execution — **OKX** (recommended,
+fully tested), **KuCoin**, **Bybit**, and **Hyperliquid**. Binance, Bitget, Gate.io, and Coinbase
+Advanced ship runtime/credential profiles but are **config-only — not yet wired** into the CCXT
+adapter's authenticated client (`src/executors/ccxt_adapter.py`), so they cannot place authenticated
+orders today. Public TradingView alerts reach a loopback-only receiver
 through a **Tailscale Funnel** — a stable HTTPS URL with no domain to buy and no firewall ports to open.
 The Docker deploy uses bridge networking with a **Tailscale** sidecar for the same ingress — Funnel for the
 receiver, tailnet-only serve for the dashboard (see [INSTALL.md](INSTALL.md) → *Option B — Docker*).
@@ -74,7 +77,7 @@ See [INSTALL.md](INSTALL.md) for the full guide.
 ## Strategies
 
 Four default strategies ship ready to run — BTC, ETH, SOL, and XRP USDT perpetuals on OKX, 2h–4h
-timeframes, isolated margin, 2x leverage, ~$6,500 total demo budget. **All are demo/sandbox by
+timeframes, isolated margin, 2x leverage, ~$6,000 total demo budget. **All are demo/sandbox by
 default**, and the strategy file (never the alert) owns position sizing. During install you review
 and confirm each strategy's risk parameters before anything is enabled. See
 [docs/STRATEGIES.md](docs/STRATEGIES.md) for detail.
@@ -98,7 +101,7 @@ sizing or money-safety**.
 
 - A VPS (fresh Ubuntu 22.04) **or** a local Mac
 - Python 3.11+
-- OKX **demo** API keys (or testnet/sandbox keys for Binance, Bybit, KuCoin, Bitget, Gate.io, Coinbase Advanced, or Hyperliquid)
+- OKX **demo** API keys (or sandbox keys for one of the other wired venues: KuCoin, Bybit, or Hyperliquid). Binance, Bitget, Gate.io, and Coinbase Advanced have config/credential profiles but are not yet wired for authenticated execution.
 - TradingView Pro+ (needed to send webhook request headers)
 - A free Tailscale account
 - An LLM provider API key (xAI, OpenAI, Anthropic, etc.) — only for the optional Hermes Agent

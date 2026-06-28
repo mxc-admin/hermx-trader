@@ -141,8 +141,7 @@ It is OFF by default. Defaults are built in; env vars override and an optional
 `shadow-config.json` `advisor` block can be added if you want file-based overrides:
 
 ```
-HERMX_ADVISOR_ENABLED=true        # turn the advisor on (annotate-only by itself)
-HERMX_ADVISOR_ALLOW_VETO=true     # additionally grant veto power (a 'skip' blocks the trade)
+HERMX_ADVISOR_ENABLED=true        # single live-veto switch (default OFF); a 'skip' blocks the trade
 HERMX_ADVISOR_COMMAND=hermes      # the Hermes CLI on PATH
 HERMX_ADVISOR_SKILLS=hermx-control  # comma-separated skills to load (grows over time)
 HERMX_ADVISOR_MODEL=              # optional -m override; empty = Hermes default
@@ -150,10 +149,10 @@ HERMX_ADVISOR_TIMEOUT_SECONDS=30  # the agent loop is heavier than a raw call
 ```
 
 Behaviour:
-- `HERMX_ADVISOR_ENABLED` alone → **annotate-only**: a `skip` is recorded (and surfaced to
-  the dashboard / Telegram) but the trade still executes deterministically.
-- `+ HERMX_ADVISOR_ALLOW_VETO` → a `skip` actually **blocks** the trade
-  (`okx_execution.reason = "vetoed_by_advisor"`, nothing submitted).
+- `HERMX_ADVISOR_ENABLED` is a **single live-veto switch**, default **OFF**. There is no
+  annotate-only middle mode — if you turn it on, the veto is live: a `skip` verdict
+  **blocks** the trade (nothing submitted). Leave it OFF and the advisor is not consulted
+  at all and execution is byte-identical to before.
 - Every decision is appended to `logs/advisor-decisions.jsonl` with latency, the loaded
   skills, and the read-only snapshot it reasoned over.
 

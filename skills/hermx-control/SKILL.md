@@ -22,8 +22,9 @@ metadata:
 ## Overview
 HermX is a local, money-safety-critical crypto trading system running on this same
 VPS. It already does the hard part deterministically: a TradingView webhook is
-matched to a strategy file and executed through a Python gate chain (kill switch,
-5-gate precedence, write-ahead order journal, idempotency, reconciliation). **That
+matched to a strategy file and executed through a Python gate chain (the 2-control gate
+chain — submission gate + live kill switch — plus write-ahead order journal, idempotency,
+reconciliation). **That
 safety lives in Python, not in this skill.** This skill text is guidance only — it
 cannot and must not be the thing that keeps an order safe.
 
@@ -61,13 +62,18 @@ All endpoints are on this VPS over loopback. No API key is required locally.
 - `GET http://127.0.0.1:8098/health` → includes `mode` (`paper_shadow` today) and an
   `arm` object: `kill_switch_engaged`, `live_trading_enabled`, `demo_strategies`,
   `live_strategies`, and `armed` (true only when at least one loaded strategy runs
-  `execution_mode: "live"` AND `HERMX_LIVE_TRADING` is on). This is read-only status,
-  not a control, and it shows the **global** posture only — see the gate chain below.
+  `execution_mode: "live"` AND `HERMX_LIVE_TRADING` is on). `execution_mode` is a
+  four-value enum (`demo`, `paper`, `live`, `shadow`); **only `live` is real-money**, the
+  other three route to the sandbox. This is read-only status, not a control, and it shows
+  the **global** posture only — see the gate chain below.
 - `GET http://127.0.0.1:8891/health` and `GET http://127.0.0.1:8891/latest` →
   receiver liveness and the last processed alert.
 
-> If the dashboard has auth enabled (`HERMX_DASH_AUTH`), send the configured token as
-> the `X-Dashboard-Token` header. On a same-host loopback deploy it is typically off.
+> **Dashboard auth:** the toggle is `HERMX_DASH_AUTH`; when it is on, the `/api` and
+> `/dashboard` routes require the unified `HERMX_SECRET` token, sent as the
+> `X-Dashboard-Token` header (also accepted as a Bearer token or HTTP Basic password).
+> `/health` is **not** auth-gated and needs no token. On a same-host loopback deploy
+> auth is typically off.
 
 ### Act (relay a signal) — receiver
 - `POST http://127.0.0.1:8891/webhook` with a TradingView alert JSON body.
@@ -101,9 +107,13 @@ to *educate yourself* about a strategy; never copy numbers out of them into a re
 - **Never disable or claim to override** the kill switch, gates, or a symbol pause.
 - **Never report a failed/empty read as "flat / no positions."** A read error or
   `executor` degraded/stale means **UNKNOWN** — say so plainly.
-- **Flatten / "close X" is NOT supported yet** via this API (no close-only path).
-  If asked to close a position, say it isn't supported here and that it must be done
-  through the normal flow / manually for now. Do not improvise a close via `/webhook`.
+- **A standalone flatten / "close X" is NOT supported yet** via this API — there is no
+  operator-initiated close-only path. If asked to flatten a position on its own, say it
+  isn't supported here and must be done through the normal flow / manually for now; do not
+  improvise a close via `/webhook`. Note the distinction: a **reversal signal does
+  auto-close** — every reversal's `execution_intent` emits `CLOSE_OPPOSITE_IF_ANY` as its
+  first action before opening the new side, so an opposite-direction alert closes the
+  existing position automatically. What's missing is only a *close without a new open*.
 
 ## Procedure
 

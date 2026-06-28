@@ -21,9 +21,10 @@ Use this when creating or auditing TradingView alerts.
 8. Set frequency to once per bar close.
 9. Set expiration to open-ended or maximum available.
 10. Paste JSON payload with exact `strategy_id`.
-11. Save alert.
-12. Send or wait for test signal.
-13. Confirm webhook receives it.
+11. Add the `X-Webhook-Secret` header using the `HERMX_SECRET` value from `.env` (requires TradingView Pro+; lower-tier plans cannot send custom headers and need an HMAC relay — see `setup/08-webhook-hmac-relay.md`).
+12. Save alert.
+13. Send or wait for test signal.
+14. Confirm webhook receives it.
 
 ## Audit Checklist
 
@@ -33,6 +34,7 @@ Use this when creating or auditing TradingView alerts.
 - `side` is correct.
 - `tv_signal_price` uses `{{close}}`.
 - `tv_time` uses `{{time}}`.
+- The `X-Webhook-Secret` header is set to the correct `HERMX_SECRET` value.
 - Alert is active.
 - Alert is not expired.
 - Alert has no calculation error.

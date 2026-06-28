@@ -1,16 +1,18 @@
-# Executor-output fixtures (placeholders — deferred to Phase 1)
+# Executor-output fixtures (historical — legacy `okx_demo_executor` module removed)
 
-These four JSON files capture the **shape** of `okx_demo_executor.py` stdout as
-consumed by `execute_okx_if_enabled` (it parses stdout JSON and reads
-`mode` + `okx_fill_summary`). See `src/okx_demo_executor.py:617-633`.
+> **Historical note.** These four JSON files are artifacts from the now-removed legacy
+> `okx_demo_executor` module. `src/okx_demo_executor.py` was **deleted** in the CCXT cutover
+> (execution is now unconditionally CCXT via `src/execution/service.py` +
+> `src/executors/ccxt_adapter.py`), and the `REFACTOR_PLAN.md` that originally scoped this work
+> no longer exists in the repo. The references below are kept only to explain the fixtures'
+> provenance; do not treat those paths as live.
 
-They are intentionally **minimal, synthetic placeholders**. Phase 0 / Batch A
-does NOT wire them into a live test, because doing so faithfully (mock-OKX
-component test, partial-fill reconciliation) requires touching `src/` and the
-mock-OKX REST layer — that is P1/P7 work per `REFACTOR_PLAN.md:166` ("captured
-`okx_demo_executor` stdout for fill / partial-fill / reject / timeout") and the
-P1 reconciliation REST payloads. They are committed now (and hash-stamped) so
-P1 inherits a stable oracle rather than inventing its own inputs.
+These four JSON files captured the **shape** of the legacy `okx_demo_executor` stdout as it was
+once consumed by `execute_okx_if_enabled` (parsing stdout JSON for `mode` + `okx_fill_summary`).
+
+They are intentionally **minimal, synthetic placeholders**. They were never wired into a live
+test (a faithful mock-OKX component test / partial-fill reconciliation would have required the
+mock-OKX REST layer). They remain committed (and hash-stamped) as a stable historical oracle.
 
 Outcomes covered: `fill.json`, `partial_fill.json`, `reject.json`, `timeout.json`.
 

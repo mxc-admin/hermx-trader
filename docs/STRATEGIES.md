@@ -11,11 +11,11 @@ The strategy file tells the system:
 - which indicator generated the signal
 - how much budget is assigned (`capital.budget_usd`)
 - which leverage and margin mode to use
-- which `execution_mode` (`demo` or `live`) and whether `submit_orders` is on
+- which `execution_mode` (`demo`, `paper`, `live`, or `shadow`) and whether `submit_orders` is on
 
 ## Active Demo Strategies
 
-Current total assigned demo budget: `$6,500`.
+Current total assigned demo budget: `$6,000` (4 × `$1,500`).
 
 | File | Purpose |
 |---|---|
@@ -64,8 +64,10 @@ separate `asset` field. Fields removed in v2: `asset`, `status`, `validation_sou
 - `capital.budget_usd` is the margin budget, not the leveraged notional.
 - `leverage` determines target notional.
 - `submit_orders` must be `true` for the strategy to place any order.
-- `execution_mode = demo` routes to the exchange sandbox/demo account; `execution_mode = live`
-  routes to the real account and additionally requires `HERMX_LIVE_TRADING=true`.
+- `execution_mode` is a four-value enum: `demo`, `paper`, `live`, `shadow`. **Only `live` is a
+  real-money mode** — it routes to the real account and additionally requires
+  `HERMX_LIVE_TRADING=true`. `demo`, `paper`, and `shadow` all route to the exchange
+  sandbox/paper account (treated as `simulated_trading`); any non-`live` value is sandboxed.
 
 ## Future Strategy Extensions
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Hermes execution skill runtime (REFACTOR_PLAN.md Phase 5 / P5-05).
 
-This is the concrete runtime behind ``skills/hermes-execution.md`` -- the single
+This is the concrete runtime behind ``docs/hermes-execution.md`` -- the single
 agent-facing execution surface. The agent never touches an exchange SDK; it calls
 :meth:`HermesExecutionSkill.execute`, which:
 
@@ -19,7 +19,7 @@ agent-facing execution surface. The agent never touches an exchange SDK; it call
 
 The skill owns NO money-safety policy of its own -- it delegates gates/risk to the
 service path. A submit timeout/exception surfaces as ``unknown`` (never a blind
-retry), matching the service + ``skills/hermes-execution.md`` failure contract.
+retry), matching the service + ``docs/hermes-execution.md`` failure contract.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ import hashlib
 from datetime import datetime, timezone
 
 
-# Contract output modes (skills/hermes-execution.md "Output Contract").
+# Contract output modes (docs/hermes-execution.md "Output Contract").
 MODE_NOT_SUBMITTED = "not_submitted"
 MODE_SUBMITTED = "submitted"
 MODE_FILLED = "filled"

@@ -21,17 +21,27 @@ Every active execution alert must include `strategy_id`.
 }
 ```
 
+## Authentication
+
+The alert must be sent with the `X-Webhook-Secret` HTTP header set to `HERMX_SECRET`.
+The secret is **never** included in the JSON payload or in the URL — it travels only
+in the `X-Webhook-Secret` header.
+
 ## Venue, Execution Mode, and Sizing Come From the Strategy
 
 The alert carries only the **signal** — never venue routing, sizing, or execution mode. Those
 are supplied by the strategy file matched on `strategy_id`:
 
-- **Venue** is `strategy.instrument.exchange` (e.g. `okx`, `binance`, `bybit`, `kucoin`, `bitget`,
-  `gate`, `coinbase`, `hyperliquid`). The alert's `exchange` field is advisory only and must agree
-  with the strategy; the strategy's `instrument.exchange` is authoritative for routing.
-- **Execution mode** is `strategy.execution_mode` — `demo` routes to the venue's sandbox/paper
-  account (always allowed); `live` routes to the real account and additionally requires the global
-  kill switch `HERMX_LIVE_TRADING=true`.
+- **Venue** is `strategy.instrument.exchange`, which is **authoritative for routing**. The alert's
+  own `exchange` field is advisory only and is constrained by the alert schema
+  (`schemas/tradingview-alert.schema.json`) to the four wired venues —
+  `okx`, `kucoin`, `bybit`, `hyperliquid` — so an alert declaring any other venue fails validation
+  when schema enforcement is on. The strategy may route to other configured venues via
+  `instrument.exchange`; the alert `exchange` need only be one of the four schema-allowed values.
+- **Execution mode** is `strategy.execution_mode`, a four-value enum — `demo`, `paper`, `live`,
+  `shadow`. **Only `live` is real-money**: it routes to the real account and additionally requires
+  the global kill switch `HERMX_LIVE_TRADING=true`. `demo`, `paper`, and `shadow` all route to the
+  venue's sandbox/paper account (always allowed; any non-`live` mode is sandboxed).
 - **Sizing** is computed in the receiver as `capital.budget_usd * leverage`. The alert has **no**
   size, notional, budget, or leverage field; any such value would be ignored.
 
@@ -43,7 +53,7 @@ venue, and the strategy file selects where and how it executes.
 - Condition: correct Duo Base Dev BUY or SELL signal.
 - Timeframe: must match the strategy file.
 - Alert frequency: once per bar close.
-- Webhook URL: system webhook URL plus secret.
+- Webhook URL: system webhook URL. Add the `X-Webhook-Secret` header with the `HERMX_SECRET` value.
 - Expiration: open-ended or longest available.
 
 ## Validation Rules

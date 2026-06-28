@@ -12,6 +12,19 @@ Goal: create one BUY and one SELL alert per strategy.
 - webhook: enabled
 - message: valid JSON with `strategy_id`
 
+## Webhook Authentication
+
+The webhook secret is sent as an HTTP header, not in the alert body.
+
+- Header name: `X-Webhook-Secret`
+- Header value: `HERMX_SECRET` from `.env`
+- This header is required; requests without it are rejected.
+- The secret does **not** go in the alert JSON body and is **not** part of the URL.
+
+TradingView Pro+ supports custom webhook headers, so the header can be set
+directly on the alert. If your plan does not support custom headers, use the
+HMAC relay path instead — see `setup/08-webhook-hmac-relay.md`.
+
 ## Active Alert Set
 
 | Strategy | BUY | SELL |

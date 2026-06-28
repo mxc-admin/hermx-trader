@@ -33,8 +33,9 @@ account. (`live_trading_enabled()` in `src/hermx_shared.py` is the single source
 truth, read by `ExecutionService.execute()` and mirrored in the dashboard `/health`
 `arm` block as `kill_switch_engaged`.)
 
-> Note: `demo` strategies route to the exchange **sandbox** and do not consult this
-> switch. To stop a demo strategy too, use Level 1 (per-strategy) below.
+> Note: non-`live` strategies (`demo`, `paper`, `shadow`) route to the exchange
+> **sandbox** and do not consult this switch. To stop one of those too, use Level 1
+> (per-strategy) below.
 
 ### Level 1: Stop a single strategy
 
@@ -64,11 +65,13 @@ Stop the receiver service. The dashboard may remain online for read-only status.
 
 Two controls decide whether and where an order is placed:
 
-1. **Per-strategy** — `submit_orders` (true|false) and `execution_mode` (`demo`|`live`)
-   in `strategies/<id>.json`. `demo` always routes to the exchange sandbox; `live`
-   routes to the real account.
+1. **Per-strategy** — `submit_orders` (true|false) and `execution_mode`
+   (`demo`|`paper`|`live`|`shadow`) in `strategies/<id>.json`. **Only `live` is real-money**
+   and routes to the real account; `demo`, `paper`, and `shadow` all route to the exchange
+   sandbox (any non-`live` mode is sandboxed). During an incident, recognise that a `paper`
+   or `shadow` strategy is sandboxed just like `demo`.
 2. **Global** — `HERMX_LIVE_TRADING` (env). Required truthy for any `live` order;
-   irrelevant to `demo`.
+   irrelevant to non-`live` (sandbox) modes.
 
 `ExecutionService.execute()` blocks submission (fail-safe `not_submitted`) on any of:
 `submit_orders` false / auth unhealthy / watchdog paused; a `live` strategy when

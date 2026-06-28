@@ -49,7 +49,7 @@
     "ETHUSDT": {
       "enabled": true,
       "inst_id": "ETH-USD",
-      "budget_usd": 2000,
+      "budget_usd": 1500,
       "leverage": 1,
       "timeframe": "2h"
     }

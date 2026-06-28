@@ -38,7 +38,7 @@ Card fields:
 
 - asset (derived from `instrument.inst_id`)
 - timeframe
-- execution mode (`demo` / `live`)
+- execution mode (`demo` / `paper` / `live` / `shadow`; only `live` is real-money, the rest sandbox)
 - budget start (`capital.budget_usd`)
 - budget now
 - PnL now

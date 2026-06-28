@@ -92,7 +92,7 @@ Every server binds `127.0.0.1` only. The sole public surface is the Tailscale Fu
 10. **Alert schema validate** — `validate_alert_schema()` checks the normalized alert against `schemas/tradingview-alert.schema.json` (Draft 2020-12). Observe-only by default; quarantines only when `strategy_engine.enforce_alert_schema` is true. Fails open if `jsonschema`/schema is unavailable.
 11. **Dedupe** — `check_and_mark_signal()` consults a `HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS` (default 86400) seen-signals window; duplicates are ledgered and short-circuited.
 12. **Strategy validation** — `validate_strategy_alert()` resolves `STRATEGIES.get(strategy_id)` and applies post-selection guards: asset match, canonical-timeframe match, and status ∈ {`trial_candidate`, `active_demo`}. A failure routes to the strategy-alert quarantine ledger (`202`).
-13. **(Optional) Pre-execution advisor** — `execute_okx_with_advisor()` consults `run_execution_advisor()` (a `hermes -z` subprocess), default OFF, fail-open; honors a `skip` veto only when `HERMX_ADVISOR_ALLOW_VETO` is set.
+13. **(Optional) Pre-execution advisor** — `execute_okx_with_advisor()` consults `run_execution_advisor()` (a `hermes -z` subprocess), default OFF, fail-open; `HERMX_ADVISOR_ENABLED` is a single live-veto switch, so when it is on a `skip` verdict vetoes the trade (no separate veto flag, no annotate-only mode).
 14. **Build readiness** — `build_strategy_execution_readiness()` computes notional (`budget_usd × leverage`), the instrument block, a stable `client_order_id`, the close-verify-open action list, and `live_execution_enabled`.
 15. **Execution chokepoint** — `execute_okx_if_enabled()` → `_execute_okx_via_service()` constructs an `ExecutionService` (wired with receiver hooks) and calls `.execute()`, which runs the 7 money-safety invariants (§3).
 16. **Adapter submit** — on a green gate chain, `CcxtExecutor.execute()` resolves the venue, sizes contracts, and submits `create_order` calls; results are normalized.
@@ -105,7 +105,7 @@ Every server binds `127.0.0.1` only. The sole public surface is the Tailscale Fu
 
 ### 2.3 Pre-execution advisor (optional)
 
-The advisor is a *safety overseer*, never a trader. It runs as a `hermes -z "<prompt>" --skills hermx-control` subprocess (`_advisor_agent_query`) — the full Hermes Agent loop with the read-only HermX skill loaded, not a bare LLM. It is **default OFF** (`HERMX_ADVISOR_ENABLED`), sees only a minimal read-only snapshot (symbol/side/timeframe/strategy/planned notional — already fixed by code), and may return **only** `proceed` or `skip` plus a free-text `risk_note` and optional 0–100 score. It **cannot** change symbol, side, size, leverage, or strategy. A `skip` becomes a veto **only** when `HERMX_ADVISOR_ALLOW_VETO` is set; otherwise it is recorded for visibility and execution proceeds. Any timeout/transport/parse error **fails open to PROCEED** (`HERMX_ADVISOR_TIMEOUT_SECONDS`, default 30). Every decision is logged to `logs/advisor-decisions.jsonl`.
+The advisor is a *safety overseer*, never a trader. It runs as a `hermes -z "<prompt>" --skills hermx-control` subprocess (`_advisor_agent_query`) — the full Hermes Agent loop with the read-only HermX skill loaded, not a bare LLM. It is **default OFF** (`HERMX_ADVISOR_ENABLED`), sees only a minimal read-only snapshot (symbol/side/timeframe/strategy/planned notional — already fixed by code), and may return **only** `proceed` or `skip` plus a free-text `risk_note` and optional 0–100 score. It **cannot** change symbol, side, size, leverage, or strategy. `HERMX_ADVISOR_ENABLED` is a single live-veto switch: whenever the advisor is enabled a `skip` verdict **is** a live veto that blocks the trade — there is no annotate-only mode and no separate veto flag. Any timeout/transport/parse error **fails open to PROCEED** (`HERMX_ADVISOR_TIMEOUT_SECONDS`, default 30). Every decision is logged to `logs/advisor-decisions.jsonl`.
 
 ---
 
@@ -278,16 +278,22 @@ The agent **only calls down through the same HTTP API a human would use** — lo
 
 The runtime behind the relay seam is `HermesExecutionSkill` (`src/skills/hermes_execution.py`): it normalizes signal+strategy into a controlled `execution_intent`, **fails closed** before any submit on an invalid side or unresolved venue mapping, returns `not_submitted` without calling the service in `dry_run`, and in `live` mode submits **only** through `ExecutionService` — owning no money-safety policy of its own.
 
-### 7.3 Two orchestration modes
+### 7.3 Orchestration roles (conceptual)
 
-| Mode | Who selects/drives execution | Agent role | Status |
+These are **conceptual roles**, not a config-selected mode: there is **no `orchestration_mode`
+flag**. A second config-gated mode was explicitly judged unnecessary — there is one path
+(advisory/relay) and the gates decide the rest (see `docs/HERMES_AGENT_DESIGN.md`). The "agent"
+row below is the planned end-state for who *originates* a relay; either way the same single
+gate chain runs.
+
+| Role | Who selects/drives execution | Agent role | Status |
 |---|---|---|---|
-| **deterministic** (default) | `webhook_receiver` matches `strategy_id` and drives `ExecutionService` | read-only observer + optional advisor | BUILT |
-| **agent** | Hermes Agent selects `strategy_id` and relays `POST /webhook` | auto-executes — but the **full gate chain still applies** identically | PLANNED |
+| **deterministic** (today) | `webhook_receiver` matches `strategy_id` and drives `ExecutionService` | read-only observer + optional advisor | BUILT |
+| **agent** | Hermes Agent selects `strategy_id` and relays `POST /webhook` | auto-executes — but the **full gate chain still applies** identically | PLANNED (conceptual) |
 
 ### 7.4 Advisor transport
 
-`hermes -z "<prompt>" --skills hermx-control` subprocess (optionally `-m <model>`). Config: `HERMX_ADVISOR_ENABLED` (default false), `HERMX_ADVISOR_ALLOW_VETO` (default false), `HERMX_ADVISOR_TIMEOUT_SECONDS` (default 30), `HERMX_ADVISOR_COMMAND` (default `hermes`), `HERMX_ADVISOR_SKILLS` (default `hermx-control`). **Fails open always** — a missing binary, non-zero exit, timeout, or malformed reply records the error and proceeds deterministically.
+`hermes -z "<prompt>" --skills hermx-control` subprocess (optionally `-m <model>`). Config: `HERMX_ADVISOR_ENABLED` (default false — a single live-veto switch; when on, a `skip` verdict blocks the trade, with no annotate-only middle mode), `HERMX_ADVISOR_TIMEOUT_SECONDS` (default 30), `HERMX_ADVISOR_COMMAND` (default `hermes`), `HERMX_ADVISOR_SKILLS` (default `hermx-control`), `HERMX_ADVISOR_MODEL` (optional `-m` override). **Fails open always** — a missing binary, non-zero exit, timeout, or malformed reply records the error and proceeds deterministically.
 
 ### 7.5 Telegram operator interface (planned)
 

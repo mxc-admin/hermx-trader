@@ -7,7 +7,7 @@ The goal is to make the agent understand the system first, then install and test
 ## Prompt
 
 ```text
-You are helping install and validate the Kinetic Flow Execution System.
+You are helping install and validate HermX.
 
 Important rules:
 - Do not start servers, install packages, send webhooks, create TradingView alerts, or submit OKX orders until you explain what you understand and receive approval.
@@ -49,7 +49,7 @@ Only after the operator approves your explanation, proceed step by step:
 6. Run python scripts/validate_package.py.
 7. Start the dashboard.
 8. Start the webhook receiver.
-9. Install and run `cloudflared` tunnel to `127.0.0.1:8891` (named tunnel for stable URL).
+9. Expose the receiver with Tailscale Funnel for a stable public HTTPS URL: `tailscale funnel --bg 8891` (Funnels `127.0.0.1:8891`; no domain to buy, no firewall ports to open).
 10. Send one valid synthetic webhook per strategy.
 11. Send invalid tests: missing strategy_id, wrong timeframe, wrong symbol.
 12. Confirm accepted alerts, quarantine behavior, logs, and dashboard state.

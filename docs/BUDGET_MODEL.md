@@ -7,16 +7,16 @@ Target notional is budget multiplied by leverage: `capital.budget_usd * leverage
 
 ## Current Budgets
 
-Current assigned demo margin total: `$6,500`.
+Current assigned demo margin total: `$6,000`.
 
 | Asset | Budget | Leverage | Target Notional |
 |---|---:|---:|---:|
 | SOLUSDT | 1500 | 2x | 3000 |
-| ETHUSDT | 2000 | 2x | 4000 |
+| ETHUSDT | 1500 | 2x | 3000 |
 | XRPUSDT | 1500 | 2x | 3000 |
 | BTCUSDT | 1500 | 2x | 3000 |
 
-The current four-asset Duo Base Dev trial uses `$6,500` because each asset has its own assigned budget.
+The current four-asset Duo Base Dev trial uses `$6,000` because each asset has its own assigned budget.
 
 ## Definitions
 
@@ -37,5 +37,7 @@ Paper/shadow budget and real account budget must not be mixed.
 The dashboard should clearly label whether numbers come from:
 
 - historical paper replay
-- demo execution (`execution_mode: demo` — sandbox/paper account)
-- live execution (`execution_mode: live` — real account, requires `HERMX_LIVE_TRADING=true`)
+- sandbox execution (`execution_mode: demo`, `paper`, or `shadow` — all route to the
+  sandbox/paper account; any non-`live` mode is treated as `simulated_trading`)
+- live execution (`execution_mode: live` — the only real-money mode; real account, requires
+  `HERMX_LIVE_TRADING=true`)

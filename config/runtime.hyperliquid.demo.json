@@ -49,7 +49,7 @@
     "ETHUSD": {
       "enabled": true,
       "inst_id": "ETH/USDC:USDC",
-      "budget_usd": 2000,
+      "budget_usd": 1500,
       "leverage": 2,
       "timeframe": "2h"
     }
