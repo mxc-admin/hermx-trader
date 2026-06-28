@@ -336,17 +336,45 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Discover public TradingView webhook URL
+# Discover / publish public URLs via Tailscale Funnel
 # ---------------------------------------------------------------------------
+# The webhook is published on :443; the dashboard gets its OWN Funnel on :8443.
+# Funnel only permits 443/8443/10000 as public ports, so the dashboard (loopback
+# $CLEAN_DASHBOARD_PORT) cannot share the webhook's :443 — it gets :8443.
 WEBHOOK_URL=""
+DASHBOARD_URL=""
 if [[ -f "$ROOT/WEBHOOK_URL.txt" ]]; then
   WEBHOOK_URL="$(cat "$ROOT/WEBHOOK_URL.txt")"
   ok "Loaded public webhook URL from WEBHOOK_URL.txt"
-elif have tailscale && tailscale status >/dev/null 2>&1; then
-  public="$(tailscale funnel status 2>/dev/null | grep -oE 'https://[a-zA-Z0-9._-]+\.ts\.net' | head -1 || true)"
-  if [[ -n "$public" ]]; then
-    WEBHOOK_URL="${public}/webhook"
-    ok "Discovered Tailscale Funnel URL: $WEBHOOK_URL"
+fi
+if [[ -f "$ROOT/DASHBOARD_URL.txt" ]]; then
+  DASHBOARD_URL="$(cat "$ROOT/DASHBOARD_URL.txt")"
+  ok "Loaded public dashboard URL from DASHBOARD_URL.txt"
+fi
+
+if have tailscale && tailscale status >/dev/null 2>&1; then
+  # Publish the dashboard on its own Funnel (:8443 -> loopback dashboard).
+  if [[ -z "$DASHBOARD_URL" ]]; then
+    info "Enabling Tailscale Funnel for the dashboard (:8443 -> ${CLEAN_DASHBOARD_PORT})..."
+    if tailscale funnel --bg --https=8443 "$CLEAN_DASHBOARD_PORT" >/dev/null 2>&1 \
+       || sudo tailscale funnel --bg --https=8443 "$CLEAN_DASHBOARD_PORT" >/dev/null 2>&1; then
+      ok "Dashboard Funnel enabled (:8443)"
+    else
+      warn "Could not enable the dashboard Funnel (enable Funnel for your tailnet first, then re-run)."
+    fi
+  fi
+
+  # Derive the tailnet hostname from any active funnel entry.
+  TS_HOST="$(tailscale funnel status 2>/dev/null | grep -oE 'https://[a-zA-Z0-9._-]+\.ts\.net' | head -1 || true)"
+  if [[ -n "$TS_HOST" ]]; then
+    if [[ -z "$WEBHOOK_URL" ]]; then
+      WEBHOOK_URL="${TS_HOST}/webhook"
+      ok "Discovered Tailscale Funnel URL: $WEBHOOK_URL"
+    fi
+    if [[ -z "$DASHBOARD_URL" ]]; then
+      DASHBOARD_URL="${TS_HOST}:8443/shadow/dashboard"
+      ok "Dashboard Tailscale URL: $DASHBOARD_URL"
+    fi
   fi
 fi
 
@@ -364,6 +392,25 @@ ${BOLD}Local services:${RESET}
 ${BOLD}Dashboard auth:${RESET}
   Token: ${HERMX_DASH_AUTH_TOKEN:-<not set>}
   Pass as X-Dashboard-Token header, or as Bearer/Basic password.
+
+${BOLD}Dashboard public URL:${RESET}
+SUMMARY
+
+if [[ -n "$DASHBOARD_URL" ]]; then
+  echo "  $DASHBOARD_URL"
+  echo "  Requires the dashboard auth token above (X-Dashboard-Token header,"
+  echo "  or as the Bearer/Basic password)."
+else
+  echo "  (local only) http://127.0.0.1:${CLEAN_DASHBOARD_PORT}/shadow/dashboard"
+  echo "  For a public HTTPS URL (its own Funnel, separate from the webhook):"
+  echo "    1. Install Tailscale:    https://tailscale.com/download"
+  echo "    2. Connect:              sudo tailscale up --hostname=hermx"
+  echo "    3. Funnel the dashboard: sudo tailscale funnel --bg --https=8443 ${CLEAN_DASHBOARD_PORT}"
+  echo "    4. Open:                 https://hermx.<tailnet>.ts.net:8443/shadow/dashboard"
+  echo "    (The public dashboard URL still requires the auth token above.)"
+fi
+
+cat <<SUMMARY
 
 ${BOLD}TradingView webhook URL:${RESET}
 SUMMARY

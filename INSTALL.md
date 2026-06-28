@@ -457,6 +457,36 @@ cat WEBHOOK_URL.txt
 **✅ Verify Phase 4:** `tailscale funnel status` shows an active `https://hermx.<tailnet>.ts.net`
 serving port 8891, and `WEBHOOK_URL.txt` contains the full `/webhook` URL.
 
+### 4.4 Funnel the dashboard on its own public port (Option A)
+
+The webhook funnel above publishes the receiver on `:443`. Tailscale Funnel only permits
+`443`, `8443`, and `10000` as public ports, so the **dashboard gets its own Funnel on
+`:8443`** (the webhook keeps `:443`), forwarding to the loopback dashboard on `8098`:
+
+```bash
+sudo tailscale funnel --bg --https=8443 8098
+```
+
+The dashboard is then reachable at:
+
+> `https://hermx.<tailnet>.ts.net:8443/shadow/dashboard`
+
+Because this URL is public, it **still requires the dashboard auth token** — send the
+`HERMX_DASH_AUTH_TOKEN` value from `.env` (Phase 2.3c) as the `X-Dashboard-Token` header,
+or as the Bearer/Basic password. `bash install.sh` enables this funnel for you (prompting,
+or automatically when `TS_AUTHKEY` is set), and `bash run.sh` does the same for local smoke
+runs; both save the URL to `DASHBOARD_URL.txt`. Save it manually otherwise:
+
+```bash
+# Replace the placeholder with the real hostname from `tailscale funnel status`:
+echo "https://hermx.<tailnet>.ts.net:8443/shadow/dashboard" > DASHBOARD_URL.txt
+cat DASHBOARD_URL.txt
+```
+
+**✅ Verify 4.4:** `tailscale funnel status` shows a second entry on `:8443` serving port
+`8098`, and opening the URL with the token returns the dashboard (a `401` means the token is
+missing or wrong).
+
 ---
 
 ## PHASE 5 — Deploy HermX Services
@@ -793,7 +823,9 @@ Run every check and report status to the user:
 - [ ] **Receiver healthy** — `curl -sf http://127.0.0.1:8891/health`
 - [ ] **Dashboard healthy** — `curl -sf http://127.0.0.1:8098/health`
 - [ ] **Public URL healthy** — `curl -sf https://hermx.<tailnet>.ts.net/health`
+- [ ] **Dashboard public URL healthy** — `curl -sf -H "X-Dashboard-Token: <token>" https://hermx.<tailnet>.ts.net:8443/health`
 - [ ] **Tailscale Funnel active** — `tailscale funnel status` shows `https://hermx.<tailnet>.ts.net`
+      (webhook on `:443` → 8891) **and** a `:8443` entry (dashboard → 8098)
 - [ ] **At least one strategy enabled** — confirmed in `ENABLED_STRATEGIES.txt`
 - [ ] **TradingView alert configured for each enabled strategy** (BUY + SELL)
 - [ ] **Synthetic webhook accepted** and visible on the dashboard
@@ -805,9 +837,10 @@ Then print the final summary (fill in the real values):
 
 ```text
 === HermX Installation Complete ===
-Webhook URL:  https://hermx.XXXXX.ts.net/webhook
-Dashboard:    http://localhost:8098
-Receiver:     http://localhost:8891
+Webhook URL:    https://hermx.XXXXX.ts.net/webhook
+Dashboard URL:  https://hermx.XXXXX.ts.net:8443/shadow/dashboard  (needs HERMX_DASH_AUTH_TOKEN)
+Dashboard (local): http://localhost:8098
+Receiver:       http://localhost:8891
 Strategies:   btcusdt_duo_base_dev_2h, ethusdt_duo_base_dev_2h, solusdt_duo_base_dev_3h, xrpusdt_duo_base_dev_4h
 Exchange:     OKX (demo / simulated)
 Telegram:     @<bot_username>
