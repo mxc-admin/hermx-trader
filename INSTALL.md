@@ -65,17 +65,19 @@ to a fully operational install, interactively.
   that can *read* state and *relay* signals. It can never size trades, override gates, or call an
   exchange directly.
 
-**The three-gate safety model — all three must be `true` to submit a live demo order:**
+**The execution-control model — two independent controls decide whether (and where) an order is placed:**
 
-| Layer | File | Field | Fresh-install value |
+| Control | File | Field | Fresh-install value |
 |---|---|---|---|
-| Master local switch | `.env` | `OKX_SUBMIT_ORDERS` | `false` |
-| Runtime profile | `shadow-config.json` | `execution.submit_orders` | `true` |
-| Per-strategy | `strategies/<id>.json` | `submit_orders` | `true` |
+| Per-strategy submission | `strategies/<id>.json` | `submit_orders` | `true` |
+| Per-strategy routing | `strategies/<id>.json` | `execution_mode` | `"demo"` (sandbox) |
+| Global live switch | `.env` | `HERMX_LIVE_TRADING` | `false` (unset = live disabled) |
 
-Keep `OKX_SUBMIT_ORDERS=false` until the user has run synthetic tests and explicitly asks to enable
-demo execution. Everything in this guide works (validates, ledgers, shows on the dashboard) with the
-master gate off — nothing is sent to the exchange.
+`execution_mode: "demo"` always routes to the exchange sandbox/demo account — no real money, no global
+switch needed. `execution_mode: "live"` routes to the real account and **additionally** requires
+`HERMX_LIVE_TRADING=true`. Keep every strategy in `demo` (and `HERMX_LIVE_TRADING` unset) until the
+user has run synthetic tests and explicitly asks to enable live execution. Everything in this guide
+works (validates, ledgers, shows on the dashboard) in demo — nothing hits a live account.
 
 ---
 
@@ -169,8 +171,9 @@ python3.11 --version
 ```
 
 On macOS you'll clone into a working directory of your choice instead of `/opt/hermx`, and use the
-foreground run mode in Phase 5 (Option A · Mac) — systemd is Linux-only and Docker Desktop for Mac does not
-support the `network_mode: host` this stack relies on.
+foreground run mode in Phase 5 (Option A · Mac) — systemd is Linux-only. The default Docker compose now
+uses bridge networking (it works on Docker Desktop for Mac); only the `docker-compose.host.yml` fallback
+relies on `network_mode: host`, which Docker Desktop for Mac does not support.
 
 **✅ Verify Phase 1:** `python3.11 --version` prints `3.11.x`, and `git --version` / `curl --version`
 both succeed. Do not continue until they do.
@@ -235,9 +238,8 @@ HERMX_WEBHOOK_HMAC_KEY=     # optional; only if you want X-Webhook-Signature ver
 If **OKX** (recommended):
 
 ```text
-OKX_SIMULATED_TRADING=1     # 1 = demo/sandbox. DO NOT change — this keeps you off live.
 OKX_FORCE_IPV4=1
-OKX_SUBMIT_ORDERS=false     # master gate — KEEP false until synthetic tests pass
+HERMX_LIVE_TRADING=false    # global live switch — KEEP false; demo strategies route to the sandbox regardless
 # Preferred namespaced credentials:
 OKX_DEMO_API_KEY=<okx demo api key>
 OKX_DEMO_SECRET_KEY=<okx demo secret>
@@ -310,9 +312,9 @@ python scripts/validate_package.py    # sanity-check the package (if present)
 **✅ Verify Phase 2:**
 - `ls -l .env` shows `-rw-------` (mode 600).
 - `SHADOW_WEBHOOK_SECRET` and the chosen exchange's demo credentials are filled in (non-blank).
-- `OKX_SUBMIT_ORDERS=false`.
-- `shadow-config.json` is the demo profile — confirm `simulated_trading: true`, isolated margin,
-  2x leverage. Run: `grep -E '"(mode|simulated_trading|submit_orders)"' shadow-config.json`.
+- `HERMX_LIVE_TRADING=false` (or unset) — live execution disabled; demo strategies route to the sandbox.
+- `shadow-config.json` is the demo profile — confirm it routes to the sandbox: `"account": "sandbox"`
+  and `"td_mode": "isolated"`. Run: `grep -E '"(mode|account|td_mode|ccxt_exchange)"' shadow-config.json`.
 - `pip install` completed without errors.
 
 ---
@@ -330,21 +332,23 @@ ls strategies/
 
 The repo ships **four** strategies (all OKX swaps, 2x leverage, isolated margin, demo mode):
 
-| File | `strategy_id` | Asset | Instrument | Timeframe | Budget (USD) | Leverage | Status |
-|---|---|---|---|---|---:|---:|---|
-| `btcusdt_duo_base_dev_2h.json` | `btcusdt_duo_base_dev_2h` | BTCUSDT | BTC-USDT-SWAP | 2h | 1500 | 2x | active_demo |
-| `ethusdt_duo_base_dev_2h.json` | `ethusdt_duo_base_dev_2h` | ETHUSDT | ETH-USDT-SWAP | 2h | 2000 | 2x | active_demo |
-| `solusdt_duo_base_dev_3h.json` | `solusdt_duo_base_dev_3h` | SOLUSDT | SOL-USDT-SWAP | 3h | 1500 | 2x | active_demo |
-| `xrpusdt_duo_base_dev_4h.json` | `xrpusdt_duo_base_dev_4h` | XRPUSDT | XRP-USDT-SWAP | 4h | 1500 | 2x | active_demo |
+| File | `strategy_id` | Asset | Instrument | Timeframe | Budget (USD) | Leverage | `execution_mode` | `submit_orders` |
+|---|---|---|---|---|---:|---:|---|---|
+| `btcusdt_duo_base_dev_2h.json` | `btcusdt_duo_base_dev_2h` | BTCUSDT | BTC-USDT-SWAP | 2h | 1500 | 2x | demo | true |
+| `ethusdt_duo_base_dev_2h.json` | `ethusdt_duo_base_dev_2h` | ETHUSDT | ETH-USDT-SWAP | 2h | 1500 | 2x | demo | true |
+| `solusdt_duo_base_dev_3h.json` | `solusdt_duo_base_dev_3h` | SOLUSDT | SOL-USDT-SWAP | 3h | 1500 | 2x | demo | true |
+| `xrpusdt_duo_base_dev_4h.json` | `xrpusdt_duo_base_dev_4h` | XRPUSDT | XRP-USDT-SWAP | 4h | 1500 | 2x | demo | true |
 
-> Total demo budget across all four ≈ **$6,500**.
+> Total demo budget across all four ≈ **$6,000**. These are `schema_version: 2` strategy files — the
+> instrument and budget live in nested blocks (`instrument.inst_id`, `capital.budget_usd`); there is
+> **no `asset` or `status` field**. A strategy is inert when its `submit_orders` is `false`.
 
 Print each strategy's summary so the user sees the real values:
 
 ```bash
 for f in strategies/*.json; do
   echo "=== $f ==="
-  grep -E '"(strategy_id|asset|timeframe|budget_usd|leverage|margin_mode|submit_orders|status)"' "$f"
+  grep -E '"(strategy_id|inst_id|timeframe|budget_usd|leverage|margin_mode|execution_mode|submit_orders)"' "$f"
 done
 ```
 
@@ -352,16 +356,17 @@ done
 
 For **each** strategy, ask the user:
 
-1. *"Do you want to enable this strategy?"* — A strategy is **enabled** when its `status` is
-   `active_demo` (run it) or `trial_candidate` (paper/observe). All four ship as `active_demo`.
-   To disable one, set its `status` to something inactive (e.g. `disabled`) so no alert is routed.
+1. *"Do you want to enable this strategy?"* — A strategy is **enabled** when its `submit_orders` is
+   `true` (and `execution_mode` decides where it routes — `demo` = sandbox). All four ship with
+   `submit_orders: true`, `execution_mode: "demo"`. To make one inert, set its `submit_orders` to
+   `false` so no order is placed for its alerts.
 2. *"Confirm the risk parameters for this strategy: budget `$<budget_usd>`, leverage `<leverage>x`.
    Keep these or change them?"* — If they change `budget_usd` or `leverage`, edit the strategy JSON
    and re-validate.
 
 > If the user changes a value, edit the JSON in place and keep `submit_orders: true`,
 > `execution_mode: "demo"`, `margin_mode: "isolated"`. Remember: the master `.env` gate
-> (`OKX_SUBMIT_ORDERS=false`) still keeps everything inert for now.
+> (`HERMX_LIVE_TRADING=false`) keeps live execution disabled — demo strategies route to the sandbox.
 
 Then re-validate the strategy files if a validator is available:
 
@@ -398,9 +403,8 @@ printf '%s\n' \
 cat ENABLED_STRATEGIES.txt
 ```
 
-**✅ Verify Phase 3:** Every enabled strategy has `submit_orders: true` and a status of
-`active_demo`/`trial_candidate`; the user has confirmed each budget and leverage; and
-`ENABLED_STRATEGIES.txt` lists the IDs.
+**✅ Verify Phase 3:** Every enabled strategy has `submit_orders: true` and `execution_mode: "demo"`;
+the user has confirmed each budget and leverage; and `ENABLED_STRATEGIES.txt` lists the IDs.
 
 ---
 
@@ -466,10 +470,11 @@ There are exactly **two** ways to run HermX:
 | Option | Where | What you get |
 |--------|-------|--------------|
 | **A — Source install** | **VPS *and* Mac** | systemd on a Linux VPS; foreground processes on Mac/local |
-| **B — Docker** | **VPS only** | Image-isolated containers, easy updates |
+| **B — Docker** | **VPS (and Mac)** | Image-isolated containers, bridge networking, Tailscale sidecar |
 
-Option A is the **base path** and works on every platform. Option B is a VPS-only
-convenience — do **not** use it on a Mac (see the warning under Option B).
+Option A is the **base path** and works on every platform. Option B (the default
+bridge compose) also runs anywhere Docker runs, including Docker Desktop for Mac;
+only its `docker-compose.host.yml` fallback is Linux-only (see Option B).
 
 Ask the user which option they want, then do **one** of the following.
 
@@ -527,25 +532,86 @@ curl -sf http://127.0.0.1:8098/health && echo " dashboard OK"
 
 Stop either service with Ctrl-C in its terminal.
 
-### Option B — Docker (VPS only)
+### Option B — Docker (bridge networking + Tailscale)
 
-The repo ships a `Dockerfile` and `docker-compose.yml` (one image, two services,
-`network_mode: host`, a named `hermx-data` volume for ledger persistence). With `.env` and
-`shadow-config.json` already in place:
+The repo ships a `Dockerfile` and `docker-compose.yml`: one image, three services
+(`receiver`, `dashboard`, and a `tailscale` sidecar). The Docker path uses
+**Tailscale** as its tunnel — the same tunnel you run directly; **cloudflared is
+not used**. Key properties of the default compose:
+
+- **Bridge networking** (no `network_mode: host`). Each service binds `0.0.0.0`
+  *inside* its container (`HERMX_BIND_HOST=0.0.0.0`), and host port publishing is
+  pinned to `127.0.0.1:8891` / `127.0.0.1:8098` — reachable from the host but never
+  exposed on a public interface.
+- **Non-root runtime** — processes run as the `hermx` user (uid/gid `10001`).
+- **Read-only config + strategies** — `shadow-config.json` and `strategies/` are
+  bind-mounted **`:ro`** into both services; edit them on the host, then restart.
+- **Two named volumes** — `hermx-data` holds the append-only ledgers/logs (`/app/logs`,
+  receiver rw, dashboard ro); `hermx-state` holds the four mutable state snapshots
+  (`/app/data`: `paper-state.json`, `control-state.json`, `seen-signals.json`,
+  `latest.json`, receiver only).
+- **Hardened dashboard** — `read_only: true`, `cap_drop: [ALL]`, `tmpfs: /tmp`.
+- **Public ingress via Tailscale** — the `tailscale` sidecar joins your tailnet as
+  `hermx` using `TS_AUTHKEY` from `.env` and proxies traffic per
+  `config/tailscale/serve.json`: **Funnel** publishes the receiver publicly
+  (`https://hermx.<tailnet>.ts.net/webhook` → `receiver:8891`) and **serve** exposes
+  the dashboard to the tailnet only (`https://hermx.<tailnet>.ts.net:8443/` →
+  `dashboard:8098`). It runs in userspace-networking mode, so it needs no extra host
+  capabilities or `/dev/net/tun` (works on Linux and Docker Desktop for Mac).
+  cloudflared is **not** part of this path.
+
+**Tailscale quick-start (default public ingress):**
+
+1. In the Tailscale **admin console** → **Settings → Keys**, generate a
+   **reusable** (and optionally **ephemeral**) **auth key**.
+2. Set it in `.env`: `TS_AUTHKEY=tskey-...` (the installer's Docker branch prompts
+   for this). `TS_STATE_DIR` is optional and defaults to `/var/lib/tailscale`.
+3. To expose the receiver to the public internet for TradingView, enable **Funnel**
+   for your tailnet (admin console → **DNS/Settings**; Funnel must be allowed in the
+   tailnet's ACL). The serve config already requests Funnel on `:443`.
+
+With `.env`, `shadow-config.json`, and `TS_AUTHKEY` in place:
 
 ```bash
 docker compose up -d --build
 docker compose ps
-docker compose logs --tail=30 receiver    # check the receiver booted cleanly
+docker compose logs --tail=30 receiver      # check the receiver booted cleanly
+docker compose logs --tail=30 tailscale     # confirm the node authed + serve/funnel is up
 curl -sf http://127.0.0.1:8891/health && echo " receiver OK"
 curl -sf http://127.0.0.1:8098/health && echo " dashboard OK"
 ```
 
-To stop later: `docker compose down` (the `hermx-data` volume and your ledgers survive).
+Your stable webhook URL is `https://hermx.<tailnet>.ts.net/webhook`. To stop later:
+`docker compose down` (the `hermx-data`, `hermx-state`, and `tailscale-state` volumes
+and your ledgers/state/node identity survive).
 
-> **Not for Mac.** Docker Desktop for Mac does **not** implement `network_mode: host` the way Linux
-> does — the containers can't reach the host loopback, so the `/health` probes and Tailscale Funnel
-> forwarding won't work. On a Mac, use **Option A** (foreground) instead.
+> **Host-networking fallback.** If the host already runs Tailscale (so the
+> receiver/dashboard on `127.0.0.1` are reachable on the tailnet without a sidecar),
+> use the legacy compose instead: `docker compose -f docker-compose.host.yml up -d`.
+> That file keeps `network_mode: host` and has no tunnel sidecar. Docker Desktop for
+> Mac does **not** implement `network_mode: host` the way Linux does, so the fallback
+> is Linux-only; the default bridge compose works anywhere Docker runs.
+
+#### Migrating an existing Docker deployment
+
+If you are upgrading a host that previously ran the old `network_mode: host` compose:
+
+- **Volume ownership.** Containers now run as uid/gid `10001` (`hermx`), so the
+  pre-existing `hermx-data` volume (written by root before) must be re-owned once:
+
+  ```bash
+  docker compose down
+  docker run --rm -v hermx_hermx-data:/v alpine chown -R 10001:10001 /v
+  docker compose up -d --build
+  ```
+
+  (Replace `hermx_hermx-data` with the actual volume name from `docker volume ls`;
+  Compose prefixes it with the project directory name.)
+- **State snapshots.** The four mutable JSON files (`paper-state.json`,
+  `control-state.json`, `seen-signals.json`, `latest.json`) were **never persisted**
+  in the old compose — they lived inside the container and were lost on every
+  recreate. There is therefore **nothing to migrate**: the new `hermx-state` volume
+  starts empty and the receiver rebuilds state from the journaled ledgers on boot.
 
 **✅ Verify Phase 5:** Both `/health` endpoints return success. If either fails, check logs
 (`journalctl`, `docker compose logs`, or the terminal output) and resolve before continuing — see
@@ -691,8 +757,8 @@ For **every** alert, also give the user:
 
 ### 7.e Test the webhook manually
 
-Confirm the receiver accepts a well-formed payload before relying on TradingView. With
-`OKX_SUBMIT_ORDERS=false` this is validated and ledgered but **never** sent to the exchange:
+Confirm the receiver accepts a well-formed payload before relying on TradingView. In demo
+(`execution_mode: "demo"`) this is validated and ledgered but **never** sent to a live account:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8891/webhook \
@@ -731,7 +797,7 @@ Run every check and report status to the user:
 - [ ] **At least one strategy enabled** — confirmed in `ENABLED_STRATEGIES.txt`
 - [ ] **TradingView alert configured for each enabled strategy** (BUY + SELL)
 - [ ] **Synthetic webhook accepted** and visible on the dashboard
-- [ ] **Master gate still off** — `grep OKX_SUBMIT_ORDERS .env` shows `false`
+- [ ] **Live switch still off** — `grep HERMX_LIVE_TRADING .env` shows `false` (or unset)
 - [ ] **Hermes agent running** (if installed) — `hermes skills list | grep hermx-control`
 - [ ] **Telegram bot responding** (if installed) — replies to "are you there?"
 
@@ -745,28 +811,29 @@ Receiver:     http://localhost:8891
 Strategies:   btcusdt_duo_base_dev_2h, ethusdt_duo_base_dev_2h, solusdt_duo_base_dev_3h, xrpusdt_duo_base_dev_4h
 Exchange:     OKX (demo / simulated)
 Telegram:     @<bot_username>
-Submit gate:  OKX_SUBMIT_ORDERS=false  (demo, nothing sent to exchange)
+Live switch:  HERMX_LIVE_TRADING=false  (demo, nothing sent to a live account)
 
 Next step: Fire a test alert from TradingView and confirm it appears in the dashboard.
 ```
 
-### Enabling demo order submission later (only when the user asks)
+### Enabling LIVE execution later (only when the user asks)
 
-After synthetic tests pass and the user explicitly wants OKX demo execution, flip the master gate
-(the other two gates already ship `true`):
+Demo strategies (`execution_mode: "demo"`, `submit_orders: true`) already route to the exchange
+**sandbox** account — no real money, nothing to flip. To move a strategy to the **real** account,
+after synthetic tests pass and the user explicitly asks:
 
 ```bash
-# 1) In .env:                OKX_SUBMIT_ORDERS=true
-# 2) Confirm shadow-config.json: execution.submit_orders=true
-# 3) Confirm each strategy:      submit_orders=true
+# 1) In the strategy JSON:   "execution_mode": "live"   (was "demo")
+# 2) In .env:                HERMX_LIVE_TRADING=true     (global live switch; unset/false = disabled)
+# 3) Confirm the strategy:   "submit_orders": true
 # 4) Restart the receiver:
 sudo systemctl restart hermx-receiver      # systemd
 # or
 docker compose restart receiver            # docker
 ```
 
-This still trades only the **demo/sandbox** account (`OKX_SIMULATED_TRADING=1`). Never set this to
-live in this guide.
+A `live` strategy submits to the real account ONLY when `HERMX_LIVE_TRADING` is truthy; otherwise the
+order is blocked (`live_trading_disabled`). Never enable live unless the user explicitly asks.
 
 ---
 
@@ -791,12 +858,20 @@ live in this guide.
 - **Exchange API keys wrong**: the receiver can't authenticate to the exchange. Re-check you created
   the keys in the **demo/sandbox/testnet** environment, that the passphrase matches, and that the
   right variables are filled for your chosen exchange (`OKX_DEMO_*`, `KUCOIN_PAPER_*`,
-  `BYBIT_TESTNET_*`). For OKX confirm `OKX_SIMULATED_TRADING=1`.
-- **Orders never submit even with valid alerts**: check all three gates — `OKX_SUBMIT_ORDERS=true`
-  in `.env`, `execution.submit_orders=true` in `shadow-config.json`, and `submit_orders=true` in the
-  strategy file. Any `false` blocks submission **by design**.
+  `BYBIT_TESTNET_*`). Demo strategies route to the sandbox via `execution_mode: "demo"` — no `OKX_SIMULATED_TRADING` flag is needed.
+- **Orders never submit even with valid alerts**: check `submit_orders: true` in the strategy file;
+  for a `live` strategy also confirm `HERMX_LIVE_TRADING=true` in `.env`. A demo strategy with
+  `submit_orders: true` routes to the sandbox automatically. Any `false`/disabled control blocks
+  submission **by design**.
 - **Dashboard reads fail / agent says UNKNOWN**: `HERMX_DASH_AUTH=true` but no token supplied —
   either set `HERMX_DASH_AUTH=false` (loopback) or pass `HERMX_DASH_AUTH_TOKEN` via the
   `X-Dashboard-Token` header.
 - **Docker healthcheck unhealthy**: `docker compose logs receiver` for the boot error; confirm
-  `.env` is present and readable and that `network_mode: host` is supported on the host.
+  `.env` and `shadow-config.json` are present and readable (both are bind-mounted into the
+  containers). The default compose uses bridge networking, so the host probes
+  `127.0.0.1:8891`/`:8098` via the published ports; only `docker-compose.host.yml` uses
+  `network_mode: host` (Linux-only).
+- **Tailscale sidecar won't connect (Docker)**: `docker compose logs tailscale`. Confirm `TS_AUTHKEY`
+  is set in `.env` and still valid (reusable/ephemeral keys expire), and that Funnel is allowed in
+  your tailnet ACL — the sidecar serves per `config/tailscale/serve.json` (Funnel on `:443`,
+  tailnet-only dashboard on `:8443`).

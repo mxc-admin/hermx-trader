@@ -39,6 +39,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ROOT = Path(os.environ.get("SHADOW_ROOT", REPO_ROOT))
 LOGS = ROOT / "logs"
 PORT = int(os.environ.get("CLEAN_DASHBOARD_PORT", "8098"))
+# Address the dashboard HTTP server binds to. Default 127.0.0.1 keeps
+# bare-host/systemd deploys loopback-only (unchanged); the Docker bridge compose
+# sets HERMX_BIND_HOST=0.0.0.0 so the container is reachable on the host port map.
+HERMX_BIND_HOST = (os.environ.get("HERMX_BIND_HOST") or "127.0.0.1").strip() or "127.0.0.1"
 DASH_AUTH_ENABLED = (os.environ.get("HERMX_DASH_AUTH") or "true").strip().lower() not in {"0", "false", "no", ""}
 DASH_AUTH_TOKEN = (os.environ.get("HERMX_DASH_AUTH_TOKEN") or "").strip()
 BACKFILL_FILE = ROOT / "research" / "mxc-backfill-jun11-jun16.json"
@@ -2061,4 +2065,4 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     if DASH_AUTH_ENABLED and not DASH_AUTH_TOKEN:
         print("[dashboard] HERMX_DASH_AUTH enabled but HERMX_DASH_AUTH_TOKEN is blank; failing closed with 401 for protected routes.", file=sys.stderr)
-    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    ThreadingHTTPServer((HERMX_BIND_HOST, PORT), Handler).serve_forever()

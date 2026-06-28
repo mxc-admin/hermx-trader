@@ -160,8 +160,10 @@ pick_exchange() {
     set_env "OKX_FORCE_IPV4" "1"
   fi
 
-  # Select the matching DISARMED runtime profile -> shadow-config.json.
+  # Select the matching DISARMED runtime profile -> shadow-config.json. OKX is the
+  # reference venue and ships as the generic config/runtime.demo.json (no okx-suffixed file).
   local cfg="config/runtime.${ex_id}.demo.json"
+  [[ "$ex_id" == "okx" ]] && cfg="config/runtime.demo.json"
   if [[ -f "$cfg" ]]; then
     cp "$cfg" shadow-config.json
     ok "Copied $cfg -> shadow-config.json"
@@ -282,7 +284,7 @@ if [[ "$WRITE_ENV" == "true" ]]; then
   fi
 
   chmod 600 "$ENV_FILE"
-  ok ".env written, submit_orders=false (safe by default)"
+  ok ".env written, HERMX_LIVE_TRADING=false (safe by default)"
 else
   ok "Skipped .env configuration."
 fi
@@ -296,7 +298,9 @@ ENABLED_FILE="$REPO_ROOT/ENABLED_STRATEGIES.txt"
 : > "$ENABLED_FILE"
 enabled_count=0
 
-# tiny JSON field reader (string or number) without requiring jq
+# tiny JSON field reader (string or number) without requiring jq. Supports
+# dotted paths for the schema_version 2 nested blocks (e.g. capital.budget_usd,
+# instrument.inst_id).
 json_get() {
   local file="$1" key="$2"
   $PY - "$file" "$key" <<'PYEOF'
@@ -304,7 +308,9 @@ import json, sys
 try:
     with open(sys.argv[1]) as fh:
         data = json.load(fh)
-    val = data.get(sys.argv[2], "")
+    val = data
+    for part in sys.argv[2].split("."):
+        val = val.get(part, "") if isinstance(val, dict) else ""
     print(val if val is not None else "")
 except Exception:
     print("")
@@ -319,24 +325,28 @@ if (( ${#strategy_files[@]} == 0 )); then
   warn "No strategy files found under strategies/ — skipping."
 else
   for f in "${strategy_files[@]}"; do
+    # schema_version 2 strategy files: instrument + budget live in nested blocks,
+    # and there is no asset/status field. Derive the display asset from the id.
     sid="$(json_get "$f" strategy_id)"
-    asset="$(json_get "$f" asset)"
-    budget="$(json_get "$f" budget_usd)"
+    inst="$(json_get "$f" instrument.inst_id)"
+    budget="$(json_get "$f" capital.budget_usd)"
     lev="$(json_get "$f" leverage)"
-    status="$(json_get "$f" status)"
+    mode="$(json_get "$f" execution_mode)"
+    submit="$(json_get "$f" submit_orders)"
+    asset="$(printf '%s' "${sid%%_*}" | tr '[:lower:]' '[:upper:]')"
     echo
     info "Strategy: ${BOLD}${sid}${RESET}"
-    info "  asset=$asset  budget_usd=$budget  leverage=${lev}x  status=$status"
+    info "  asset=$asset  inst=$inst  budget_usd=$budget  leverage=${lev}x  execution_mode=$mode  submit_orders=$submit"
     if ask "Enable this strategy?" "y"; then
       # Confirm risk params (display only; editing JSON is left to the operator).
       if ! ask "Keep budget \$$budget and ${lev}x leverage?" "y"; then
-        warn "To change risk, edit $f directly (budget_usd / leverage), then re-run."
+        warn "To change risk, edit $f directly (capital.budget_usd / leverage), then re-run."
       fi
       printf '%s %s %s\n' "$sid" "$asset" "$(json_get "$f" timeframe)" >> "$ENABLED_FILE"
       enabled_count=$((enabled_count + 1))
       ok "Enabled $sid"
     else
-      info "Skipped $sid (set status to disabled in $f to keep it inert)."
+      info "Skipped $sid (set submit_orders=false in $f to keep it inert)."
     fi
   done
 fi
@@ -414,9 +424,49 @@ if [[ "$IS_VPS" == "true" ]]; then
 
   if [[ "$deploy_choice" =~ ^[Bb] ]]; then
     if have docker; then
-      info "Building and starting containers..."
-      docker compose up -d --build
-      ok "Docker services started."
+      # Pre-flight: both files are bind-mounted read-only into the containers, so
+      # a missing file makes `docker compose up` fail with an opaque mount error.
+      preflight_ok="true"
+      if [[ ! -f "$REPO_ROOT/shadow-config.json" ]]; then
+        err "shadow-config.json is missing — it is bind-mounted into both containers."
+        err "Re-run Phase 3 (exchange picker) or copy a config/runtime.*.demo.json profile."
+        preflight_ok="false"
+      else
+        ok "Pre-flight: shadow-config.json present."
+      fi
+      if [[ ! -f "$ENV_FILE" ]]; then
+        err ".env is missing — run Phase 2 (Configure .env) first."
+        preflight_ok="false"
+      else
+        ok "Pre-flight: .env present."
+      fi
+
+      if [[ "$preflight_ok" != "true" ]]; then
+        err "Aborting Docker deploy until the pre-flight items above are fixed."
+      else
+        # Tailscale is the public ingress for the Docker deploy: the bridge compose
+        # ships a tailscale sidecar that Funnels the receiver and serves the
+        # dashboard over the tailnet. cloudflared is not used.
+        info "Public ingress: Tailscale (tailscale sidecar, default for Docker)."
+        info "Generate a reusable/ephemeral auth key in the Tailscale admin console"
+        info "(Settings -> Keys). The sidecar joins your tailnet as 'hermx' and"
+        info "Funnels https -> receiver:8891; the dashboard is tailnet-only on :8443."
+        if ask "Configure the Tailscale auth key (TS_AUTHKEY) now?" "y"; then
+          read -r -p "  Tailscale auth key (tskey-...): " ts_authkey
+          if [[ -n "${ts_authkey:-}" ]]; then
+            set_env "TS_AUTHKEY" "$ts_authkey"
+            ok "TS_AUTHKEY saved to .env (the tailscale sidecar will use it)."
+          else
+            warn "No key entered — the tailscale sidecar will not connect until TS_AUTHKEY is set in .env."
+          fi
+        else
+          info "Skipped — set TS_AUTHKEY in .env later, or use docker-compose.host.yml (host Tailscale)."
+        fi
+
+        info "Building and starting containers (bridge networking + tailscale)..."
+        docker compose up -d --build
+        ok "Docker services started."
+      fi
     else
       err "Docker is not installed. Install it (curl -fsSL https://get.docker.com | sh) and re-run,"
       err "or choose the systemd path instead."

@@ -1,0 +1,24 @@
+{
+  "//": "Tailscale serve/funnel config consumed by the tailscale sidecar (TS_SERVE_CONFIG).",
+  "//receiver": "443 is PUBLIC via Funnel — TradingView posts to https://<node>.<tailnet>.ts.net/webhook -> receiver:8891.",
+  "//dashboard": "8443 is tailnet-only (no funnel) — operators on the tailnet reach the read-only dashboard at https://<node>.<tailnet>.ts.net:8443/ -> dashboard:8098.",
+  "TCP": {
+    "443": { "HTTPS": true },
+    "8443": { "HTTPS": true }
+  },
+  "Web": {
+    "${TS_CERT_DOMAIN}:443": {
+      "Handlers": {
+        "/": { "Proxy": "http://receiver:8891" }
+      }
+    },
+    "${TS_CERT_DOMAIN}:8443": {
+      "Handlers": {
+        "/": { "Proxy": "http://dashboard:8098" }
+      }
+    }
+  },
+  "AllowFunnel": {
+    "${TS_CERT_DOMAIN}:443": true
+  }
+}

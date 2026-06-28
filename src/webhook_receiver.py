@@ -73,6 +73,10 @@ from strategy.decision_math import (  # noqa: E402  pure decision math (re-expor
 )
 
 PORT = int(os.environ.get("SHADOW_PORT", "8891"))
+# Address the HTTP server binds to. Default 127.0.0.1 keeps bare-host/systemd
+# deploys loopback-only (unchanged behavior); the Docker bridge compose sets
+# HERMX_BIND_HOST=0.0.0.0 so the container is reachable on the compose network.
+HERMX_BIND_HOST = (os.environ.get("HERMX_BIND_HOST") or "127.0.0.1").strip() or "127.0.0.1"
 SECRET = (os.environ.get("SHADOW_WEBHOOK_SECRET") or "").strip()
 HERMX_REQUIRE_HMAC = (os.environ.get("HERMX_REQUIRE_HMAC") or "false").strip().lower() in {"1", "true", "yes"}
 HERMX_WEBHOOK_HMAC_KEY = (os.environ.get("HERMX_WEBHOOK_HMAC_KEY") or "").strip()
@@ -89,12 +93,17 @@ HERMX_WATCHDOG_STALE_SECONDS = float(os.environ.get("HERMX_WATCHDOG_STALE_SECOND
 HERMX_QUEUE_LAG_SLO_SECONDS = float(os.environ.get("HERMX_QUEUE_LAG_SLO_SECONDS", "30") or "30")
 ROOT = Path(os.environ.get("SHADOW_ROOT", Path(__file__).resolve().parents[1]))
 LOG_DIR = ROOT / "logs"
-LATEST_FILE = ROOT / "latest.json"
+# Mutable per-process state snapshots live under DATA_DIR so they can be mapped
+# to a dedicated, persistent location (a named volume under Docker) independent
+# of the read-only config/strategies mounts. Default == ROOT, so bare-host
+# deploys keep writing the four JSON files alongside the repo (unchanged).
+DATA_DIR = Path(os.environ.get("HERMX_DATA_DIR", ROOT))
+LATEST_FILE = DATA_DIR / "latest.json"
 WEBHOOK_LEDGER = LOG_DIR / "shadow-webhooks.jsonl"
 RAW_INTAKE_LEDGER = LOG_DIR / "shadow-intake.jsonl"
 DECISION_LEDGER = LOG_DIR / "shadow-decisions.jsonl"
-PAPER_STATE_FILE = ROOT / "paper-state.json"
-CONTROL_STATE_FILE = ROOT / "control-state.json"
+PAPER_STATE_FILE = DATA_DIR / "paper-state.json"
+CONTROL_STATE_FILE = DATA_DIR / "control-state.json"
 PAPER_TRADES_LEDGER = LOG_DIR / "paper-trades.jsonl"
 PROCESSING_ERROR_LEDGER = LOG_DIR / "shadow-processing-errors.jsonl"
 # Phase 1 task 1/2 (REFACTOR_PLAN.md:202-206): durable, append-only position
@@ -197,7 +206,7 @@ _PRESENT_ORDER_STATES = frozenset({"live", "partially_filled", "filled", "cancel
 # only set/logged -- it never hard-blocks the disabled/observe-only path.
 RECONCILE_STARTUP_COMPLETE = False
 RECONCILE_STARTUP_AT: "str | None" = None
-SIGNAL_STATE_FILE = ROOT / "seen-signals.json"
+SIGNAL_STATE_FILE = DATA_DIR / "seen-signals.json"
 SIGNAL_DEDUPE_LEDGER = LOG_DIR / "seen-signals.jsonl"
 DUPLICATE_LEDGER = LOG_DIR / "shadow-duplicates.jsonl"
 TAB_HEALTH_LEDGER = LOG_DIR / "tab-health.jsonl"
@@ -445,6 +454,7 @@ def load_strategy_files() -> dict:
 STRATEGIES = load_strategy_files()
 
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 PROCESS_QUEUE: queue.Queue[tuple] = queue.Queue(maxsize=max(1, HERMX_QUEUE_MAXSIZE))
 _RATE_LIMIT_LOCK = threading.Lock()
 _RATE_LIMIT_BUCKETS: dict[str, list[float]] = {}
@@ -3936,8 +3946,8 @@ def main():
         threading.Thread(target=worker_loop, args=(worker_name,), daemon=True, name=worker_name).start()
     if HERMX_WATCHDOG_ENABLED:
         threading.Thread(target=liveness_watchdog_loop, daemon=True, name="watchdog").start()
-    server = HTTPServer(("127.0.0.1", PORT), Handler)
-    logging.info("MXC VPS shadow receiver listening on 127.0.0.1:%s", PORT)
+    server = HTTPServer((HERMX_BIND_HOST, PORT), Handler)
+    logging.info("MXC VPS shadow receiver listening on %s:%s", HERMX_BIND_HOST, PORT)
     server.serve_forever()
 
 

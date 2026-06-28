@@ -28,7 +28,10 @@ def main() -> int:
         if not (ROOT / rel).exists():
             failures.append(f"missing required file: {rel}")
 
-    for path in ROOT.rglob("*.json"):
+    json_paths = list(ROOT.glob("*.json"))
+    for subdir in ("config", "schemas", "strategies"):
+        json_paths.extend((ROOT / subdir).rglob("*.json"))
+    for path in json_paths:
         try:
             json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
@@ -41,8 +44,8 @@ def main() -> int:
             failures.append(f"python compile failed: {path.relative_to(ROOT)}: {exc}")
 
     strategies = sorted((ROOT / "strategies").glob("*.json"))
-    if len(strategies) != 4:
-        failures.append(f"expected 4 strategy files, found {len(strategies)}")
+    if len(strategies) < 1:
+        failures.append(f"expected at least 1 strategy file, found {len(strategies)}")
 
     if failures:
         print("Package validation failed:")

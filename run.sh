@@ -126,6 +126,65 @@ load_env() {
 load_env
 
 # ---------------------------------------------------------------------------
+# Dashboard auth token: generate if missing, rotate every 60 days
+# ---------------------------------------------------------------------------
+# Idempotently upsert KEY=VALUE in $ROOT/.env
+set_env() {
+  local key="$1"; shift
+  local val="$*"
+  local tmp
+  tmp="$(mktemp)"
+  if [[ -f "$ROOT/.env" ]]; then
+    grep -v "^${key}=" "$ROOT/.env" > "$tmp" 2>/dev/null || true
+  fi
+  printf '%s=%s\n' "$key" "$val" >> "$tmp"
+  mv "$tmp" "$ROOT/.env"
+  chmod 600 "$ROOT/.env" 2>/dev/null || true
+}
+
+ensure_dashboard_token() {
+  local auth_enabled="${HERMX_DASH_AUTH:-true}"
+  [[ "${auth_enabled,,}" =~ ^(false|0|no|)$ ]] && return 0
+
+  local now_epoch max_age created_at token
+  now_epoch=$(date +%s)
+  max_age=$((60 * 60 * 24 * 60))  # 60 days
+  created_at="${HERMX_DASH_AUTH_TOKEN_CREATED_AT:-}"
+
+  if [[ -z "${HERMX_DASH_AUTH_TOKEN:-}" ]]; then
+    if have openssl; then
+      token="$(openssl rand -hex 24)"
+    else
+      token="$(python3 -c 'import secrets, sys; sys.stdout.write(secrets.token_hex(24))' 2>/dev/null || python -c 'import secrets, sys; sys.stdout.write(secrets.token_hex(24))')"
+    fi
+    set_env "HERMX_DASH_AUTH_TOKEN" "$token"
+    set_env "HERMX_DASH_AUTH_TOKEN_CREATED_AT" "$now_epoch"
+    export HERMX_DASH_AUTH_TOKEN="$token"
+    export HERMX_DASH_AUTH_TOKEN_CREATED_AT="$now_epoch"
+    ok "Generated dashboard auth token"
+  elif [[ -z "$created_at" ]]; then
+    set_env "HERMX_DASH_AUTH_TOKEN_CREATED_AT" "$now_epoch"
+    export HERMX_DASH_AUTH_TOKEN_CREATED_AT="$now_epoch"
+    info "Recorded dashboard auth token creation date"
+  elif [[ $((now_epoch - created_at)) -gt $max_age ]]; then
+    if have openssl; then
+      token="$(openssl rand -hex 24)"
+    else
+      token="$(python3 -c 'import secrets, sys; sys.stdout.write(secrets.token_hex(24))' 2>/dev/null || python -c 'import secrets, sys; sys.stdout.write(secrets.token_hex(24))')"
+    fi
+    set_env "HERMX_DASH_AUTH_TOKEN" "$token"
+    set_env "HERMX_DASH_AUTH_TOKEN_CREATED_AT" "$now_epoch"
+    export HERMX_DASH_AUTH_TOKEN="$token"
+    export HERMX_DASH_AUTH_TOKEN_CREATED_AT="$now_epoch"
+    ok "Rotated dashboard auth token (older than 60 days)"
+  else
+    export HERMX_DASH_AUTH_TOKEN
+  fi
+}
+
+ensure_dashboard_token
+
+# ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
 : "${SHADOW_PORT:=8891}"
@@ -330,7 +389,8 @@ SUMMARY
 
 if [[ "$HONOR_SUBMIT" != true ]]; then
   cat <<SUMMARY
-  ${YELLOW}Order submission is BLOCKED in this run (kill switch armed).${RESET}
+  ${YELLOW}Live submission is BLOCKED (HERMX_LIVE_TRADING=false); demo/paper orders${RESET}
+  ${YELLOW}may still submit if a strategy has submit_orders=true.${RESET}
   Pass --honor-submit to let .env / shadow-config.json control submission.
 SUMMARY
 fi

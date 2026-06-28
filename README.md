@@ -11,6 +11,8 @@ It can never size a trade, override a gate, or call an exchange directly.
 Execution runs through CCXT across eight venues — **OKX** (recommended, fully tested), Binance, Bybit,
 KuCoin, Bitget, Gate.io, Coinbase Advanced, and Hyperliquid — all implemented. Public TradingView alerts reach a loopback-only receiver
 through a **Tailscale Funnel** — a stable HTTPS URL with no domain to buy and no firewall ports to open.
+The Docker deploy uses bridge networking with a **Tailscale** sidecar for the same ingress — Funnel for the
+receiver, tailnet-only serve for the dashboard (see [INSTALL.md](INSTALL.md) → *Option B — Docker*).
 
 ## How it works
 
@@ -32,7 +34,7 @@ signals over Telegram. All risk policy stays in Python — the LLM is advisory a
 - **Fail-closed safety** — an order submits only when its strategy sets `submit_orders: true`; `execution_mode` selects demo vs. live, and live also requires the global `HERMX_LIVE_TRADING` kill switch. Anything missing disarms.
 - **Loopback-only servers** — receiver and dashboard bind `127.0.0.1`; nothing is exposed directly.
 - **Stable URL, no domain** — Tailscale Funnel gives a free, reboot-surviving HTTPS endpoint.
-- **Supervised services** — runs under systemd (VPS) or Docker, auto-restarting on failure.
+- **Supervised services** — runs under systemd (VPS) or Docker, auto-restarting on failure. The Docker compose adds bridge networking, a non-root (uid 10001) runtime, read-only config/strategy mounts, and a Tailscale sidecar for ingress; `docker-compose.host.yml` keeps the host-networking path (uses the host's own Tailscale).
 - **Low-frequency by design** — 1–2 signals/day on 2h–4h strategies; not a high-frequency bot.
 
 ## Quick Start
