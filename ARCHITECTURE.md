@@ -297,6 +297,35 @@ A `hermes gateway` (native Telegram support) loads the `hermx-control` skill so 
 
 ## 8. Deployment
 
+### 8.0 Host topology
+
+On a production VPS, **two separate units run on the same host** and communicate only via loopback:
+
+```text
+VPS Host  (Ubuntu 22.04)
+│
+├── HermX  [Docker / systemd]                        ← the money-safety plane
+│   ├── receiver   127.0.0.1:8891  (webhook_receiver.py)
+│   └── dashboard  127.0.0.1:8098  (dashboard.py)
+│
+└── Hermes Agent  [native install, ~/.hermes/]        ← the conversational plane
+    ├── hermx-control skill  →  GET/POST 127.0.0.1:8891/:8098  (loopback only)
+    ├── hermes gateway  →  Telegram bot  (persistent service, systemd on Linux)
+    └── ~/.hermes/.env  (LLM provider key, TELEGRAM_BOT_TOKEN — never in HermX .env)
+
+External
+├── TradingView  →  Tailscale Funnel  →  :8891/webhook   (alerts, one-way)
+└── Operator     →  Telegram          →  Hermes gateway  →  :8891/:8098 (loopback)
+```
+
+**Why Hermes is native, not in the Docker image:**
+- Hermes is ~2.6 GB (own venv, Node runtime, model caches) — bloats the trading image unnecessarily.
+- It carries durable per-user state (`state.db`, `sessions/`, `memories/`, `auth.json`) that cannot be baked into an immutable image layer.
+- The two components have independent release cycles — `hermes update` must not force a HermX redeploy.
+- Both units on the same host → loopback binding works with zero additional networking.
+
+**Dev/Mac:** identical topology — Hermes installed in `~/.hermes/`, HermX in `.venv` or Docker, both on localhost. The `tradingview-bridge` MCP server (Mac-only) additionally lets Hermes read live chart state from TradingView Desktop, but this is advisory-only and absent on a headless VPS.
+
 ### 8.1 Process supervision
 
 Two supervision modes run the *same* source. Both bind `127.0.0.1`.
