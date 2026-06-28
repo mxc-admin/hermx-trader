@@ -167,16 +167,6 @@ ensure_secret() {
     return
   fi
 
-  # Migration shim: a pre-unification install only has HERMX_DASH_AUTH_TOKEN. Adopt
-  # it as HERMX_SECRET so the webhook + dashboard keep authenticating unchanged.
-  if [[ -z "${HERMX_SECRET:-}" && -n "${HERMX_DASH_AUTH_TOKEN:-}" ]]; then
-    secret="$HERMX_DASH_AUTH_TOKEN"
-    set_env "HERMX_SECRET" "$secret"
-    export HERMX_SECRET="$secret"
-    warn "Adopted legacy HERMX_DASH_AUTH_TOKEN as HERMX_SECRET (migrate your .env to HERMX_SECRET)."
-    return
-  fi
-
   if [[ -z "${HERMX_SECRET:-}" ]]; then
     secret="$(gen_secret)"
     set_env "HERMX_SECRET" "$secret"
@@ -322,7 +312,7 @@ wait_for_health "http://127.0.0.1:$CLEAN_DASHBOARD_PORT/health" "Dashboard" 30
 # ---------------------------------------------------------------------------
 # Synthetic webhook test (optional)
 # ---------------------------------------------------------------------------
-WEBHOOK_SECRET="${HERMX_SECRET:-${SHADOW_WEBHOOK_SECRET:-}}"
+WEBHOOK_SECRET="${HERMX_SECRET:-}"
 if [[ -n "$WEBHOOK_SECRET" ]]; then
   info "Sending synthetic test alert..."
   response=$(curl -s -w "\n%{http_code}" -X POST \

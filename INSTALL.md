@@ -234,12 +234,9 @@ and use it to log into the dashboard.
 > `run.sh` generates `HERMX_SECRET` automatically on first run if it is blank, and `bash run.sh
 > --new-secret` regenerates it on demand. There is no automatic time-based rotation.
 
-> **Migrating from the old two-secret layout.** Earlier releases used a separate
-> `SHADOW_WEBHOOK_SECRET` (webhook) and `HERMX_DASH_AUTH_TOKEN` (dashboard). Both are still
-> accepted as fallbacks: if `HERMX_SECRET` is blank, the receiver honours
-> `SHADOW_WEBHOOK_SECRET` and the dashboard honours `HERMX_DASH_AUTH_TOKEN`. `run.sh` also
-> adopts an existing `HERMX_DASH_AUTH_TOKEN` as `HERMX_SECRET` on first run. To migrate, set a
-> single `HERMX_SECRET` and delete the two legacy keys.
+> **Single secret.** `HERMX_SECRET` is the only source for both webhook and dashboard auth;
+> there are no legacy fallbacks. If it is blank, auth fails closed (every webhook gets `401`
+> and protected dashboard routes return `401`).
 
 ```text
 HERMX_REQUIRE_HMAC=false    # leave false unless you also configure an HMAC key

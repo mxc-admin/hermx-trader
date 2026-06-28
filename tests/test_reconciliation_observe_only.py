@@ -416,3 +416,119 @@ def test_disabled_config_no_reconcile_no_journal(wr, monkeypatch):
     assert "reconcile" not in result
     assert not wr.ORDER_JOURNAL_LEDGER.exists()
     assert wr.load_open_orders() == []
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation feature-flag gates: the three paths share ONE truthiness rule and
+# differ ONLY by their documented default (post-submit OFF, periodic resolver ON).
+# These lock in the shared-helper semantics so the gates can never silently drift.
+# ---------------------------------------------------------------------------
+
+def test_post_submit_gate_defaults_off(wr, monkeypatch):
+    monkeypatch.delenv("HERMX_RECONCILE_ENABLED", raising=False)
+    assert wr.reconcile_post_submit_enabled() is False
+
+
+def test_unknown_resolver_gate_defaults_on(wr, monkeypatch):
+    monkeypatch.delenv("HERMX_UNKNOWN_RESOLVER_ENABLED", raising=False)
+    assert wr.unknown_resolver_enabled() is True
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("1", True), ("true", True), ("yes", True), ("on", True), ("enabled", True),
+    ("false", False), ("0", False), ("no", False), ("", False), ("  FALSE  ", False),
+])
+def test_both_gates_share_identical_truthiness(wr, monkeypatch, value, expected):
+    # Both flags parse a SET value the same way -- only the unset default differs.
+    monkeypatch.setenv("HERMX_RECONCILE_ENABLED", value)
+    monkeypatch.setenv("HERMX_UNKNOWN_RESOLVER_ENABLED", value)
+    assert wr.reconcile_post_submit_enabled() is expected
+    assert wr.unknown_resolver_enabled() is expected
+
+
+# ---------------------------------------------------------------------------
+# OBSERVE-ONLY proof: reconciliation NEVER submits / cancels / auto-trades. The
+# read-only query executor below raises if any state-mutating venue method is hit.
+# ---------------------------------------------------------------------------
+
+class ObserveOnlyStub(StubExecutor):
+    """A read-only query executor that fails loudly if reconciliation ever invokes a
+    state-mutating venue method (submit/cancel/create/place). Completing a test with
+    this stub is itself the proof that the path is observe-only."""
+
+    def _forbidden(self, *args, **kwargs):  # noqa: D401
+        raise AssertionError("reconciliation invoked a state-mutating venue method")
+
+    execute = _forbidden
+    submit = _forbidden
+    cancel = _forbidden
+    cancel_order = _forbidden
+    cancel_all = _forbidden
+    create_order = _forbidden
+    place_order = _forbidden
+
+
+def _no_wait_backoff(wr, monkeypatch):
+    """Inject a no-op sleep into reconcile_order_with_backoff so a live-forever order
+    reaches the UNKNOWN deadline without the test waiting ~7.5s of real backoff."""
+    real = wr.reconcile_order_with_backoff
+    monkeypatch.setattr(
+        wr,
+        "reconcile_order_with_backoff",
+        lambda executor, lookup, **kw: real(executor, lookup, sleep=lambda *_: None, **kw),
+    )
+
+
+def test_startup_reconcile_submitted_to_rejected_observe_only(wr):
+    # An orphaned SUBMITTED order the venue reports as canceled/zero-fill => REJECTED.
+    cl = "mxc-xrpusdt-buy-startup-reject01"
+    intent = {"symbol": "XRPUSDT", "side": "buy", "inst_id": "XRP-USDT-SWAP", "planned_notional_usd": 1500.0, "policy": "weighted_v1"}
+    wr.record_order_state(cl, wr.ORDER_STATE_PLANNED, intent=intent, prev_state=None)
+    wr.record_order_state(cl, wr.ORDER_STATE_SUBMITTED, intent=intent, prev_state=wr.ORDER_STATE_PLANNED)
+
+    stub = ObserveOnlyStub(order=norm_order("canceled", cl_ord_id=cl, acc=0.0), positions=[])
+    summary = wr.reconcile_startup(executor=stub)
+
+    assert summary["open_orders"][0]["outcome"] == wr.ORDER_STATE_REJECTED
+    assert summary["open_orders"][0]["wrote_transition"] is True
+    records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+    states = [r["state"] for r in records if r["cl_ord_id"] == cl]
+    assert states == [wr.ORDER_STATE_PLANNED, wr.ORDER_STATE_SUBMITTED, wr.ORDER_STATE_REJECTED]
+    assert wr.load_open_orders() == []  # REJECTED is terminal
+
+
+def test_startup_reconcile_position_mismatch_never_trades(wr):
+    # Local LONG vs exchange FLAT => alert only; the observe-only stub proves no trade.
+    wr.save_paper_state({
+        "version": 3,
+        "policies": {"weighted_v1": {"label": "w", "symbols": {"XRPUSDT": {"direction": "long"}}, "stats": {}}},
+        "realistic_policies": {}, "compound_policies": {},
+    })
+    stub = ObserveOnlyStub(positions=[])
+    summary = wr.reconcile_startup(executor=stub)
+    assert len(summary["position_mismatches"]) == 1  # detected + alerted, not corrected
+
+
+def test_post_submit_reconcile_is_observe_only(wr, monkeypatch):
+    # The SUBMIT goes through the (separate) CCXT submit executor; the post-submit
+    # RECONCILIATION executor is read-only and must never be asked to trade.
+    cl = "mxc-xrpusdt-buy-abc0123456789de"
+    stub = ObserveOnlyStub(order=norm_order("filled", cl_ord_id=cl, acc=10.0, avg=0.5))
+    result = _force_submit(wr, monkeypatch, stub=stub)
+    assert result["reconcile"]["state"] == wr.ORDER_STATE_FILLED  # completed w/o trading
+
+
+def test_post_submit_reconcile_submitted_to_unknown(wr, monkeypatch):
+    # Exchange order stays "live" through every retry => SUBMITTED -> UNKNOWN, the order
+    # stays open for the periodic resolver, and a mismatch is surfaced.
+    cl = "mxc-xrpusdt-buy-abc0123456789de"
+    _no_wait_backoff(wr, monkeypatch)
+    stub = StubExecutor(order=norm_order("live", cl_ord_id=cl))
+    result = _force_submit(wr, monkeypatch, stub=stub)
+
+    assert result["reconcile"]["state"] == wr.ORDER_STATE_UNKNOWN
+    records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+    states = [r["state"] for r in records if r["cl_ord_id"] == cl]
+    assert states == [wr.ORDER_STATE_PLANNED, wr.ORDER_STATE_SUBMITTED, wr.ORDER_STATE_UNKNOWN]
+    open_orders = wr.load_open_orders()
+    assert len(open_orders) == 1 and open_orders[0]["state"] == wr.ORDER_STATE_UNKNOWN

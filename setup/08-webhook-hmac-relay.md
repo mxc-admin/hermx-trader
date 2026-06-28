@@ -29,4 +29,4 @@ all webhook requests fail closed with `401`.
 - Preserve body bytes exactly between signing and forwarding.
 - Preserve `X-Webhook-Timestamp` from signer to receiver.
 - Ensure relay clocks are synchronized (NTP).
-- Rotate `HERMX_SECRET` (legacy `SHADOW_WEBHOOK_SECRET` still accepted as a fallback) and `HERMX_WEBHOOK_HMAC_KEY` together.
+- Rotate `HERMX_SECRET` and `HERMX_WEBHOOK_HMAC_KEY` together.

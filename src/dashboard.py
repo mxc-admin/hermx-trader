@@ -44,9 +44,9 @@ PORT = int(os.environ.get("CLEAN_DASHBOARD_PORT", "8098"))
 # sets HERMX_BIND_HOST=0.0.0.0 so the container is reachable on the host port map.
 HERMX_BIND_HOST = (os.environ.get("HERMX_BIND_HOST") or "127.0.0.1").strip() or "127.0.0.1"
 DASH_AUTH_ENABLED = (os.environ.get("HERMX_DASH_AUTH") or "true").strip().lower() not in {"0", "false", "no", ""}
-# Unified secret: HERMX_SECRET is the dashboard token (X-Dashboard-Token, Bearer,
-# or Basic password). HERMX_DASH_AUTH_TOKEN is accepted as a legacy fallback.
-DASH_AUTH_TOKEN = (os.environ.get("HERMX_SECRET") or os.environ.get("HERMX_DASH_AUTH_TOKEN") or "").strip()
+# Unified secret: HERMX_SECRET is the sole dashboard token (X-Dashboard-Token,
+# Bearer, or Basic password). Empty/missing => fail closed (protected routes 401).
+DASH_AUTH_TOKEN = (os.environ.get("HERMX_SECRET") or "").strip()
 BACKFILL_FILE = ROOT / "research" / "mxc-backfill-jun11-jun16.json"
 STRATEGIES_DIR = ROOT / "strategies"
 STRATEGY_ALERTS_FILE = LOGS / "strategy-alerts.jsonl"

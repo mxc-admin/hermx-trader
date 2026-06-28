@@ -84,7 +84,7 @@ Every server binds `127.0.0.1` only. The sole public surface is the Tailscale Fu
 2. **Tailscale Funnel** terminates public HTTPS and forwards the request to `127.0.0.1:8891/webhook`.
 3. **Body-size guard** — `Handler.do_POST` rejects `Content-Length > HERMX_MAX_BODY_BYTES` (default 262144) with `413`, before reading the body.
 4. **Rate limit** — `rate_limit_allow()` (`src/security/webhook_auth.py:rate_limit_allow`) applies a sliding window per source key (`X-Webhook-Key-Id` else client IP); over-limit → `429`.
-5. **Authentication** — `authenticate_webhook_request()` requires a constant-time match on `X-Webhook-Secret` (`HERMX_SECRET`; legacy `SHADOW_WEBHOOK_SECRET` still accepted) and, when `HERMX_REQUIRE_HMAC` is set, an `X-Webhook-Signature` HMAC-SHA256 over `timestamp‖body` within `HERMX_REPLAY_WINDOW_SECONDS`. Any failure → `401` and an `AUTH_FAILURE` operator alert.
+5. **Authentication** — `authenticate_webhook_request()` requires a constant-time match on `X-Webhook-Secret` (`HERMX_SECRET`) and, when `HERMX_REQUIRE_HMAC` is set, an `X-Webhook-Signature` HMAC-SHA256 over `timestamp‖body` within `HERMX_REPLAY_WINDOW_SECONDS`. Any failure → `401` and an `AUTH_FAILURE` operator alert.
 6. **Parse + raw-intake ledger.** The JSON body is parsed (`400 invalid_json` on failure) and appended verbatim to `logs/shadow-intake.jsonl` with its `received_at`.
 7. **Enqueue** — `_queue_work_item()` reserves a per-symbol ordering ticket and pushes onto the bounded `PROCESS_QUEUE` (`HERMX_QUEUE_MAXSIZE`, default 200). A full queue → `503 queue_full` plus a `QUEUE_SATURATION` alert. The receiver answers `200 queued` immediately; all heavy work is async.
 8. **Worker dequeue** — `worker_loop()` pulls an item, honors the per-symbol ticket turn (in-order per symbol), takes the symbol lock, and calls `process_payload_async()` → `build_record()`.
@@ -388,10 +388,10 @@ Intelligence is **purely additive** and lives *outside* the money path. Pattern:
 ## 10. Security Model
 
 - **Loopback-only servers.** Receiver (`:8891`) and dashboard (`:8098`) bind `127.0.0.1`; the only public surface is the Tailscale Funnel URL → `:8891/webhook`.
-- **Webhook auth.** Constant-time `X-Webhook-Secret` compare (`HERMX_SECRET`; legacy `SHADOW_WEBHOOK_SECRET` still accepted); optional HMAC-SHA256 over `timestamp‖body` (`HERMX_REQUIRE_HMAC` + `HERMX_WEBHOOK_HMAC_KEY`) with a replay window (`HERMX_REPLAY_WINDOW_SECONDS`). Missing secret (or missing HMAC key when required) **fails closed** — every webhook gets `401`.
+- **Webhook auth.** Constant-time `X-Webhook-Secret` compare (`HERMX_SECRET`); optional HMAC-SHA256 over `timestamp‖body` (`HERMX_REQUIRE_HMAC` + `HERMX_WEBHOOK_HMAC_KEY`) with a replay window (`HERMX_REPLAY_WINDOW_SECONDS`). Missing secret (or missing HMAC key when required) **fails closed** — every webhook gets `401`.
 - **Rate limiting.** Per-source sliding window (`HERMX_RATE_LIMIT_WINDOW_SECONDS`, `HERMX_RATE_LIMIT_MAX_REQUESTS`) → `429`.
 - **Body cap.** `HERMX_MAX_BODY_BYTES` (default 256 KiB) → `413` before the body is read.
-- **Dashboard auth.** Optional, fail-closed: `HERMX_DASH_AUTH` on with a blank `HERMX_SECRET` (legacy `HERMX_DASH_AUTH_TOKEN` still accepted) returns `401` for protected routes. Accepts `X-Dashboard-Token`, `Authorization: Bearer`, or Basic, all constant-time compared.
+- **Dashboard auth.** Optional, fail-closed: `HERMX_DASH_AUTH` on with a blank `HERMX_SECRET` returns `401` for protected routes. Accepts `X-Dashboard-Token`, `Authorization: Bearer`, or Basic, all constant-time compared.
 - **Credentials.** Exchange keys are resolved per-exchange and namespaced (`src/security/credentials.py`); a missing/partial set disarms that venue and never borrows another's keys. Secrets are **never logged** — `redact_secrets()` scrubs known credential values and key/secret/passphrase/token patterns from every error string and adapter payload.
 - **`.env` hygiene.** `chmod 600`, never committed (gitignored); `env_file_permissions_healthy()` warns at boot if it is group/other-readable.
 - **Agent containment.** The agent has no access to `.env`, raw CCXT, or the filesystem for order purposes; its only order path is `POST /webhook`, behind the full gate chain.

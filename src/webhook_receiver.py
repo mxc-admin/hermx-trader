@@ -77,9 +77,10 @@ PORT = int(os.environ.get("SHADOW_PORT", "8891"))
 # deploys loopback-only (unchanged behavior); the Docker bridge compose sets
 # HERMX_BIND_HOST=0.0.0.0 so the container is reachable on the compose network.
 HERMX_BIND_HOST = (os.environ.get("HERMX_BIND_HOST") or "127.0.0.1").strip() or "127.0.0.1"
-# Unified secret: HERMX_SECRET authenticates both the webhook (X-Webhook-Secret)
-# and the dashboard. SHADOW_WEBHOOK_SECRET is accepted as a legacy fallback.
-SECRET = (os.environ.get("HERMX_SECRET") or os.environ.get("SHADOW_WEBHOOK_SECRET") or "").strip()
+# Unified secret: HERMX_SECRET is the sole source authenticating both the webhook
+# (X-Webhook-Secret) and the dashboard. Empty/missing => fail closed (every webhook
+# gets 401; nothing is submitted).
+SECRET = (os.environ.get("HERMX_SECRET") or "").strip()
 HERMX_REQUIRE_HMAC = (os.environ.get("HERMX_REQUIRE_HMAC") or "false").strip().lower() in {"1", "true", "yes"}
 HERMX_WEBHOOK_HMAC_KEY = (os.environ.get("HERMX_WEBHOOK_HMAC_KEY") or "").strip()
 HERMX_REPLAY_WINDOW_SECONDS = float(os.environ.get("HERMX_REPLAY_WINDOW_SECONDS", "300") or "300")
@@ -173,11 +174,21 @@ ORDER_STATE_UNKNOWN = "UNKNOWN"
 # load_open_orders() surfaces to startup reconciliation.
 ORDER_TERMINAL_STATES = frozenset({ORDER_STATE_FILLED, ORDER_STATE_REJECTED})
 ORDER_NON_TERMINAL_STATES = frozenset({ORDER_STATE_PLANNED, ORDER_STATE_SUBMITTED, ORDER_STATE_UNKNOWN})
-# Exchange reconciliation (REFACTOR_PLAN.md:208-215 -- Phase 1 task 4, OBSERVE-ONLY).
-# Reconciliation consumes the Task-3 venue-neutral query interface and the Task-5
-# order journal; it NEVER trades. The post-submit hook is gated behind
-# HERMX_RECONCILE_ENABLED (default OFF => byte-identical to pre-Task-4 behaviour, the
-# observe-only soak posture of :223). Startup reconcile always runs (read-only).
+# Exchange reconciliation (REFACTOR_PLAN.md:208-215 -- Phase 1 task 4 + task 6).
+# OBSERVE-ONLY in every form: reconciliation reads the venue and may update the
+# local order journal and emit alerts, but it NEVER submits, cancels, or auto-trades.
+# It consumes the Task-3 venue-neutral query interface and the Task-5 order journal.
+# There are exactly THREE reconciliation paths, gated and wired independently:
+#   1. STARTUP      reconcile_startup() -- runs once on boot (always; not flag-gated);
+#                   recovers crash-orphaned SUBMITTED orders. Read-only single pass.
+#   2. POST-SUBMIT  inline in ExecutionService.execute(), gated by
+#                   reconcile_post_submit_enabled() (HERMX_RECONCILE_ENABLED, default
+#                   OFF => byte-identical to pre-Task-4 stdout-driven outcome, :223).
+#   3. PERIODIC     unknown_resolver_loop() -- a daemon thread polling every ~30s,
+#                   gated by unknown_resolver_enabled() (HERMX_UNKNOWN_RESOLVER_ENABLED,
+#                   default ON); re-reconciles still-open SUBMITTED/UNKNOWN orders.
+# "read-only" above means read-only against the EXCHANGE: all three may persist a
+# legal SUBMITTED/UNKNOWN -> terminal transition to the local order journal.
 RECONCILE_ALERT_LEDGER = LOG_DIR / "reconcile-alerts.jsonl"
 RECONCILE_ALERT_MISMATCH = "RECONCILE_MISMATCH"
 RECONCILE_ALERT_RESOLVER_TIMEOUT = "UNKNOWN_RESOLVER_TIMEOUT"
@@ -2748,19 +2759,31 @@ def _reconcile_float(value, default=0.0):
         return default
 
 
+# Shared truthiness for the reconciliation feature flags so all three paths gate on
+# IDENTICAL rules and differ only by their documented default. A value in the falsey
+# set (or empty) disables; anything else enables. ``default`` is returned only when
+# the variable is UNSET, so every call site declares its own default explicitly
+# (post-submit OFF, periodic resolver ON) rather than burying it in get(name, "1").
+_RECONCILE_FLAG_FALSEY = frozenset({"false", "0", "no", ""})
+
+
+def _reconcile_flag_enabled(name: str, *, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in _RECONCILE_FLAG_FALSEY
+
+
 def reconcile_post_submit_enabled() -> bool:
-    """Observe-only soak gate for the POST-SUBMIT reconciliation hook (:223).
+    """Observe-only soak gate for the POST-SUBMIT (inline) reconciliation path (:223).
 
     ``HERMX_RECONCILE_ENABLED`` unset/falsey => OFF (the submit path stays
     byte-identical to pre-Task-4: stdout drives the tentative terminal record, no
     query subprocess is spawned). Truthy => the exchange drives the authoritative
-    SUBMITTED->terminal transition (:214 "never trust stdout alone"). Startup
-    reconcile is read-only and runs regardless of this flag.
+    SUBMITTED->terminal transition (:214 "never trust stdout alone"). The STARTUP and
+    PERIODIC paths are gated separately; startup runs regardless of this flag.
     """
-    raw = os.environ.get("HERMX_RECONCILE_ENABLED")
-    if raw is None:
-        return False
-    return raw.strip().lower() not in {"false", "0", "no", ""}
+    return _reconcile_flag_enabled("HERMX_RECONCILE_ENABLED", default=False)
 
 
 def map_order_outcome(order: "dict | None", ordered: "float | None" = None) -> tuple:
@@ -3155,8 +3178,13 @@ def reconcile_startup(executor=None) -> dict:
 
 
 def unknown_resolver_enabled() -> bool:
-    raw = os.environ.get("HERMX_UNKNOWN_RESOLVER_ENABLED", "1")
-    return raw.strip().lower() not in {"false", "0", "no", ""}
+    """Observe-only gate for the PERIODIC background resolver (unknown_resolver_loop).
+
+    Defaults ON (``HERMX_UNKNOWN_RESOLVER_ENABLED`` unset => enabled); a falsey value
+    disables the daemon thread. Like the other two paths it only updates the order
+    journal / emits alerts and never submits, cancels, or auto-trades.
+    """
+    return _reconcile_flag_enabled("HERMX_UNKNOWN_RESOLVER_ENABLED", default=True)
 
 
 def _order_age_seconds(order_record: dict, now_ts: "str | None" = None) -> "float | None":

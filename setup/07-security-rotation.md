@@ -39,6 +39,6 @@ pre-commit run --all-files
 
 ## 5) Webhook key rotation
 
-- Rotate `HERMX_SECRET` (legacy `SHADOW_WEBHOOK_SECRET` still accepted as a fallback) and, if enabled, `HERMX_WEBHOOK_HMAC_KEY` together. The fastest path is `bash run.sh --new-secret`, which regenerates `HERMX_SECRET`.
+- Rotate `HERMX_SECRET` and, if enabled, `HERMX_WEBHOOK_HMAC_KEY` together. The fastest path is `bash run.sh --new-secret`, which regenerates `HERMX_SECRET`.
 - Coordinate sender cutover during a short maintenance window.
 - Keep `HERMX_REQUIRE_HMAC=true` once sender signature delivery is validated.

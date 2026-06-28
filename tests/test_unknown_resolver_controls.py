@@ -72,6 +72,98 @@ def _armed_record(cl: str = "mxc-xrpusdt-buy-abc0123456789de") -> dict:
 
 
 
+class ObserveOnlyStub(StubExecutor):
+    """Read-only query executor that fails if the resolver ever tries to trade."""
+
+    def _forbidden(self, *args, **kwargs):
+        raise AssertionError("periodic resolver invoked a state-mutating venue method")
+
+    execute = _forbidden
+    submit = _forbidden
+    cancel = _forbidden
+    cancel_order = _forbidden
+    create_order = _forbidden
+    place_order = _forbidden
+
+
+def _seed_submitted(wr, cl: str) -> dict:
+    intent = {
+        "symbol": "XRPUSDT",
+        "side": "buy",
+        "inst_id": "XRP-USDT-SWAP",
+        "planned_notional_usd": 1500.0,
+        "policy": "weighted_v1",
+    }
+    wr.record_order_state(cl, wr.ORDER_STATE_PLANNED, intent=intent, prev_state=None)
+    wr.record_order_state(cl, wr.ORDER_STATE_SUBMITTED, intent=intent, prev_state=wr.ORDER_STATE_PLANNED)
+    return intent
+
+
+def _no_wait_backoff(wr, monkeypatch):
+    real = wr.reconcile_order_with_backoff
+    monkeypatch.setattr(
+        wr,
+        "reconcile_order_with_backoff",
+        lambda executor, lookup, **kw: real(executor, lookup, sleep=lambda *_: None, **kw),
+    )
+
+
+def test_resolver_submitted_to_filled_observe_only(wr):
+    # A still-open SUBMITTED order (no intermediate UNKNOWN) the venue reports filled.
+    cl = "mxc-xrpusdt-buy-resolver-fill"
+    _seed_submitted(wr, cl)
+    summary = wr.resolve_unknown_orders_once(executor=ObserveOnlyStub(order=_norm_order("filled", cl_ord_id=cl, acc=10.0)))
+    assert (summary["checked"], summary["resolved"]) == (1, 1)
+    records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+    states = [r["state"] for r in records if r["cl_ord_id"] == cl]
+    assert states == [wr.ORDER_STATE_PLANNED, wr.ORDER_STATE_SUBMITTED, wr.ORDER_STATE_FILLED]
+    assert wr.load_open_orders() == []
+
+
+def test_resolver_submitted_to_rejected(wr):
+    cl = "mxc-xrpusdt-buy-resolver-reject"
+    _seed_submitted(wr, cl)
+    summary = wr.resolve_unknown_orders_once(executor=ObserveOnlyStub(order=_norm_order("canceled", cl_ord_id=cl, acc=0.0)))
+    assert (summary["checked"], summary["resolved"]) == (1, 1)
+    records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+    assert records[-1]["state"] == wr.ORDER_STATE_REJECTED
+    assert wr.load_open_orders() == []
+
+
+def test_resolver_submitted_to_unknown_keeps_order_open(wr, monkeypatch):
+    # Venue order stays "live" through every retry => SUBMITTED -> UNKNOWN, still open.
+    cl = "mxc-xrpusdt-buy-resolver-unknown"
+    _seed_submitted(wr, cl)
+    _no_wait_backoff(wr, monkeypatch)
+    summary = wr.resolve_unknown_orders_once(executor=ObserveOnlyStub(order=_norm_order("live", cl_ord_id=cl)))
+    assert summary["pending"] == 1
+    records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+    states = [r["state"] for r in records if r["cl_ord_id"] == cl]
+    assert states == [wr.ORDER_STATE_PLANNED, wr.ORDER_STATE_SUBMITTED, wr.ORDER_STATE_UNKNOWN]
+    open_orders = wr.load_open_orders()
+    assert len(open_orders) == 1 and open_orders[0]["state"] == wr.ORDER_STATE_UNKNOWN
+
+
+def test_unknown_resolver_loop_ticks_and_stops_on_event(wr, monkeypatch):
+    # The daemon loop ticks resolve_unknown_orders_once() and exits cleanly once the
+    # stop event is set -- the periodic path is bounded and itself never trades. The
+    # fake tick sets the stop event so stop_event.wait() returns immediately.
+    import threading
+
+    ticks = []
+    stop = threading.Event()
+
+    def fake_resolve():
+        ticks.append(1)
+        stop.set()  # end after exactly one tick
+        return {"checked": 0, "resolved": 0, "pending": 0, "expired": 0, "errors": []}
+
+    monkeypatch.setattr(wr, "resolve_unknown_orders_once", fake_resolve)
+    wr.unknown_resolver_loop(stop_event=stop)
+    assert ticks == [1]
+    assert wr._RESOLVER_HEARTBEAT is not None  # heartbeat set for the watchdog
+
+
 def test_unknown_resolver_converges_to_terminal(wr):
     cl = "mxc-xrpusdt-buy-resolver-terminal"
     intent = {

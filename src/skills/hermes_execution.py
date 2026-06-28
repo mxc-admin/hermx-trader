@@ -151,8 +151,11 @@ def build_execution_record(
     service still owns the real gate precedence (kill switch, config/risk gates,
     auth + watchdog health, symbol pause) -- this flag merely expresses intent.
     """
+    execution_mode = str((strategy or {}).get("execution_mode") or "demo").lower()
     readiness = {
         "live_execution_enabled": (mode == "live"),
+        "execution_mode": execution_mode,
+        "simulated_trading": (execution_mode != "live"),
         "symbol": intent.get("symbol"),
         "signal_side": intent.get("side"),
         "inst_id": intent.get("inst_id"),
