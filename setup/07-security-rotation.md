@@ -12,7 +12,7 @@ This prevents one adapter from receiving another exchange's keys.
 
 ## 2) Rotate one exchange at a time
 
-1. Disable submission: `HERMX_SUBMIT_ENABLED=false`
+1. Disable submission: `HERMX_LIVE_TRADING=false`
 2. Update only one exchange block in `.env`
 3. Restart service
 4. Run health checks for that exchange
