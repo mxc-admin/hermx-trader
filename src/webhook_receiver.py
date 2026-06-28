@@ -2592,7 +2592,10 @@ def build_okx_execution_readiness(record: dict, paper_events: list[dict]) -> dic
         },
         "block_reason": None if live_allowed else "OKX execution disabled: dry-run shadow only",
     }
-    append_jsonl(EXECUTION_PLAN_LEDGER, {"received_at": record.get("received_at"), "execution_readiness": canonicalize_decimal_fields(plan)})
+    # EXECUTION_PLAN_LEDGER (execution-plan.jsonl) write removed: the dashboard reads the
+    # authoritative executions.jsonl outcome ledger, nothing consumes the separate plan
+    # ledger. The constant is retained (quarantine sweep + the ledger-constant guard) but
+    # is no longer written.
     return plan
 
 
@@ -2682,7 +2685,10 @@ def build_strategy_execution_readiness(record: dict) -> dict:
         },
         "block_reason": None if live_allowed else "Duo Base Dev strategy trial is not approved for OKX submission",
     }
-    append_jsonl(EXECUTION_PLAN_LEDGER, {"received_at": record.get("received_at"), "execution_readiness": canonicalize_decimal_fields(plan)})
+    # EXECUTION_PLAN_LEDGER (execution-plan.jsonl) write removed: the dashboard reads the
+    # authoritative executions.jsonl outcome ledger, nothing consumes the separate plan
+    # ledger. The constant is retained (quarantine sweep + the ledger-constant guard) but
+    # is no longer written.
     return plan
 
 
@@ -3560,6 +3566,93 @@ def _order_age_seconds(order_record: dict, now_ts: "str | None" = None) -> "floa
     return max(0.0, (now_dt - order_ts).total_seconds())
 
 
+def _resolve_planned_orphan(executor, rec: dict, lookup: dict, age_seconds: "float | None", summary: dict) -> None:
+    """Lifecycle backstop for a crash-orphaned PLANNED order (closes the gap where a
+    PLANNED order could never be resolved: the SUBMITTED/UNKNOWN resolver excluded it and
+    PLANNED->UNKNOWN is illegal).
+
+    Write-ahead ordering guarantees SUBMITTED is journalled BEFORE executor.execute() is
+    called, so a record stuck at PLANNED crashed BEFORE the submit -- it was never sent.
+    Once it is older than PLANNED_ORDER_TIMEOUT_SECONDS we confirm the venue has no record
+    (single read-only pass, no backoff sleeps) and then take the LEGAL PLANNED->REJECTED
+    transition with reason ``never_submitted`` + an operator alert. Idempotency is
+    preserved: the rejected record is terminal, so the deterministic cl_ord_id stays
+    deduped. A still-fresh PLANNED order may be an in-process submit between the two
+    write-ahead writes, so it is left untouched. OBSERVE-ONLY: never submits/cancels."""
+    cl_ord_id = rec.get("cl_ord_id")
+    intent = rec.get("intent") or {}
+    symbol = intent.get("symbol")
+
+    if age_seconds is None or age_seconds <= PLANNED_ORDER_TIMEOUT_SECONDS:
+        summary["pending"] += 1  # still within the in-flight submit window
+        return
+
+    try:
+        outcome = reconcile_order_once(executor, lookup)
+    except Exception as exc:  # pragma: no cover - defensive
+        summary["errors"].append(f"reconcile_planned[{cl_ord_id}]: {exc}")
+        emit_operator_alert(
+            "PLANNED_RESOLVER_ERROR",
+            {"cl_ord_id": cl_ord_id, "symbol": symbol, "error": str(exc)},
+            severity="error",
+        )
+        return
+
+    if _order_is_present(outcome.get("matched_order")):
+        # ANOMALY: the venue knows an order we believe was never sent. Do NOT reject --
+        # promote PLANNED->SUBMITTED (legal) so the standard reconciliation resolves it,
+        # and alert loudly.
+        if order_state_can_transition(ORDER_STATE_PLANNED, ORDER_STATE_SUBMITTED):
+            try:
+                record_order_state(
+                    cl_ord_id,
+                    ORDER_STATE_SUBMITTED,
+                    intent=intent,
+                    detail={"planned_backstop": True, "reason": "planned_found_on_venue", "source": outcome.get("source")},
+                    prev_state=ORDER_STATE_PLANNED,
+                )
+            except (ValueError, OSError) as exc:
+                summary["errors"].append(f"record_planned_submitted[{cl_ord_id}]: {exc}")
+        emit_operator_alert(
+            RECONCILE_ALERT_PLANNED_ON_VENUE,
+            {"cl_ord_id": cl_ord_id, "symbol": symbol, "age_s": round(age_seconds, 3), "source": outcome.get("source")},
+            severity="error",
+        )
+        summary["pending"] += 1
+        return
+
+    # Venue has no record -> never submitted. Legal PLANNED -> REJECTED, idempotency-safe.
+    if order_state_can_transition(ORDER_STATE_PLANNED, ORDER_STATE_REJECTED):
+        try:
+            record_order_state(
+                cl_ord_id,
+                ORDER_STATE_REJECTED,
+                intent=intent,
+                detail={
+                    "planned_backstop": True,
+                    "reason": "never_submitted",
+                    "age_s": round(age_seconds, 3),
+                    "timeout_s": PLANNED_ORDER_TIMEOUT_SECONDS,
+                },
+                prev_state=ORDER_STATE_PLANNED,
+            )
+            summary["resolved"] += 1
+            summary["never_submitted"] += 1
+            emit_operator_alert(
+                RECONCILE_ALERT_PLANNED_ABANDONED,
+                {
+                    "cl_ord_id": cl_ord_id,
+                    "symbol": symbol,
+                    "age_s": round(age_seconds, 3),
+                    "timeout_s": PLANNED_ORDER_TIMEOUT_SECONDS,
+                    "reason": "never_submitted",
+                },
+                severity="warning",
+            )
+        except (ValueError, OSError) as exc:
+            summary["errors"].append(f"record_never_submitted[{cl_ord_id}]: {exc}")
+
+
 def resolve_unknown_orders_once(executor=None, *, now_ts: "str | None" = None, max_orders: "int | None" = None) -> dict:
     """Task 6 periodic resolver pass for open SUBMITTED/UNKNOWN orders.
 
@@ -3573,6 +3666,7 @@ def resolve_unknown_orders_once(executor=None, *, now_ts: "str | None" = None, m
         "resolved": 0,
         "pending": 0,
         "expired": 0,
+        "never_submitted": 0,
         "paused_symbols": [],
         "errors": [],
         "executor_available": executor is not None,
@@ -3729,11 +3823,12 @@ def unknown_resolver_loop(stop_event: "threading.Event | None" = None, sleep=tim
             summary = resolve_unknown_orders_once()
             if summary["checked"] or summary["expired"] or summary["errors"]:
                 logging.info(
-                    "UNKNOWN resolver tick checked=%d resolved=%d pending=%d expired=%d errors=%d",
+                    "UNKNOWN resolver tick checked=%d resolved=%d pending=%d expired=%d never_submitted=%d errors=%d",
                     summary["checked"],
                     summary["resolved"],
                     summary["pending"],
                     summary["expired"],
+                    summary.get("never_submitted", 0),
                     len(summary["errors"]),
                 )
         except Exception as exc:  # pragma: no cover - defensive

@@ -26,6 +26,7 @@ from dashboard_core import (
     okx_swap_tickers,
     parse_dt,
     read_jsonl,
+    read_jsonl_stats,
     shadow_config,
 )
 from hermx_shared import canonical_timeframe, live_trading_enabled
@@ -50,6 +51,12 @@ DASH_AUTH_TOKEN = (os.environ.get("HERMX_SECRET") or "").strip()
 BACKFILL_FILE = ROOT / "research" / "mxc-backfill-jun11-jun16.json"
 STRATEGIES_DIR = ROOT / "strategies"
 STRATEGY_ALERTS_FILE = LOGS / "strategy-alerts.jsonl"
+# Read-only observability sources for the order / reconcile / operator panels.
+ORDER_JOURNAL_FILE = LOGS / "order-journal.jsonl"
+RECONCILE_ALERTS_FILE = LOGS / "reconcile-alerts.jsonl"
+OPERATOR_ALERTS_FILE = LOGS / "operator-alerts.jsonl"
+# Order states the open-orders panel filters out (terminal); mirrors the receiver's set.
+ORDER_TERMINAL_STATES_DASH = {"FILLED", "REJECTED"}
 TRIAL_TAB_ID = "duo_base_dev_trial"
 
 POLICIES = ()
@@ -730,10 +737,8 @@ def enrich_close_rows_with_okx_history(records, history_rows):
 
 def okx_execution_records(config, limit=500):
     # Canonical, venue-neutral execution ledger. The legacy okx-executions.jsonl mirror
-    # is no longer written; read it ONLY as a historical fallback for pre-cutover boxes.
+    # was removed (nothing writes it post-CCXT-cutover); no fallback read.
     rows = read_jsonl(LOGS / "executions.jsonl", limit)
-    if not rows:
-        rows = read_jsonl(LOGS / "okx-executions.jsonl", limit)
     out = []
     for row in rows:
         received_at = row.get("received_at")
@@ -1562,7 +1567,7 @@ def okx_demo_live_section(config, okx_live, okx_executions):
       <div class="asset-grid">{''.join(okx_live_card(config, okx_live, sym, first_trades.get(sym)) for sym in SYMBOLS)}</div>
       <section class="trade-log-card nested">
         <div class="log-head">
-          <h3>OKX Execution Ledger</h3>
+          <h3>Execution Ledger</h3>
           <p>Only real demo submissions appear here. Close and open orders can be separate rows for the same alert.</p>
         </div>
         <div class="table-wrap unified-log">{okx_execution_table(okx_executions, live_info)}</div>
@@ -1692,7 +1697,7 @@ def strategy_trial_tab(strategies, alerts, okx_live, okx_executions):
       <div class="asset-grid">{cards}</div>
       <section class="subsection okx-section">
         <div class="log-head">
-          <h3>Duo Base Dev OKX Demo Ledger</h3>
+          <h3>Strategy Demo Ledger</h3>
           <p>Actual sandbox submissions for the strategy-file trial. Open rows can show live PnL while the position remains active.</p>
         </div>
         <div class="table-wrap unified-log">{okx_execution_table(strategy_rows, live_info)}</div>

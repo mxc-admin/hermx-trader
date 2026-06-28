@@ -3,8 +3,9 @@
 Closes the two deferred acceptance criteria:
   :145  No NameError for execution ledgers in shadow-processing-errors.jsonl
         after a synthetic alert run.
-  :146  execution-plan.jsonl and executions.jsonl receive entries for processed
-        alerts.
+  :146  the authoritative executions.jsonl outcome ledger receives entries for
+        processed alerts. (The separate, dead execution-plan.jsonl write was later
+        removed -- nothing consumed it -- so these tests assert it is NOT produced.)
 
 The hotfix was the EXECUTION_PLAN_LEDGER / EXECUTION_LEDGER constants (module
 lines 37-38). Previously the readiness/execution writers referenced undefined
@@ -63,17 +64,13 @@ def test_strategy_alert_writes_both_ledgers(wr, wr_root, monkeypatch):
     status, record = wr.build_record(load_alert("strategy/btcusdt_buy.json"), RECEIVED_AT)
     assert status == 200
 
-    plan_rows = _read_jsonl(wr_root / "logs" / "execution-plan.jsonl")
     exec_rows = _read_jsonl(wr_root / "logs" / "executions.jsonl")
-    assert len(plan_rows) == 1
     assert len(exec_rows) == 1
 
-    # execution-plan.jsonl carries the readiness intent.
-    assert plan_rows[0]["received_at"] == RECEIVED_AT
-    assert "execution_readiness" in plan_rows[0]
-    # The readiness now surfaces the operative execution_mode + sandbox routing.
-    assert plan_rows[0]["execution_readiness"]["execution_mode"] == "demo"
-    assert plan_rows[0]["execution_readiness"]["simulated_trading"] is True
+    # The dead execution-plan.jsonl write was removed: the authoritative outcome ledger
+    # (executions.jsonl) is the single source the dashboard consumes, so the separate plan
+    # ledger is no longer produced.
+    assert not (wr_root / "logs" / "execution-plan.jsonl").exists()
 
     # executions.jsonl shows the (sandboxed) submission outcome.
     assert exec_rows[0]["okx_execution"]["mode"] == "submit_enabled"
@@ -88,9 +85,10 @@ def test_shadow_alert_writes_both_ledgers_no_submit(wr, wr_root, monkeypatch):
     status, record = wr.build_record(load_alert("shadow/btcusdt_shadow_buy.json"), RECEIVED_AT)
     assert status == 200
 
-    plan_rows = _read_jsonl(wr_root / "logs" / "execution-plan.jsonl")
     exec_rows = _read_jsonl(wr_root / "logs" / "executions.jsonl")
-    assert plan_rows and exec_rows
+    assert exec_rows
+    # The dead execution-plan.jsonl write was removed (see strategy-path test).
+    assert not (wr_root / "logs" / "execution-plan.jsonl").exists()
     assert exec_rows[0]["okx_execution"]["mode"] == "not_submitted"
 
 
@@ -118,6 +116,5 @@ def test_async_path_logs_no_nameerror(wr, wr_root, monkeypatch):
         assert "NameError" not in text, text
         assert "_LEDGER" not in text, text
 
-    # And the success ledgers were written by the async run.
-    assert (wr_root / "logs" / "execution-plan.jsonl").exists()
+    # And the authoritative outcome ledger was written by the async run.
     assert (wr_root / "logs" / "executions.jsonl").exists()

@@ -280,6 +280,92 @@ def test_unknown_backstop_age_measured_from_origin_not_latest(wr, monkeypatch):
     assert open_orders and open_orders[0].get("origin_ts")  # origin timestamp surfaced
 
 
+def _seed_planned_only(wr, cl: str) -> dict:
+    """A crash-orphaned order stuck at PLANNED (never advanced to SUBMITTED)."""
+    intent = {
+        "symbol": "XRPUSDT",
+        "side": "buy",
+        "inst_id": "XRP-USDT-SWAP",
+        "planned_notional_usd": 1500.0,
+        "policy": "weighted_v1",
+    }
+    wr.record_order_state(cl, wr.ORDER_STATE_PLANNED, intent=intent, prev_state=None)
+    return intent
+
+
+def test_planned_orphan_rejected_never_submitted_when_venue_absent(wr, monkeypatch):
+    # PLANNED orphan older than the timeout, with NO venue record => legal PLANNED->REJECTED
+    # (never_submitted) + an operator alert. This closes the gap where a PLANNED order could
+    # never be resolved (resolver excluded it; PLANNED->UNKNOWN is illegal).
+    cl = "mxc-xrpusdt-buy-planned-orphan"
+    _seed_planned_only(wr, cl)
+    monkeypatch.setattr(wr, "PLANNED_ORDER_TIMEOUT_SECONDS", 1.0)
+
+    summary = wr.resolve_unknown_orders_once(
+        executor=ObserveOnlyStub(order=None),  # venue has no record (observe-only)
+        now_ts="2099-01-01T00:00:00Z",
+    )
+
+    assert summary["checked"] == 1
+    assert summary["resolved"] == 1
+    assert summary["never_submitted"] == 1
+    records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+    states = [r["state"] for r in records if r["cl_ord_id"] == cl]
+    assert states == [wr.ORDER_STATE_PLANNED, wr.ORDER_STATE_REJECTED]
+    assert records[-1]["detail"]["reason"] == "never_submitted"
+    assert wr.load_open_orders() == []  # no longer an orphan
+
+    op_alerts = wr.read_jsonl_tolerant(wr.OPERATOR_ALERT_LEDGER)
+    assert any(a["alert"] == wr.RECONCILE_ALERT_PLANNED_ABANDONED for a in op_alerts)
+
+
+def test_planned_orphan_rejected_then_idempotency_blocks_reuse(wr, monkeypatch):
+    # After the backstop rejects a PLANNED orphan, the deterministic cl_ord_id is terminal,
+    # so a same-signal resubmit is still deduped (idempotency preserved).
+    cl = "mxc-xrpusdt-buy-planned-dedupe"
+    _seed_planned_only(wr, cl)
+    monkeypatch.setattr(wr, "PLANNED_ORDER_TIMEOUT_SECONDS", 1.0)
+    wr.resolve_unknown_orders_once(executor=ObserveOnlyStub(order=None), now_ts="2099-01-01T00:00:00Z")
+
+    latest = wr.latest_order_record(cl)
+    assert latest is not None and latest["state"] == wr.ORDER_STATE_REJECTED
+
+
+def test_planned_orphan_fresh_is_left_open(wr):
+    # A PLANNED order younger than the timeout may be an in-process submit between the
+    # write-ahead PLANNED and SUBMITTED writes -- it must NOT be rejected.
+    cl = "mxc-xrpusdt-buy-planned-fresh"
+    _seed_planned_only(wr, cl)  # ts == now, age ~0 << default 300s timeout
+
+    summary = wr.resolve_unknown_orders_once(executor=ObserveOnlyStub(order=None))
+
+    assert summary["never_submitted"] == 0
+    assert summary["pending"] == 1
+    open_orders = wr.load_open_orders()
+    assert len(open_orders) == 1 and open_orders[0]["state"] == wr.ORDER_STATE_PLANNED
+
+
+def test_planned_orphan_found_on_venue_promoted_not_rejected(wr, monkeypatch):
+    # ANOMALY path: a too-old PLANNED order the venue unexpectedly knows about must NOT be
+    # rejected -- it is promoted PLANNED->SUBMITTED for normal reconciliation, and alerted.
+    cl = "mxc-xrpusdt-buy-planned-onvenue"
+    _seed_planned_only(wr, cl)
+    monkeypatch.setattr(wr, "PLANNED_ORDER_TIMEOUT_SECONDS", 1.0)
+
+    summary = wr.resolve_unknown_orders_once(
+        executor=ObserveOnlyStub(order=_norm_order("live", cl_ord_id=cl)),
+        now_ts="2099-01-01T00:00:00Z",
+    )
+
+    assert summary["never_submitted"] == 0
+    records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+    states = [r["state"] for r in records if r["cl_ord_id"] == cl]
+    assert states == [wr.ORDER_STATE_PLANNED, wr.ORDER_STATE_SUBMITTED]
+    assert wr.ORDER_STATE_REJECTED not in states
+    op_alerts = wr.read_jsonl_tolerant(wr.OPERATOR_ALERT_LEDGER)
+    assert any(a["alert"] == wr.RECONCILE_ALERT_PLANNED_ON_VENUE for a in op_alerts)
+
+
 def test_symbol_pause_blocks_submit_path(wr, monkeypatch):
     wr.pause_symbol("XRPUSDT", "manual pause test")
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
