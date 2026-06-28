@@ -41,8 +41,9 @@ signals over Telegram. All risk policy stays in Python — the LLM is advisory a
 
 ```bash
 curl -fsSL https://hermes-agent.nousresearch.com/install.sh | sh
-# Add your xAI API key to ~/.hermes/.env:
-# XAI_API_KEY=xai-...
+# Then configure your LLM provider:
+hermes provider setup
+# (Supports xAI/Grok, OpenAI, Anthropic, Ollama and others)
 ```
 
 ### Step 2 — Let Hermes set up HermX for you
@@ -93,4 +94,4 @@ first-party Python — **the LLM never touches sizing or money-safety**.
 - OKX **demo** API keys (or KuCoin/Bybit/Hyperliquid testnet keys)
 - TradingView Pro+ (needed to send webhook request headers)
 - A free Tailscale account
-- An xAI API key (only for the optional Hermes Agent)
+- An LLM provider API key (xAI, OpenAI, Anthropic, etc.) — only for the optional Hermes Agent

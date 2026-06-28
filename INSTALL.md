@@ -4,7 +4,12 @@
 
 **Option A (recommended): Let Hermes do it**
 1. Install Hermes Agent: `curl -fsSL https://hermes-agent.nousresearch.com/install.sh | sh`
-2. Add your API key to `~/.hermes/.env`: `XAI_API_KEY=xai-...`
+2. Configure your LLM provider:
+   ```
+   hermes provider setup
+   ```
+   Follow the prompts — supports xAI/Grok, OpenAI, Anthropic, Ollama, and others.
+   You will need an API key for your chosen provider.
 3. Paste this file to Hermes: `cat INSTALL.md | hermes -z --skills hermx-control`
    Hermes will execute all steps interactively — asking you for credentials, reviewing strategies, and deploying everything.
 
@@ -85,7 +90,7 @@ you have them.
 - [ ] **Exchange API keys** for a demo/sandbox/testnet account (see 0.2).
 - [ ] A **TradingView** account (Pro tier or higher is needed to send webhook request headers).
 - [ ] A **Telegram** account (optional — only if you want the natural-language operator bot).
-- [ ] An **xAI API key** (`xai-...`, optional — only needed for the Hermes Agent).
+- [ ] An **LLM provider API key** (xAI, OpenAI, Anthropic, etc., optional — only needed for the Hermes Agent).
 
 **0.2 — Which exchange do you want to use?** HermX validates against these four:
 
@@ -269,7 +274,7 @@ CLEAN_DASHBOARD_PORT=8098   # dashboard (loopback)
 > (`~/.hermes/.env`) which you create in **Phase 6**. Collect the values now if the user wants the
 > agent, and tell them you'll write them in Phase 6:
 
-- `XAI_API_KEY` — the user's `xai-...` key (LLM provider for the agent).
+- An **LLM provider API key** (xAI, OpenAI, Anthropic, etc.) — for the agent's chosen provider.
 - `TELEGRAM_BOT_TOKEN` — created via @BotFather in Phase 6.
 - `TELEGRAM_ALLOWED_USERS` — the user's own numeric Telegram ID (allowlist of one).
 
@@ -502,13 +507,14 @@ hermes --version
 
 ```bash
 mkdir -p ~/.hermes
+# Configure your LLM provider (xAI/Grok, OpenAI, Anthropic, Ollama, etc.):
+hermes provider setup
+# Then add your Telegram values:
 cat >> ~/.hermes/.env <<'EOF'
-XAI_API_KEY=xai-...
 TELEGRAM_BOT_TOKEN=123456789:ABC...
 TELEGRAM_ALLOWED_USERS=<your numeric telegram id>
 EOF
 chmod 600 ~/.hermes/.env
-hermes config set model.provider xai
 hermes doctor             # expect: API key configured, model OK
 ```
 
