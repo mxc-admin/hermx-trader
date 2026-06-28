@@ -918,15 +918,25 @@ def check_and_mark_signal(normalized: dict, received_at: str) -> tuple[bool, dic
 
 
 def append_jsonl(path: Path, obj: dict) -> None:
-    """Append one JSONL record durably (flush + fsync).
+    """Append one JSONL record atomically + durably (whole-line write + fsync).
 
-    Phase 1 task 2 remainder (REFACTOR_PLAN.md:206): all append_jsonl callers now
-    inherit durable writes, not only the position/order journals.
-    """
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n")
-        f.flush()
-        os.fsync(f.fileno())
+    Phase 1 task 2 remainder (REFACTOR_PLAN.md:206): all append_jsonl callers inherit
+    durable writes. The whole encoded line (incl. trailing newline) is written via a
+    short-write loop on a single unbuffered fd, so the OS can never wedge a HALF-written
+    record in front of later appends -- a money-path PLANNED record is all-or-nothing.
+    A crash mid-write can only ever leave a clean TRAILING tear, which read_jsonl_tolerant
+    quarantines without bricking the ledger."""
+    line = (json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+    # buffering=0 => binary, unbuffered: f.write is a direct os.write we can complete.
+    with path.open("ab", buffering=0) as f:
+        fd = f.fileno()
+        view = memoryview(line)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:  # pragma: no cover - defensive against a stuck fd
+                raise OSError(f"append_jsonl: zero-length write to {path}")
+            view = view[written:]
+        os.fsync(fd)
 
 
 def append_jsonl_durable(path: Path, obj: dict) -> None:

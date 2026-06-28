@@ -5,6 +5,12 @@ import os
 import time
 from pathlib import Path
 
+# Canonical strategy execution modes (mirrors schemas/strategy.schema.json). Anything
+# else is a config typo and must fail closed, never route a submit. 'demo'/'paper'/
+# 'shadow' are sandbox-only; 'live' is the ONLY mode permitted to reach a real venue,
+# and only with the global HERMX_LIVE_TRADING kill switch armed.
+CANONICAL_EXECUTION_MODES = frozenset({"demo", "paper", "shadow", "live"})
+
 
 def resolve_execution_config(config: dict, readiness: dict | None = None) -> dict:
     """PURE: the execution config the write/reconcile path actually resolves.
@@ -77,7 +83,15 @@ class ExecutionService:
         auth_healthy = bool(record.get("auth_healthy", True)) and webhook_auth_config_healthy()
         watchdog_ok, watchdog_reason = watchdog_submission_state()
 
-        # Submission gate. Arms on the single per-strategy submit flag
+        def _blocked(reason: str, gate: str, **extra) -> dict:
+            # Single exit for every blocked gate: always records WHICH gate fired (the
+            # FIRST in precedence order) so the operator never has to guess. ``ok`` stays
+            # True because a refusal-to-submit is a successful, expected control outcome.
+            result = {"ok": True, "mode": "not_submitted", "reason": reason, "gate": gate, **extra}
+            append_jsonl(execution_ledger, {"received_at": record.get("received_at"), "okx_execution": result})
+            return result
+
+        # Gate 1 -- arming + health. Arms on the single per-strategy submit flag
         # (readiness.live_execution_enabled, derived from strategy.submit_orders) plus
         # auth + watchdog health. The dead config-flag arming chain (execution.enabled/
         # submit_orders, risk.allow_live_execution) is gone.
@@ -92,47 +106,43 @@ class ExecutionService:
                 block_reason = "Auth health gate is not affirmative"
             if not block_reason and not watchdog_ok:
                 block_reason = watchdog_reason or "watchdog_submission_paused"
-            result = {
-                "ok": True,
-                "mode": "not_submitted",
-                "reason": block_reason or "execution disabled",
-            }
-            append_jsonl(execution_ledger, {"received_at": record.get("received_at"), "okx_execution": result})
-            return result
+            if not bool(readiness.get("live_execution_enabled")):
+                gate = "strategy_submit_flag"
+            elif not auth_healthy:
+                gate = "auth_health"
+            else:
+                gate = "watchdog"
+            return _blocked(block_reason or "execution disabled", gate)
 
-        # Live-mode kill switch. For an ``execution_mode == "live"`` strategy the global
-        # HERMX_LIVE_TRADING switch must be explicitly armed AND the readiness must agree
-        # that this is NOT a simulated/sandbox order. Either inconsistency fails closed.
-        if str(readiness.get("execution_mode") or "").lower() == "live":
+        # Gate 2 -- execution_mode must be canonical. Normalize once (lower/strip) and
+        # reject any unknown mode early; a typo must never silently route a submit.
+        execution_mode = str(readiness.get("execution_mode") or "").strip().lower()
+        if execution_mode and execution_mode not in CANONICAL_EXECUTION_MODES:
+            return _blocked("unknown_execution_mode", "execution_mode", execution_mode=execution_mode)
+
+        # Gate 3 -- real-venue kill switch. ANY submit the adapter will route to a REAL
+        # venue requires the global HERMX_LIVE_TRADING switch -- not just
+        # execution_mode==live. "Real venue" is decided exactly as the adapter decides it:
+        # the RESOLVED execution config's ``simulated_trading`` is falsey (the adapter
+        # skips set_sandbox_mode). Demo/paper/shadow must stay sandbox-only.
+        resolved_exec = self._execution_config(readiness).get("execution") or {}
+        non_sandbox = not bool(resolved_exec.get("simulated_trading", True))
+        is_live_mode = execution_mode == "live"
+        if is_live_mode or non_sandbox:
             live_trading_enabled = self._h("live_trading_enabled")
             if not live_trading_enabled()[0]:
-                result = {
-                    "ok": True,
-                    "mode": "not_submitted",
-                    "reason": "live_trading_disabled",
-                }
-                append_jsonl(execution_ledger, {"received_at": record.get("received_at"), "okx_execution": result})
-                return result
-            if readiness.get("simulated_trading") is not False:
-                result = {
-                    "ok": True,
-                    "mode": "not_submitted",
-                    "reason": "live_mode_simulated_inconsistent",
-                }
-                append_jsonl(execution_ledger, {"received_at": record.get("received_at"), "okx_execution": result})
-                return result
+                return _blocked("live_trading_disabled", "live_trading_kill_switch")
+            if non_sandbox and not is_live_mode:
+                # A non-live mode resolved to a real-venue submit: refuse outright.
+                return _blocked("non_sandbox_requires_live_mode", "sandbox_only")
+            if is_live_mode and not non_sandbox:
+                # Live mode but the resolved config still sandboxes: no live/sim mixing.
+                return _blocked("live_mode_simulated_inconsistent", "live_sandbox_consistency")
 
         symbol_pause_info = self._h("symbol_pause_info")
         symbol_pause = symbol_pause_info(readiness.get("symbol"))
         if symbol_pause:
-            result = {
-                "ok": True,
-                "mode": "not_submitted",
-                "reason": "symbol_paused",
-                "symbol_pause": symbol_pause,
-            }
-            append_jsonl(execution_ledger, {"received_at": record.get("received_at"), "okx_execution": result})
-            return result
+            return _blocked("symbol_paused", "symbol_pause", symbol_pause=symbol_pause)
 
         order_intent_from_readiness = self._h("order_intent_from_readiness")
         cl_ord_id_from_readiness = self._h("cl_ord_id_from_readiness")
@@ -152,15 +162,12 @@ class ExecutionService:
         existing_order = latest_order_record(cl_ord_id)
         if existing_order is not None:
             existing_state = str(existing_order.get("state") or "")
-            result = {
-                "ok": True,
-                "mode": "not_submitted",
-                "reason": "duplicate_cl_ord_id",
-                "cl_ord_id": cl_ord_id,
-                "existing_state": existing_state,
-            }
-            append_jsonl(execution_ledger, {"received_at": record.get("received_at"), "okx_execution": result})
-            return result
+            return _blocked(
+                "duplicate_cl_ord_id",
+                "idempotency",
+                cl_ord_id=cl_ord_id,
+                existing_state=existing_state,
+            )
 
         try:
             record_order_state(cl_ord_id, order_state_planned, intent=order_intent, prev_state=None)

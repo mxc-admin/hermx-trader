@@ -123,6 +123,69 @@ def test_live_mode_submits_when_switch_armed_and_not_simulated(wr, monkeypatch):
 # Demo mode IGNORES the switch.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# ANY non-sandbox submit (not just execution_mode==live) is gated on the switch and
+# is sandbox-only unless it is genuinely live. Closes the hole where a non-live mode
+# that resolves to a REAL venue could submit without the global kill switch.
+# ---------------------------------------------------------------------------
+
+def test_non_sandbox_non_live_blocked_even_with_switch_armed(wr, monkeypatch):
+    # A demo strategy that (mis)resolves to simulated_trading=False would hit a REAL
+    # venue. Even with the kill switch armed it must be refused -- demo stays sandbox-only.
+    monkeypatch.setattr(wr, "CONFIG", _armed_config())
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "true")
+
+    fake = _fake_executor()
+    with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake) as create_mock:
+        out = wr.execute_okx_if_enabled(_record(execution_mode="demo", simulated_trading=False))
+
+    create_mock.assert_not_called()
+    fake.execute.assert_not_called()
+    assert out["mode"] == "not_submitted"
+    assert out["reason"] == "non_sandbox_requires_live_mode"
+
+
+def test_non_sandbox_blocked_when_switch_unset(wr, monkeypatch):
+    # Real-venue routing without the kill switch is blocked outright, regardless of mode.
+    monkeypatch.setattr(wr, "CONFIG", _armed_config())
+    monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
+
+    fake = _fake_executor()
+    with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake) as create_mock:
+        out = wr.execute_okx_if_enabled(_record(execution_mode="paper", simulated_trading=False))
+
+    create_mock.assert_not_called()
+    fake.execute.assert_not_called()
+    assert out["mode"] == "not_submitted"
+    assert out["reason"] == "live_trading_disabled"
+
+
+def test_unknown_execution_mode_rejected(wr, monkeypatch):
+    # A typo'd / unknown execution_mode must fail closed, never reach the executor.
+    monkeypatch.setattr(wr, "CONFIG", _armed_config())
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "true")
+
+    fake = _fake_executor()
+    with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake) as create_mock:
+        out = wr.execute_okx_if_enabled(_record(execution_mode="production", simulated_trading=False))
+
+    create_mock.assert_not_called()
+    fake.execute.assert_not_called()
+    assert out["mode"] == "not_submitted"
+    assert out["reason"] == "unknown_execution_mode"
+
+
+def test_blocked_results_name_the_gate(wr, monkeypatch):
+    # Every blocked result surfaces the FIRST blocking gate explicitly (operator clarity).
+    monkeypatch.setattr(wr, "CONFIG", _armed_config())
+    monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
+
+    with mock.patch.object(wr.ExecutorFactory, "create", return_value=_fake_executor()):
+        out = wr.execute_okx_if_enabled(_record(execution_mode="live", simulated_trading=False))
+    assert out["reason"] == "live_trading_disabled"
+    assert out["gate"] == "live_trading_kill_switch"
+
+
 def test_demo_mode_ignores_switch_unset(wr, monkeypatch):
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)

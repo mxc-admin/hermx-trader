@@ -15,6 +15,7 @@ Covers:
 """
 from __future__ import annotations
 
+import os
 from unittest import mock
 
 import pytest
@@ -107,6 +108,48 @@ def test_record_order_state_rejects_illegal(wr):
         wr.record_order_state("cl-x", wr.ORDER_STATE_FILLED, prev_state=wr.ORDER_STATE_PLANNED)
     # Illegal transition must persist nothing.
     assert not wr.ORDER_JOURNAL_LEDGER.exists()
+
+
+def test_append_jsonl_writes_whole_line_under_short_writes(wr, monkeypatch):
+    # Money-path durability: a PLANNED record must never leak as a HALF-written line.
+    # Even if the OS short-writes (e.g. disk pressure), append_jsonl must loop until the
+    # ENTIRE line is on disk before fsync, so the record is all-or-nothing and a later
+    # append can never wedge behind a partial line (which would brick the ledger).
+    real_write = os.write
+    calls = []
+
+    def short_write(fd, data):
+        # Force a 1-byte-at-a-time drip the first few times to simulate short writes.
+        chunk = data[:1] if len(data) > 1 else data
+        n = real_write(fd, bytes(chunk))
+        calls.append(n)
+        return n
+
+    path = wr.LOG_DIR / "atomic-ledger.jsonl"
+    monkeypatch.setattr(wr.os, "write", short_write)
+    wr.append_jsonl(path, {"cl_ord_id": "cl-atomic", "state": "PLANNED", "n": 12345})
+    monkeypatch.undo()
+
+    # The full record round-trips intact despite the short writes.
+    records = wr.read_jsonl_tolerant(path)
+    assert records == [{"cl_ord_id": "cl-atomic", "state": "PLANNED", "n": 12345}]
+    assert len(calls) > 1  # proves the short-write loop actually iterated
+
+
+def test_torn_trailing_planned_does_not_corrupt_journal(wr):
+    # A crash mid-append leaves at most a torn TRAILING line. The prior clean records
+    # (a recoverable open order) must still load, and reading must not raise.
+    cl = "mxc-xrpusdt-buy-tornplanned"
+    intent = {"symbol": "XRPUSDT", "side": "buy", "inst_id": "XRP-USDT-SWAP", "planned_notional_usd": 1500.0, "policy": "weighted_v1"}
+    wr.record_order_state(cl, wr.ORDER_STATE_PLANNED, intent=intent, prev_state=None)
+    wr.record_order_state(cl, wr.ORDER_STATE_SUBMITTED, intent=intent, prev_state=wr.ORDER_STATE_PLANNED)
+    # Simulate a half-written trailing record fragment (no newline, invalid JSON).
+    with wr.ORDER_JOURNAL_LEDGER.open("a", encoding="utf-8") as f:
+        f.write('{"schema_version":1,"cl_ord_id":"cl-torn","state":"PLA')
+
+    open_orders = wr.load_open_orders()  # must not raise
+    assert len(open_orders) == 1 and open_orders[0]["cl_ord_id"] == cl
+    assert open_orders[0]["state"] == wr.ORDER_STATE_SUBMITTED
 
 
 # ---------------------------------------------------------------------------
