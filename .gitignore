@@ -13,10 +13,23 @@ control-state.json
 logs/
 runtime/
 exports/
+data/
+*.log
 *.zip
+
+# install-generated files (contain user-specific Tailscale URL / strategy selection)
+WEBHOOK_URL.txt
+ENABLED_STRATEGIES.txt
 
 .DS_Store
 Thumbs.db
+
+# IDE / editor
+.idea/
+.vscode/
+
+# python packaging
+*.egg-info/
 
 # runtime/backup artifacts
 .pytest_cache/
