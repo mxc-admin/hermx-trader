@@ -8,7 +8,8 @@ reconciliation decision logic is exercised against canned normalized responses.
 Covers:
   (a) get_order filled                         -> FILLED
   (b) partial fill                             -> FILLED, partial=True
-  (c) not_found + pending empty + archive empty-> REJECTED (not_found)
+  (c) not_found + pending empty + archive empty-> UNKNOWN (money-safety: absence is
+      NEVER an auto-rejection; only a venue-confirmed canceled/zero-fill => REJECTED)
   (d) non-terminal (live) through all retries  -> UNKNOWN after bounded attempts
   (e) fallback chain: order miss -> pending hit; order+pending miss -> archive hit
   (f) post-submit hook (forced should_execute) -> reconciliation writes the
@@ -105,15 +106,33 @@ def test_partial_fill_maps_filled_partial(wr):
     assert (out3["state"], out3["partial"]) == (wr.ORDER_STATE_FILLED, True)
 
 
-def test_not_found_everywhere_maps_rejected(wr):
+def test_not_found_everywhere_maps_unknown(wr):
+    # MONEY-SAFETY: an order absent from get_order + pending + archive is NOT proof of
+    # rejection (it may have filled and aged out, or the query may be transiently
+    # failing). Absence => UNKNOWN (keep tracking), never REJECTED (drop it as flat).
     ex = StubExecutor(order=norm_not_found(), pending=[], archive=[])
     out = wr.reconcile_order_once(ex, LOOKUP)
-    assert out["state"] == wr.ORDER_STATE_REJECTED
+    assert out["state"] == wr.ORDER_STATE_UNKNOWN
     assert out["reason"] == "not_found"
     assert out["matched_order"] is None
     # The full fallback chain was exercised: order -> pending -> archive.
     kinds = [c[0] for c in ex.calls]
     assert kinds == ["get_order", "get_open_orders", "get_order_history_archive"]
+
+
+def test_fresh_not_found_backoff_stays_unknown_never_rejected(wr):
+    # The backoff driver must NOT short-circuit a not_found to REJECTED on attempt 1.
+    # A persistently not_found order is re-polled to the bound and ends UNKNOWN.
+    ex = StubExecutor(order=norm_not_found(), pending=[], archive=[])
+    sleeps = []
+    out = wr.reconcile_order_with_backoff(ex, LOOKUP, sleep=lambda d: sleeps.append(d))
+    assert out["state"] == wr.ORDER_STATE_UNKNOWN
+    assert out["state"] != wr.ORDER_STATE_REJECTED
+    assert out["attempts"] == wr.RECONCILE_MAX_ATTEMPTS
+    assert out["reason"].startswith("deadline_exhausted")
+    assert "not_found" in out["reason"]
+    # not_found is non-terminal now, so every attempt is re-polled (no early return).
+    assert sum(1 for c in ex.calls if c[0] == "get_order") == wr.RECONCILE_MAX_ATTEMPTS
 
 
 def test_canceled_zero_fill_maps_rejected(wr):
@@ -532,3 +551,25 @@ def test_post_submit_reconcile_submitted_to_unknown(wr, monkeypatch):
     assert states == [wr.ORDER_STATE_PLANNED, wr.ORDER_STATE_SUBMITTED, wr.ORDER_STATE_UNKNOWN]
     open_orders = wr.load_open_orders()
     assert len(open_orders) == 1 and open_orders[0]["state"] == wr.ORDER_STATE_UNKNOWN
+
+
+def test_startup_not_found_orphan_stays_unknown_not_rejected(wr):
+    # MONEY-SAFETY at startup: an orphaned SUBMITTED order the venue cannot find is NOT
+    # auto-rejected. It stays UNKNOWN + open so the periodic resolver keeps chasing it;
+    # no terminal REJECTED is ever written from mere absence.
+    cl = "mxc-xrpusdt-buy-startup-notfound"
+    intent = {"symbol": "XRPUSDT", "side": "buy", "inst_id": "XRP-USDT-SWAP", "planned_notional_usd": 1500.0, "policy": "weighted_v1"}
+    wr.record_order_state(cl, wr.ORDER_STATE_PLANNED, intent=intent, prev_state=None)
+    wr.record_order_state(cl, wr.ORDER_STATE_SUBMITTED, intent=intent, prev_state=wr.ORDER_STATE_PLANNED)
+
+    stub = ObserveOnlyStub(order=norm_not_found(), pending=[], archive=[], positions=[])
+    summary = wr.reconcile_startup(executor=stub)
+
+    assert summary["open_orders"][0]["outcome"] == wr.ORDER_STATE_UNKNOWN
+    assert summary["open_orders"][0]["wrote_transition"] is False  # no terminal write
+    records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+    states = [r["state"] for r in records if r["cl_ord_id"] == cl]
+    assert wr.ORDER_STATE_REJECTED not in states
+    assert states == [wr.ORDER_STATE_PLANNED, wr.ORDER_STATE_SUBMITTED]  # unchanged, still open
+    open_orders = wr.load_open_orders()
+    assert len(open_orders) == 1 and open_orders[0]["state"] == wr.ORDER_STATE_SUBMITTED

@@ -73,6 +73,35 @@ def test_terminal_states_are_frozen():
             assert wr.order_state_can_transition(terminal, target) is False
 
 
+# The single source of truth for the EXHAUSTIVE matrix below: every legal edge, stated
+# independently of the implementation table so the test fails if the table drifts.
+_EXPECTED_LEGAL = {
+    (None, "PLANNED"),
+    ("PLANNED", "SUBMITTED"),
+    ("PLANNED", "REJECTED"),
+    ("SUBMITTED", "FILLED"),
+    ("SUBMITTED", "REJECTED"),
+    ("SUBMITTED", "UNKNOWN"),
+    ("UNKNOWN", "FILLED"),
+    ("UNKNOWN", "REJECTED"),
+    ("UNKNOWN", "UNKNOWN"),
+}
+
+
+def test_transition_matrix_is_exhaustive():
+    # Cross EVERY old state (incl. None + an unknown garbage state) against EVERY new
+    # state. order_state_can_transition must return True for exactly the edges in
+    # _EXPECTED_LEGAL and False for all others -- no silent extra or missing edge.
+    old_states = [None, "PLANNED", "SUBMITTED", "FILLED", "REJECTED", "UNKNOWN", "bogus"]
+    new_states = ["PLANNED", "SUBMITTED", "FILLED", "REJECTED", "UNKNOWN", "bogus"]
+    actual_legal = set()
+    for old in old_states:
+        for new in new_states:
+            if wr.order_state_can_transition(old, new):
+                actual_legal.add((old, new))
+    assert actual_legal == _EXPECTED_LEGAL
+
+
 def test_record_order_state_rejects_illegal(wr):
     with pytest.raises(ValueError):
         wr.record_order_state("cl-x", wr.ORDER_STATE_FILLED, prev_state=wr.ORDER_STATE_PLANNED)

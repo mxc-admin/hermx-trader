@@ -189,6 +189,22 @@ ORDER_NON_TERMINAL_STATES = frozenset({ORDER_STATE_PLANNED, ORDER_STATE_SUBMITTE
 #                   default ON); re-reconciles still-open SUBMITTED/UNKNOWN orders.
 # "read-only" above means read-only against the EXCHANGE: all three may persist a
 # legal SUBMITTED/UNKNOWN -> terminal transition to the local order journal.
+#
+# MONEY-SAFETY mapping (map_order_outcome): only a venue-confirmed canceled+zero-fill
+# becomes REJECTED. Absence (not_found across get_order/pending/archive) maps to UNKNOWN,
+# never REJECTED -- a missing order may have filled and aged out, so we keep tracking it
+# rather than drop a possible live position as flat.
+#
+# UNKNOWN LIFECYCLE BACKSTOP (periodic resolver): an order whose age FROM ORIGIN exceeds
+# HERMX_UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS (default 900s) is alerted
+# (UNKNOWN_RESOLVER_TIMEOUT, severity=error) and its symbol is PAUSED. It is NEVER
+# auto-closed -- ambiguity is not proof of any outcome. Alerts/pauses are deduped per
+# (symbol, cl_ord_id, state) so a single stuck order does not re-fire every tick.
+# RUNBOOK on a symbol pause: (1) inspect reconcile-alerts.jsonl + operator-alerts.jsonl
+# for the cl_ord_id; (2) confirm the true order/position state on the venue UI/API;
+# (3) reconcile the order journal to that truth; (4) clear the pause via the control
+# state (symbol_pauses) once the symbol is safe to trade again. A paused symbol hard-
+# blocks submission (symbol_pause_info gate in ExecutionService.execute).
 RECONCILE_ALERT_LEDGER = LOG_DIR / "reconcile-alerts.jsonl"
 RECONCILE_ALERT_MISMATCH = "RECONCILE_MISMATCH"
 RECONCILE_ALERT_RESOLVER_TIMEOUT = "UNKNOWN_RESOLVER_TIMEOUT"
@@ -2706,8 +2722,13 @@ def load_open_orders() -> list[dict]:
     """Restart-recovery reader consumed by Task 4 reconciliation: the LATEST record
     (highest seq) per cl_ord_id whose state is still non-terminal
     (PLANNED/SUBMITTED/UNKNOWN). Folds read_jsonl_tolerant(ORDER_JOURNAL_LEDGER), so a
-    truncated trailing line is tolerated. Terminal (FILLED/REJECTED) orders are omitted."""
+    truncated trailing line is tolerated. Terminal (FILLED/REJECTED) orders are omitted.
+
+    Each returned record is a COPY of the latest with an added ``origin_ts`` -- the ts of
+    the order's FIRST (lowest-seq) journal record. The lifecycle backstop measures age
+    from origin_ts so re-recording (e.g. UNKNOWN->UNKNOWN) can never reset the clock."""
     latest: dict = {}
+    origin: dict = {}  # cl -> (seq, ts) of the lowest-seq record seen
     for rec in read_jsonl_tolerant(ORDER_JOURNAL_LEDGER):
         seq = rec.get("seq")
         if not isinstance(seq, int):
@@ -2716,7 +2737,17 @@ def load_open_orders() -> list[dict]:
         cur = latest.get(cl)
         if cur is None or seq > cur.get("seq", -1):
             latest[cl] = rec
-    return [r for r in latest.values() if r.get("state") in ORDER_NON_TERMINAL_STATES]
+        cur_origin = origin.get(cl)
+        if cur_origin is None or seq < cur_origin[0]:
+            origin[cl] = (seq, rec.get("ts"))
+    out: list[dict] = []
+    for cl, rec in latest.items():
+        if rec.get("state") not in ORDER_NON_TERMINAL_STATES:
+            continue
+        enriched = dict(rec)
+        enriched["origin_ts"] = origin.get(cl, (None, rec.get("ts")))[1]
+        out.append(enriched)
+    return out
 
 
 def latest_order_record(cl_ord_id: str | None) -> dict | None:
@@ -2794,17 +2825,24 @@ def map_order_outcome(order: "dict | None", ordered: "float | None" = None) -> t
       * state=filled (and not a known partial)              -> FILLED, partial=False
       * state=canceled with accFillSz=0                      -> REJECTED (canceled)
       * state=canceled with accFillSz>0                      -> FILLED, partial=True
-      * not-found (lookup exhausted / "does not exist")      -> REJECTED (not_found)
+      * not-found (absent from get_order/pending/archive)    -> UNKNOWN (not_found)
       * state=live (non-terminal)                            -> SUBMITTED (keep polling)
       * any other / inconclusive                             -> UNKNOWN
+
+    MONEY-SAFETY: absence is NEVER an auto-rejection. A not_found order may have filled
+    and aged out of the queryable windows, or the query layer may be transiently
+    failing; concluding REJECTED there would drop a live position as flat. Absence maps
+    to UNKNOWN so the order stays tracked (backoff re-polls it; the periodic resolver +
+    lifecycle backstop chase it). The ONLY venue-confirmed rejection is canceled with
+    zero fill.
     """
     if order is None:
-        return ORDER_STATE_REJECTED, False, "not_found"
+        return ORDER_STATE_UNKNOWN, False, "not_found"
     state = str(order.get("state") or "").lower()
     acc = _reconcile_float(order.get("acc_fill_sz"), 0.0)
     is_partial_by_size = ordered is not None and ordered > 0 and 0.0 < acc < ordered
     if state == "not_found":
-        return ORDER_STATE_REJECTED, False, "not_found"
+        return ORDER_STATE_UNKNOWN, False, "not_found"
     if state == "partially_filled":
         return ORDER_STATE_FILLED, True, "partially_filled"
     if state == "filled":
@@ -3230,37 +3268,51 @@ def resolve_unknown_orders_once(executor=None, *, now_ts: "str | None" = None, m
         cur_state = rec.get("state")
         intent = rec.get("intent") or {}
         symbol = intent.get("symbol")
-        age_seconds = _order_age_seconds(rec, now_ts=now_ts)
+        # Age from ORIGIN (first journal record), not the latest -- re-recording must not
+        # reset the lifecycle clock. Falls back to the latest ts if origin is missing.
+        age_seconds = _order_age_seconds({"ts": rec.get("origin_ts") or rec.get("ts")}, now_ts=now_ts)
         lookup = {"inst_id": intent.get("inst_id"), "cl_ord_id": cl_ord_id}
 
         if age_seconds is not None and age_seconds > UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS:
-            reason = f"resolver_budget_exhausted:{round(age_seconds, 3)}s"
-            emit_reconcile_alert(
-                RECONCILE_ALERT_MISMATCH,
-                {
-                    "stage": "unknown_resolver_timeout",
-                    "cl_ord_id": cl_ord_id,
-                    "symbol": symbol,
-                    "state": cur_state,
-                    "age_s": round(age_seconds, 3),
-                    "timeout_s": UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS,
-                    "reason": reason,
-                },
-            )
-            emit_operator_alert(
-                RECONCILE_ALERT_RESOLVER_TIMEOUT,
-                {
-                    "cl_ord_id": cl_ord_id,
-                    "symbol": symbol,
-                    "state": cur_state,
-                    "age_s": round(age_seconds, 3),
-                    "timeout_s": UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS,
-                },
-                severity="error",
-            )
-            if pause_symbol(symbol, f"unknown resolver timeout for {cl_ord_id} ({round(age_seconds, 3)}s)"):
-                summary["paused_symbols"].append(str(symbol or ""))
+            # Lifecycle backstop: alert + pause the symbol, but NEVER auto-close the order
+            # (no terminal write -- absence/ambiguity is not proof of any outcome). Dedupe
+            # so one stuck order does not re-pause/re-alert every tick: the pause reason is
+            # STABLE per (symbol, cl_ord_id, state), so pause_symbol() collapses repeats and
+            # only a genuinely NEW pause emits the operator alerts. A symbol-less order
+            # cannot be deduped via the pause store, so it always alerts (never swallowed).
             summary["expired"] += 1
+            sym_norm = str(symbol or "").strip()
+            pause_reason = (
+                f"unknown resolver timeout: order {cl_ord_id} stuck {cur_state} "
+                f"> {UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS}s"
+            )
+            newly_paused = pause_symbol(symbol, pause_reason) if sym_norm else False
+            if newly_paused:
+                summary["paused_symbols"].append(sym_norm)
+            if newly_paused or not sym_norm:
+                emit_reconcile_alert(
+                    RECONCILE_ALERT_MISMATCH,
+                    {
+                        "stage": "unknown_resolver_timeout",
+                        "cl_ord_id": cl_ord_id,
+                        "symbol": symbol,
+                        "state": cur_state,
+                        "age_s": round(age_seconds, 3),
+                        "timeout_s": UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS,
+                        "reason": pause_reason,
+                    },
+                )
+                emit_operator_alert(
+                    RECONCILE_ALERT_RESOLVER_TIMEOUT,
+                    {
+                        "cl_ord_id": cl_ord_id,
+                        "symbol": symbol,
+                        "state": cur_state,
+                        "age_s": round(age_seconds, 3),
+                        "timeout_s": UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS,
+                    },
+                    severity="error",
+                )
             continue
 
         try:
@@ -3295,7 +3347,15 @@ def resolve_unknown_orders_once(executor=None, *, now_ts: "str | None" = None, m
             except (ValueError, OSError) as exc:
                 summary["errors"].append(f"record_order_state[{cl_ord_id}]: {exc}")
 
-        if next_state == ORDER_STATE_UNKNOWN and order_state_can_transition(cur_state, ORDER_STATE_UNKNOWN):
+        # Record the SUBMITTED->UNKNOWN transition ONCE. An already-UNKNOWN order that
+        # re-resolves to UNKNOWN is NOT re-recorded: a no-op state change would only bloat
+        # the journal, and the backstop measures age from origin_ts (not the latest record)
+        # so re-recording would buy nothing.
+        if (
+            next_state == ORDER_STATE_UNKNOWN
+            and cur_state != ORDER_STATE_UNKNOWN
+            and order_state_can_transition(cur_state, ORDER_STATE_UNKNOWN)
+        ):
             try:
                 record_order_state(
                     cl_ord_id,

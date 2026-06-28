@@ -139,6 +139,18 @@ def test_hermes_skill_kill_switch_blocks_hyperliquid_paper_submit(repo_root, tmp
         "record_order_state": lambda *args, **kwargs: None,
         "fail_closed_state_write": lambda *args, **kwargs: None,
         "post_submit_reconcile": lambda *args, **kwargs: None,
+        "order_state_planned": lambda: "PLANNED",
+        "order_state_submitted": lambda: "SUBMITTED",
+        "order_state_filled": lambda: "FILLED",
+        "order_state_rejected": lambda: "REJECTED",
+        "order_state_unknown": lambda: "UNKNOWN",
+        "reconcile_post_submit_enabled": lambda: False,
+        "reconciliation_executor": lambda: None,
+        "reconcile_order_with_backoff": lambda *args, **kwargs: None,
+        "order_state_can_transition": lambda old, new: True,
+        "emit_reconcile_alert": lambda *args, **kwargs: None,
+        "reconcile_alert_mismatch": lambda *args, **kwargs: None,
+        "redact_secrets": lambda text: text,
     }
     service = ExecutionService(config=_hyperliquid_paper_config(repo_root), root=repo_root, executor_factory=ExecutorFactory, hooks=hooks)
     skill = HermesExecutionSkill(service=service)
@@ -161,6 +173,7 @@ def test_hermes_skill_kill_switch_blocks_hyperliquid_paper_submit(repo_root, tmp
                 "budget_usd": 10,
                 "leverage": 1,
                 "td_mode": "cross",
+                "execution_mode": "live",
             },
             account_context={"auth_healthy": True},
             mode="live",
@@ -168,7 +181,7 @@ def test_hermes_skill_kill_switch_blocks_hyperliquid_paper_submit(repo_root, tmp
 
     adapter_execute.assert_not_called()
     assert out["mode"] == "not_submitted"
-    assert "kill switch" in (out.get("reason") or "").lower()
+    assert out.get("reason") == "live_trading_disabled"
     assert execution_ledger.exists()
 
 

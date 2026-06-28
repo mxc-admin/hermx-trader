@@ -215,6 +215,71 @@ def test_unknown_resolver_timeout_pauses_symbol_and_alerts(wr, monkeypatch):
 
 
 
+def _seed_unknown(wr, cl: str) -> dict:
+    intent = {
+        "symbol": "XRPUSDT",
+        "side": "buy",
+        "inst_id": "XRP-USDT-SWAP",
+        "planned_notional_usd": 1500.0,
+        "policy": "weighted_v1",
+    }
+    wr.record_order_state(cl, wr.ORDER_STATE_PLANNED, intent=intent, prev_state=None)
+    wr.record_order_state(cl, wr.ORDER_STATE_SUBMITTED, intent=intent, prev_state=wr.ORDER_STATE_PLANNED)
+    wr.record_order_state(cl, wr.ORDER_STATE_UNKNOWN, intent=intent, prev_state=wr.ORDER_STATE_SUBMITTED)
+    return intent
+
+
+def test_unknown_backstop_alerts_but_never_auto_closes(wr, monkeypatch):
+    # The lifecycle backstop is OBSERVE-ONLY: a too-old UNKNOWN order is alerted and the
+    # symbol paused, but the order is NEVER auto-transitioned to a terminal state -- it
+    # stays UNKNOWN/open so a human (or a later venue truth) resolves it.
+    cl = "mxc-xrpusdt-buy-backstop"
+    _seed_unknown(wr, cl)
+    monkeypatch.setattr(wr, "UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS", 1.0)
+    summary = wr.resolve_unknown_orders_once(
+        executor=StubExecutor(order=_norm_order("live", cl_ord_id=cl)),
+        now_ts="2099-01-01T00:00:00Z",
+    )
+    assert summary["expired"] == 1
+    assert summary["resolved"] == 0
+    # No terminal record written -- order is still UNKNOWN and open.
+    records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+    states = [r["state"] for r in records if r["cl_ord_id"] == cl]
+    assert wr.ORDER_STATE_FILLED not in states and wr.ORDER_STATE_REJECTED not in states
+    open_orders = wr.load_open_orders()
+    assert len(open_orders) == 1 and open_orders[0]["state"] == wr.ORDER_STATE_UNKNOWN
+
+
+def test_unknown_backstop_dedupes_pause_and_alerts_across_ticks(wr, monkeypatch):
+    # A single stuck order must not re-pause / re-alert on every tick. The pause reason
+    # is stable per (symbol, cl_ord_id), so the second tick is a no-op pause and emits
+    # NO new operator timeout alert.
+    cl = "mxc-xrpusdt-buy-backstop-dedupe"
+    _seed_unknown(wr, cl)
+    monkeypatch.setattr(wr, "UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS", 1.0)
+    ex = StubExecutor(order=_norm_order("live", cl_ord_id=cl))
+
+    first = wr.resolve_unknown_orders_once(executor=ex, now_ts="2099-01-01T00:00:00Z")
+    second = wr.resolve_unknown_orders_once(executor=ex, now_ts="2099-01-01T01:00:00Z")
+
+    assert first["expired"] == 1 and second["expired"] == 1  # still expired each tick
+    assert first["paused_symbols"] == ["XRPUSDT"]            # paused on first tick only
+    assert second["paused_symbols"] == []                    # deduped on second tick
+    op_alerts = wr.read_jsonl_tolerant(wr.OPERATOR_ALERT_LEDGER)
+    timeouts = [a for a in op_alerts if a["alert"] == wr.RECONCILE_ALERT_RESOLVER_TIMEOUT]
+    assert len(timeouts) == 1  # exactly one timeout alert despite two expired ticks
+
+
+def test_unknown_backstop_age_measured_from_origin_not_latest(wr, monkeypatch):
+    # Re-recording UNKNOWN must not reset the backstop clock. Age is measured from the
+    # order's ORIGIN (first journal record), so load_open_orders surfaces origin_ts and
+    # the backstop accumulates across the order's whole lifetime.
+    cl = "mxc-xrpusdt-buy-origin-age"
+    _seed_unknown(wr, cl)
+    open_orders = wr.load_open_orders()
+    assert open_orders and open_orders[0].get("origin_ts")  # origin timestamp surfaced
+
+
 def test_symbol_pause_blocks_submit_path(wr, monkeypatch):
     wr.pause_symbol("XRPUSDT", "manual pause test")
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
