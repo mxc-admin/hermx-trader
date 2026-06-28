@@ -18,7 +18,7 @@ Use this when deploying the clean system to a VPS.
 4. Validate strategy files.
 5. Start webhook service.
 6. Start dashboard service.
-7. Configure Cloudflare tunnel.
+7. Install `cloudflared` and run a named Cloudflare tunnel service.
 8. Confirm local ports.
 9. Confirm public routes.
 10. Send synthetic valid alert.

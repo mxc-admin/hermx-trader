@@ -1,0 +1,57 @@
+# HermX — two services from one image.
+#
+#   receiver  -> src/webhook_receiver.py  (TradingView webhook intake + execution)
+#   dashboard -> src/dashboard.py         (read-only operator dashboard)
+#
+# Both processes bind 127.0.0.1 internally, so we use network_mode: host. This
+# also lets Tailscale Funnel forward https://hermx.<tailnet>.ts.net/webhook
+# straight to 127.0.0.1:8891 on the host.
+#
+# Operators only need to fill in .env (cp setup/env.example .env) before running:
+#   docker compose up -d
+
+services:
+  receiver:
+    build: .
+    image: hermx:latest
+    command: ["python", "src/webhook_receiver.py"]
+    network_mode: host
+    restart: always
+    env_file: .env
+    volumes:
+      # Secrets / runtime config (owner-only 600 on the host).
+      - ./.env:/app/.env:ro
+      # Strategy files are operator-editable without rebuilding the image.
+      - ./strategies:/app/strategies
+      # Append-only ledgers persist across container restarts.
+      - hermx-data:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8891/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  dashboard:
+    build: .
+    image: hermx:latest
+    command: ["python", "src/dashboard.py"]
+    network_mode: host
+    restart: always
+    env_file: .env
+    depends_on:
+      - receiver
+    volumes:
+      - ./.env:/app/.env:ro
+      # Dashboard reads the same ledgers the receiver writes (read-only).
+      - hermx-data:/app/logs:ro
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8098/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  # Stateful ledger files (shadow-webhooks, decisions, executions, position-journal, ...).
+  hermx-data:

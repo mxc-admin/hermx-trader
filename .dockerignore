@@ -1,0 +1,23 @@
+# Secrets — never bake into the image.
+.env
+.env.*
+
+# Local virtualenv / caches
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+*.egg-info
+
+# VCS + dev artifacts
+.git
+.gitignore
+tests/
+node_modules
+*.log
+
+# Runtime state (persisted via the hermx-data volume, not the image)
+/data
+logs/
+runtime/
+exports/

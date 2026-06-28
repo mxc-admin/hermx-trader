@@ -131,11 +131,43 @@ Revisit only if a real need appears.
 - **Memory / learning loop** — no persistent agent memory; recommendations are
   stateless. Add only if outcomes-keyed priors prove worth the complexity.
 
-## 8. Compact layer sketch
+## 8. Pre-execution advisor — Design 1 (BUILT + tested, default OFF)
+
+The receiver may consult an LLM **risk overseer** between
+`build_strategy_execution_readiness` and submission. This is the deterministic
+front door asking the brain for a second opinion — **the LLM is never the front
+door**, so it can never be "down" in a way that stops trades.
+
+- **Authority:** binary only — `proceed` or `skip` (+ free-text `risk_note`, optional
+  0–100 `score`). It **cannot** change symbol, side, size, leverage, or strategy;
+  those are already fixed by the alert's `strategy_id` and the strategy file.
+- **Two separate off switches.** `HERMX_ADVISOR_ENABLED` turns it on as
+  **annotate-only** (a `skip` is recorded but the trade still executes).
+  `HERMX_ADVISOR_ALLOW_VETO` additionally lets a `skip` **block** the trade
+  (`okx_execution.reason = "vetoed_by_advisor"`). Both default OFF.
+- **Fails OPEN.** Timeout / transport error / malformed reply ⇒ proceed
+  deterministically (logged). A down or slow LLM never blocks a sanctioned trade.
+- **Seams:** `run_execution_advisor` / `execute_okx_with_advisor`
+  (`src/webhook_receiver.py`), defaults built-in with an optional
+  `shadow-config.json` `advisor` block (env-overridable), decisions logged to
+  `logs/advisor-decisions.jsonl`.
+  Tests: `tests/test_phase8_advisor.py`.
+- **Transport:** the **Hermes Agent** run as a one-shot **with our skills loaded**
+  (`hermes -z "<prompt>" --skills hermx-control`) — the full agent loop through
+  Hermes (its configured provider + credentials), so it can use `hermx-control`
+  (and skills we add later) to read the live `/api` before deciding. Not a bare LLM
+  call. The skill set will expand over time.
+
+This narrows the earlier "deferred agent mode": the agent gains a veto **within
+the fixed envelope** (it can only decline a trade, never originate or resize one),
+gated behind two explicit switches and a fail-open default.
+
+## 9. Compact layer sketch
 
 ```text
 TradingView webhook ─┐                         ┌─ Human chat (Hermes Agent / Nous,
-                     │                         │   loads skills/hermx-control/SKILL.md)
+                     │                         │   loads skills/hermx-control/SKILL.md,
+                     │                         │   Telegram/WhatsApp gateway optional)
                      ▼                         ▼
             ┌───────────────────── LOCAL HTTP API (127.0.0.1) ─────────────────────┐
             │  read:  dashboard.py  GET /api · /health        (:8098)               │
@@ -143,6 +175,8 @@ TradingView webhook ─┐                         ┌─ Human chat (Hermes Age
             └───────────────────────────────┬──────────────────────────────────────┘
                                              ▼
         build_strategy_execution_readiness  (notional = budget_usd * leverage)
+                                             ▼
+        [optional] pre-exec advisor  — proceed | skip(+veto)  · FAILS OPEN · default OFF
                                              ▼
         ExecutionService.execute  — gate chain (AUTHORITATIVE, built + tested)
         kill switch → gate precedence → symbol pause → idempotency →

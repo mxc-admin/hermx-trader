@@ -8,8 +8,7 @@ import json
 import os
 import sys
 import time
-import urllib.request
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -1568,7 +1567,6 @@ def strategy_card(strategy, okx_live, alerts):
     meta = ASSET_META.get(sym, {"name": sym, "logo": ""})
     live = (okx_live.get("positions") or {}).get(sym) or {}
     rows = [row for row in alerts if row.get("strategy_id") == strategy.get("strategy_id")]
-    last = rows[-1] if rows else {}
     submit_enabled = bool(strategy.get("okx_submit_orders"))
     engine_label = "orders disabled" if not submit_enabled else "submit enabled"
     engine_kind = "warn" if not submit_enabled else "good"
@@ -1772,11 +1770,8 @@ def status_banners(model):
 def render():
     model = dashboard_model()
     cfg = model["config"]
-    loaded = model["loaded"]
     okx_live = model.get("okx_live") or {}
     okx_executions = model.get("okx_executions") or []
-    backfill = loaded["backfill"]
-    backfill_status = str(backfill.get("status") or "missing")
     strategies = model.get("active_strategies") or []
     strategy_alerts = model.get("strategy_alerts") or []
     source_line = (
@@ -2058,7 +2053,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_bytes(404, b"not found", "text/plain")
 
-    def log_message(self, fmt, *args):
+    def log_message(self, _fmt, *_args):
         return
 
 

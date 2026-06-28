@@ -1,0 +1,24 @@
+[Unit]
+Description=HermX Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermx
+Group=hermx
+WorkingDirectory=/opt/hermx
+EnvironmentFile=/opt/hermx/.env
+ExecStart=/opt/hermx/.venv/bin/python src/dashboard.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermx-dashboard
+
+# prevent runaway restarts
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

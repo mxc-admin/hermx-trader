@@ -15,7 +15,7 @@ If an AI agent is reading this repository, give it `setup/AGENT_INSTALL_PROMPT.m
 - Windows, macOS, Linux, or VPS with Python 3.11+
 - TradingView account with access to the required MXC / Kinetic Flow indicators
 - OKX demo/sandbox API key
-- A webhook URL, either local tunnel or Cloudflare Tunnel
+- `cloudflared` (Cloudflare Tunnel) for public TradingView -> local receiver routing
 - Optional: a domain for public webhook/dashboard routes
 
 ## 2. Install
@@ -55,7 +55,12 @@ OKX_SECRET_KEY=
 OKX_PASSPHRASE=
 OKX_SIMULATED_TRADING=1
 OKX_SUBMIT_ORDERS=false
+CLOUDFLARE_TUNNEL_NAME=
+CLOUDFLARE_ACCOUNT_ID=
 ```
+
+`CLOUDFLARE_TUNNEL_NAME` and `CLOUDFLARE_ACCOUNT_ID` are operator metadata for
+tunnel setup/runbooks; HermX runtime does not read them directly.
 
 Keep `OKX_SUBMIT_ORDERS=false` until synthetic tests pass.
 
@@ -146,11 +151,65 @@ The webhook secret is sent as the **`X-Webhook-Secret` HTTP header** (not a quer
 string), matched against `SHADOW_WEBHOOK_SECRET`; an HMAC signature
 (`X-Webhook-Timestamp` + `X-Webhook-Signature`) is also verified when
 `HERMX_WEBHOOK_HMAC_KEY` is set. Public TradingView alerts reach this loopback port
-only through the Cloudflare Tunnel (section 11), never directly.
+only through the Tailscale Funnel, never directly.
 
 > **Port consistency.** The code default, `setup/env.example`, the start/smoke scripts,
 > and the Hermes Agent skill (`skills/hermx-control/SKILL.md`, section 13) all use
 > **8891**. If you override `SHADOW_PORT` in your `.env`, update the skill's port to match.
+
+### Expose Receiver Through Tailscale Funnel (required)
+
+Tailscale Funnel provides a **stable, free, no-domain HTTPS URL** that survives
+reboots and works identically on local Mac and any VPS — no domain purchase needed.
+
+Install and authenticate Tailscale:
+
+```bash
+# macOS
+brew install tailscale
+sudo brew services start tailscale
+tailscale up --hostname=hermx
+
+# Ubuntu/Debian VPS
+curl -fsSL https://tailscale.com/install.sh | sh
+tailscale up --hostname=hermx
+```
+
+First run: Tailscale prints a browser login URL — open it, sign in with a free
+Tailscale account, and approve the device. On first use also enable Funnel at the
+prompted URL.
+
+Start Funnel in the background (persists across terminal sessions):
+
+```bash
+tailscale funnel --bg 8891
+```
+
+Your stable public webhook URL:
+
+```text
+https://hermx.<tailnet>.ts.net/webhook
+```
+
+Where `<tailnet>` is your Tailscale network name (shown in `tailscale funnel status`).
+With `--hostname=hermx` set, the machine name prefix is always `hermx` regardless of
+the OS hostname — making it predictable across fresh installs.
+
+Verify:
+
+```bash
+tailscale funnel status          # shows the active URL
+curl https://hermx.<tailnet>.ts.net/health
+```
+
+Set the public HTTPS webhook URL in TradingView to:
+
+```text
+https://hermx.<tailnet>.ts.net/webhook
+```
+
+See `setup/02-cloudflare-domain.md` for the original Cloudflare Tunnel option
+(requires a domain; not recommended for new installs).
 
 ## 8. Create TradingView Alerts
 
@@ -169,6 +228,7 @@ Required TradingView settings:
 - frequency: once per bar close
 - expiration: open-ended or maximum available
 - webhook enabled
+- webhook URL points to the Cloudflare HTTPS route (`https://.../webhook`)
 - message is valid JSON
 - message includes `strategy_id`
 
@@ -208,7 +268,7 @@ Minimum VPS requirements:
 - create `.env`
 - create `shadow-config.json`
 - configure systemd services for dashboard and webhook
-- configure Cloudflare Tunnel or another HTTPS route
+- install `cloudflared` and run a named Cloudflare Tunnel as a service
 - verify dashboard and webhook health
 
 ## 12. Real Money

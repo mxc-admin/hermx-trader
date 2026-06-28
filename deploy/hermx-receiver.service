@@ -1,0 +1,24 @@
+[Unit]
+Description=HermX Webhook Receiver
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermx
+Group=hermx
+WorkingDirectory=/opt/hermx
+EnvironmentFile=/opt/hermx/.env
+ExecStart=/opt/hermx/.venv/bin/python src/webhook_receiver.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermx-receiver
+
+# prevent runaway restarts
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
