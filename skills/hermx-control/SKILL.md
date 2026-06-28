@@ -50,7 +50,10 @@ All endpoints are on this VPS over loopback. No API key is required locally.
   - `okx_live.account` → balances/equity.
   - `okx_executions` / ledger views → what the system actually did (the money record).
   - `executor` health, `ledger_health`, `freshness` → data trust signals.
-- `GET http://127.0.0.1:8098/health` → includes `allow_live_execution` (config gate).
+- `GET http://127.0.0.1:8098/health` → includes `allow_live_execution` (config gate)
+  and an `arm` object: `kill_switch_engaged`, `submit_orders`, `execution_enabled`,
+  `allow_live_execution`, and `armed_summary` (true only when the kill switch is
+  off AND all three config gates are live). This is read-only status, not a control.
 - `GET http://127.0.0.1:8891/health` and `GET http://127.0.0.1:8891/latest` →
   receiver liveness and the last processed alert.
 
@@ -101,10 +104,15 @@ to *educate yourself* about a strategy; never copy numbers out of them into a re
 2. Summarize `okx_live.positions` (symbol, side, size, `upl`, `realized_pnl`).
 
 **"Are we armed / live?"**
-1. `GET /health` → report `allow_live_execution`. Read `/api` `executor` health too.
-2. Be honest about limits: the OS-level submit kill switch (`HERMX_SUBMIT_ENABLED`)
-   is not exposed over HTTP, so state "config-armed" vs "actually submitting" only as
-   far as the data supports. Do not overstate readiness.
+1. `GET /health` → read the `arm` block. `armed_summary` is the single honest
+   answer: true means the kill switch is off AND `submit_orders`, `execution_enabled`,
+   and `allow_live_execution` are all true. If it's false, name which of
+   `kill_switch_engaged` / `submit_orders` / `execution_enabled` /
+   `allow_live_execution` is blocking. Read `/api` `executor` health too.
+2. Be precise, not reassuring. `armed_summary` reflects the kill switch and the
+   config gates the dashboard can see; the receiver still runs the full gate chain
+   (auth health, watchdog, symbol pause, idempotency) at submit time, so "armed"
+   means "all visible gates open", not "this next order will definitely submit".
 
 **Relaying a TradingView alert**
 1. Confirm the payload has all required fields and valid enums.

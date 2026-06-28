@@ -382,3 +382,72 @@ def test_model_contract_keys(dash):
         assert key in model
     # No legacy `sim` key remains (dead policy path removed, D4).
     assert "sim" not in model
+
+
+# ---------------------------------------------------------------------------
+# Read-only "arm" status in /health (Hermes Agent operator interface).
+# kill_switch_engaged mirrors webhook_receiver.submit_kill_switch_armed(); the
+# armed_summary is the AND of (NOT engaged) and the three config gates.
+# ---------------------------------------------------------------------------
+
+def _armed_config():
+    """A config whose three gates are all live (so only the kill switch varies)."""
+    return {
+        "execution": {"enabled": True, "submit_orders": True},
+        "risk": {"allow_live_execution": True},
+    }
+
+
+def test_arm_kill_switch_unset_is_not_engaged(dash, monkeypatch):
+    dash_mod, _core, _root = dash
+    monkeypatch.delenv("HERMX_SUBMIT_ENABLED", raising=False)
+    monkeypatch.setattr(dash_mod, "shadow_config", _armed_config)
+
+    arm = dash_mod.health_payload()["arm"]
+    assert arm["kill_switch_engaged"] is False
+    # Unset kill switch + all gates live => fully armed.
+    assert arm["armed_summary"] is True
+    assert arm["submit_orders"] is True
+    assert arm["execution_enabled"] is True
+    assert arm["allow_live_execution"] is True
+
+
+def test_arm_kill_switch_false_is_engaged(dash, monkeypatch):
+    dash_mod, _core, _root = dash
+    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "false")
+    monkeypatch.setattr(dash_mod, "shadow_config", _armed_config)
+
+    arm = dash_mod.health_payload()["arm"]
+    assert arm["kill_switch_engaged"] is True
+    # Engaged kill switch vetoes the summary even though every config gate is live.
+    assert arm["armed_summary"] is False
+
+
+def test_arm_kill_switch_true_is_not_engaged(dash, monkeypatch):
+    dash_mod, _core, _root = dash
+    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "true")
+    monkeypatch.setattr(dash_mod, "shadow_config", _armed_config)
+
+    arm = dash_mod.health_payload()["arm"]
+    assert arm["kill_switch_engaged"] is False
+    assert arm["armed_summary"] is True
+
+
+def test_arm_summary_requires_all_gates(dash, monkeypatch):
+    dash_mod, _core, _root = dash
+    monkeypatch.delenv("HERMX_SUBMIT_ENABLED", raising=False)  # not engaged
+
+    # Each single gate falsy must drop armed_summary to False (AND-logic).
+    cases = [
+        {"execution": {"enabled": True, "submit_orders": False},
+         "risk": {"allow_live_execution": True}},
+        {"execution": {"enabled": False, "submit_orders": True},
+         "risk": {"allow_live_execution": True}},
+        {"execution": {"enabled": True, "submit_orders": True},
+         "risk": {"allow_live_execution": False}},
+    ]
+    for cfg in cases:
+        monkeypatch.setattr(dash_mod, "shadow_config", lambda cfg=cfg: cfg)
+        arm = dash_mod.health_payload()["arm"]
+        assert arm["kill_switch_engaged"] is False
+        assert arm["armed_summary"] is False

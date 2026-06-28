@@ -1152,13 +1152,44 @@ def api_payload():
 def health_payload():
     cfg = shadow_config()
     policies = list(((cfg.get("policies") or {}).get("enabled")) or [])
+    execution_cfg = cfg.get("execution") or {}
+    allow_live_execution = bool(((cfg.get("risk") or {}).get("allow_live_execution")))
+
+    # Read-only mirror of webhook_receiver.submit_kill_switch_armed() (the source
+    # of truth): HERMX_SUBMIT_ENABLED unset => armed (NOT engaged); value in
+    # {"false","0","no",""} (stripped/lowered) => engaged/blocked; else NOT engaged.
+    # The dashboard cannot import the receiver, so the rule is duplicated here.
+    raw_kill = os.environ.get("HERMX_SUBMIT_ENABLED")
+    if raw_kill is None:
+        kill_switch_engaged = False
+    elif raw_kill.strip().lower() in {"false", "0", "no", ""}:
+        kill_switch_engaged = True
+    else:
+        kill_switch_engaged = False
+
+    submit_orders = bool(execution_cfg.get("submit_orders"))
+    execution_enabled = bool(execution_cfg.get("enabled"))
+    armed_summary = (
+        (not kill_switch_engaged)
+        and submit_orders
+        and execution_enabled
+        and allow_live_execution
+    )
+
     return {
         "ok": True,
         "service": "clean_shadow_dashboard",
         "mode": "paper_shadow",
         "policies": policies,
         "primary_policy": cfg.get("primary_policy"),
-        "allow_live_execution": bool(((cfg.get("risk") or {}).get("allow_live_execution"))),
+        "allow_live_execution": allow_live_execution,
+        "arm": {
+            "kill_switch_engaged": kill_switch_engaged,
+            "submit_orders": submit_orders,
+            "execution_enabled": execution_enabled,
+            "allow_live_execution": allow_live_execution,
+            "armed_summary": armed_summary,
+        },
         "strategy_files": [row.get("strategy_id") for row in active_strategies()],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

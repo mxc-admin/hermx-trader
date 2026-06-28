@@ -135,11 +135,23 @@ In a second terminal:
 .\scripts\start_webhook.ps1
 ```
 
-Default local webhook:
+The receiver binds **loopback only** at `127.0.0.1:$SHADOW_PORT`. The code default
+(`src/webhook_receiver.py`) is **8891**:
 
 ```text
-http://127.0.0.1:8888/webhook?secret=YOUR_SECRET
+http://127.0.0.1:8891/webhook
 ```
+
+The webhook secret is sent as the **`X-Webhook-Secret` HTTP header** (not a query
+string), matched against `SHADOW_WEBHOOK_SECRET`; an HMAC signature
+(`X-Webhook-Timestamp` + `X-Webhook-Signature`) is also verified when
+`HERMX_WEBHOOK_HMAC_KEY` is set. Public TradingView alerts reach this loopback port
+only through the Cloudflare Tunnel (section 11), never directly.
+
+> **Port consistency.** `setup/env.example` and `scripts/start_webhook.ps1` currently
+> pin `SHADOW_PORT=8888`, which overrides the 8891 code default. Pick one value and keep
+> it consistent everywhere — and note the Hermes Agent skill (`skills/hermx-control/SKILL.md`,
+> section 13) is written for **8891**, so if you keep 8888 you must update the skill to match.
 
 ## 8. Create TradingView Alerts
 
@@ -209,3 +221,21 @@ Do not enable real-money execution until:
 - dashboard equals OKX account state
 - emergency stop is tested
 - the operator explicitly approves real-money mode
+
+## 13. Optional: Hermes Agent operator interface
+
+**Entirely optional.** The deterministic system (dashboard + receiver + gate chain)
+runs fine without it. The Hermes Agent is an **external** Nous Research runtime that lets
+you *ask* HermX questions ("what's open?", "are we armed?") and *relay* a sanctioned
+signal — it **reads and relays only, never self-initiates**, and is constrained to the
+local loopback API. Sizing and all money-safety stay in Python. Full design:
+`docs/HERMES_AGENT_DESIGN.md`. Full step-by-step: **`setup/09-hermes-agent.md`**.
+
+Quick version:
+
+1. Install the Hermes Agent (macOS): `curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`, then `source ~/.zshrc`. Verify with `hermes --version`.
+2. Set an LLM provider key (**USER action**) — e.g. `hermes setup --portal` (Nous Portal OAuth, no key file) or `hermes model` to pick another provider; credentials live in `~/.hermes/.env`. Do not commit keys.
+3. Register the skill: symlink it into the Hermes skills tree, e.g.
+   `mkdir -p ~/.hermes/skills/trading && ln -sfn "$PWD/skills/hermx-control" ~/.hermes/skills/trading/hermx-control`. Confirm with `hermes skills list` (look for `hermx-control` / `trading` / `enabled`).
+4. Let the local agent reach the dashboard: either run the dashboard with `HERMX_DASH_AUTH=false` bound to loopback, **or** keep `HERMX_DASH_AUTH=true`, set `HERMX_DASH_AUTH_TOKEN`, and give the agent that token as the `X-Dashboard-Token` header.
+5. Verify by asking the agent "what's open?" and "are we armed?" — the second reads the new `arm` block from `GET /health`.

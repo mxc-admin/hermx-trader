@@ -63,11 +63,12 @@ The system must support credentials for **multiple exchanges at the same time** 
 All exchange I/O (submission and polling/reconciliation) flows through a single internal API surface (`ExecutionService`).
 
 ```
-TradingView webhook
+TradingView webhook ─┐         ┌─ Human via external Hermes Agent (loads
+                     │         │   skills/hermx-control/SKILL.md, relays a signal)
+                     ▼         ▼
+            webhook_receiver.py  POST /webhook  (127.0.0.1:8891)
       ↓
-Hermes analysis skill
-      ↓
-Hermes execution skill
+build_strategy_execution_readiness  (notional = budget_usd * leverage)
       ↓
 ExecutionService (controlled API + risk controls)
       ↓
@@ -76,7 +77,10 @@ CCXT adapter (only exchange implementation)
 OKX / KuCoin / Bybit / ...
 ```
 
-- **Hermes skill for execution:** Hermes decides and requests execution through the skill contract, not by hardcoding exchange calls in strategy logic.
+- **Hermes Agent is external and out-of-band:** the agent (Nous, see Phase 8) does not
+  sit inline in this data path. It *relays* a sanctioned signal to the same `POST /webhook`
+  entry TradingView uses, and *reads* state from the dashboard; sizing and the gate chain
+  stay in code below the API line. There is no inline "analysis skill → execution skill" pipeline.
 - **Controlled API layer:** `ExecutionService` is the only allowed gateway for submit/reconcile and owns all gate precedence and runtime safety checks.
 - **Risk controls stay in HermX code:** idempotency, write-ahead journal transitions, reconciliation semantics, symbol pause, and kill switches remain in first-party code, above CCXT.
 - **CCXT is transport, not policy:** CCXT handles exchange I/O and normalization across venues; it does not own risk policy.
@@ -169,10 +173,10 @@ P5  Execution API + CCXT Cutover   (skill+API+risk+ccxt write path) ~1–2 wk
 P6  Exchange-Agnostic Schemas      (schema v2 + multi-exchange       ~1–2 wk
     + Multi-Exchange Enablement     enablement: creds, profiles, sandbox writes)
 P7  Test Strategy & CI Hardening   (coverage gates, pipeline)       ongoing
-P8  Hermes Agent Brain (Nous)      (advisory venue/action routing)  gated behind P6
+P8  Hermes Agent operator interface (read + relay via local API; skill built)
 ```
 
-> P8 is a planned reasoning layer, not deterministic infrastructure; it is gated behind P6 (multi-exchange) and a clean OKX live track record. See `docs/HERMES_AGENT_DESIGN.md`.
+> P8 is an **external** Hermes Agent (Nous) that loads `skills/hermx-control/SKILL.md` and calls the existing loopback API (read `/api`·`/health` :8098, act `/webhook` :8891) — advisory/relay only, never self-initiates, sizing + safety stay in code. The skill and gate chain are built; MCP, a confirm-token handshake, two-mode gates, manual close, and memory are explicitly deferred. See `docs/HERMES_AGENT_DESIGN.md`.
 
 > Sequencing note: P2 (security) is placed before P3 because the bot is reachable via a public tunnel and the auth gap (S1/S2) is exploitable *today*; it is cheap and isolated. P1 is first because it is the only class of bug that can lose money silently.
 
@@ -476,22 +480,56 @@ Skill contract: `skills/hermes-execution.md`.
 
 ---
 
-### Phase 8 — Hermes Agent Brain (Nous) — PLANNED, not started
+### Phase 8 — Hermes Agent operator interface (Nous) — SIMPLIFIED; skill BUILT
 
-**Goal:** Add the Layer 1 reasoning cap — a Hermes Agent brain (Nous Research) that, from a signal + live market context, recommends the best `{venue, action}`, schedules periodic scans (cron), and learns which venues/strategies perform best from execution-ledger outcomes. **This is a name only today** — there is no LLM, decision, learning, or scheduling code.
+**Goal:** Give the operator a Hermes Agent (Nous Research, an **external** runtime) that
+*reads* HermX state and *relays* sanctioned signals by calling the **existing local
+loopback HTTP API** — nothing more. The agent is advisory/relay only: it answers
+"what's open / are we armed?" and passes a TradingView-originated or human-instructed
+signal through to the receiver. It **never** self-initiates and is constrained entirely
+by what the local API exposes. This phase was deliberately de-scoped from the earlier
+`{venue, intent}` "routing brain" framing (see *Deferred* below).
 
-Full design: **`docs/HERMES_AGENT_DESIGN.md`**.
+Full design: **`docs/HERMES_AGENT_DESIGN.md`** (157 lines).
 
-**Hard boundary:** the brain is advisory/routing ONLY. It emits a `{venue, intent}` recommendation and **must** execute exclusively through `HermesExecutionSkill → ExecutionService` — it never touches CCXT directly and never bypasses gates or journals. The deterministic layer validates and can **VETO** any brain recommendation. Money-safety never moves into the LLM.
+**What is BUILT today:**
+- `skills/hermx-control/SKILL.md` — the skill the external Hermes Agent loads. It talks
+  only to the two loopback servers: read `GET /api` · `GET /health` (`dashboard.py`,
+  `127.0.0.1:8098`); act `POST /webhook` (`webhook_receiver.py`, `127.0.0.1:8891`).
+- The authoritative gate chain it is constrained by — `ExecutionService.execute`
+  (`src/execution/service.py`), the write-ahead order journal, idempotency,
+  reconciliation, the kill switch — built + tested under P1/P3/P5.
+- A read-only `arm` block in `GET /health` (`health_payload()`, `src/dashboard.py`) so
+  the agent can answer "are we armed?" honestly (kill switch + the three config gates).
 
-**Gating (do not start until both hold):**
-- P6 multi-exchange enablement is complete (multiple venues route end-to-end), since venue *selection* is the brain's core value and is meaningless with one venue.
-- A clean OKX live track record exists (deterministic stack proven in real use).
-- Roll out advisory/shadow first (log recommendations without acting) before the brain is allowed to influence routing.
+**Hard boundary (non-negotiable):**
+- **Advisory / relay only.** The agent reads and relays; it does **not** execute. The
+  deterministic layer validates and can **VETO** anything.
+- **Never self-initiates.** Only an inbound webhook signal or an explicit human
+  instruction can reach submission — a timer, cron, or model hunch cannot.
+- **Sizing stays in code, never the LLM's.** `build_strategy_execution_readiness`
+  (`src/webhook_receiver.py`) computes `target_notional_usd = budget_usd * leverage`;
+  the `/webhook` body has no size/notional/leverage field.
+- **Money-safety lives in Python**, above CCXT, where the LLM cannot edit it. `SKILL.md`
+  is treated as untrusted guidance.
 
-**Risk:** N/A yet (not started). The design doc enumerates the inputs/outputs contract, learning loop, cron model, failure posture (brain down/uncertain → fall back to the strategy file's default venue; never block safety), and observability.
+**DEFERRED / explicitly out of scope** (revisit only on a real need):
+- **MCP server / proxy** — unnecessary; the agent calls the existing loopback API directly.
+- **propose→token→confirm handshake** — over-engineered for one local operator; the
+  human issuing the instruction *is* the confirmation.
+- **`orchestration_mode` two-mode config gate** — there is one path (advisory/relay);
+  the gates decide the rest.
+- **Manual close / flatten** — unsupported: the readiness builder emits open-only intents
+  (`execution_intent.actions = ["CLOSE_OPPOSITE_IF_ANY", "OPEN_<dir>"]`); there is no
+  close-only intent for a human "close SOLUSDT".
+- **Memory / learning loop** — no persistent agent memory; recommendations are stateless.
 
-(Phase 7 remains the ongoing test/CI track; Phase 8 sits above all deterministic phases.)
+**Failure posture:** agent down/unreachable ⇒ the receiver's webhook→execute path is
+unaffected (the agent is an enhancement, not a dependency). Read failure / stale data ⇒
+report UNKNOWN, never "flat".
+
+(Phase 7 remains the ongoing test/CI track; Phase 8 sits **above** the local API line —
+everything below it is deterministic Python the agent cannot edit or bypass.)
 
 ---
 
