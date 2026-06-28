@@ -1,8 +1,23 @@
 # Dashboard Model
 
-The dashboard is a state viewer.
+The dashboard is a **read-only** state viewer. It never submits, cancels, or mutates the
+money path — its only job is to render state it reads from strategy files, logs, ledgers,
+and exchange readback. It must not invent positions.
 
-It must not invent positions. It must read from strategy files, logs, ledgers, and exchange readback.
+## Authority: live panel vs. ledger
+
+Two kinds of data appear on the dashboard, and they have **different authority**. Do not
+conflate them.
+
+| Source | What it is | Authority | Failure mode |
+|--------|-----------|-----------|--------------|
+| **Live panel** (exchange readback, executor health, live price/position) | A best-effort **health snapshot** queried at render time | Informational only — *not* a record of truth. May be stale, degraded, or unavailable. | When the executor is unavailable/stale, show an explicit `EXECUTOR ERROR` / `STALE` banner and report **UNKNOWN** — never silently render "flat". |
+| **Ledgers** (`executions.jsonl`, `order-journal.jsonl`, `paper-state.json`) | The durable, append-only **record of what happened** | **Authoritative.** The order journal's `PLANNED → SUBMITTED → (FILLED \| REJECTED \| UNKNOWN)` lifecycle is the source of truth for order state. | A torn trailing line is tolerated (quarantined); the canonical state is whatever the journal says. |
+
+Rule of thumb: if the live panel and a ledger disagree, the **ledger wins** for "what
+happened"; the live panel only answers "what does the venue look like right now". An
+order the journal holds as `UNKNOWN` stays UNKNOWN on the dashboard even if the live panel
+happens to show a flat position — reconciliation (not the dashboard) resolves it.
 
 ## Main View
 

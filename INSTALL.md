@@ -234,13 +234,23 @@ and use it to log into the dashboard.
 > `run.sh` generates `HERMX_SECRET` automatically on first run if it is blank, and `bash run.sh
 > --new-secret` regenerates it on demand. There is no automatic time-based rotation.
 
-> **Single secret.** `HERMX_SECRET` is the only source for both webhook and dashboard auth;
-> there are no legacy fallbacks. If it is blank, auth fails closed (every webhook gets `401`
-> and protected dashboard routes return `401`).
+> **Single secret — and its blast radius.** `HERMX_SECRET` is the only source for both the
+> webhook (`X-Webhook-Secret`) and dashboard auth; there are no legacy fallbacks. If it is
+> blank, auth fails closed (every webhook gets `401` and protected dashboard routes return
+> `401`). Because **one** value guards **both** surfaces, a leak exposes the intake *and* the
+> dashboard at once — rotate immediately on any suspicion with `bash run.sh --new-secret`
+> (which rotates both in one step). See `setup/07-security-rotation.md`.
+
+> **Recommended posture: HMAC on for non-loopback.** A loopback-only deploy (everything on
+> `127.0.0.1`, reached via a single Tailscale Funnel) can run with `HERMX_REQUIRE_HMAC=false`.
+> But if you bind a non-loopback interface (`HERMX_BIND_HOST=0.0.0.0` or a LAN IP), set
+> `HERMX_REQUIRE_HMAC=true` and an `HERMX_WEBHOOK_HMAC_KEY` — the shared secret alone is
+> replayable, and HMAC adds per-request signature + replay-freshness. The receiver logs a
+> SECURITY warning at boot if it binds non-loopback with HMAC off.
 
 ```text
-HERMX_REQUIRE_HMAC=false    # leave false unless you also configure an HMAC key
-HERMX_WEBHOOK_HMAC_KEY=     # optional; only if you want X-Webhook-Signature verification
+HERMX_REQUIRE_HMAC=false    # leave false ONLY for loopback-only deploys; true for non-loopback
+HERMX_WEBHOOK_HMAC_KEY=     # required when HMAC is on; adds X-Webhook-Signature verification
 ```
 
 **(b) Exchange credentials — REQUIRED — show only the variables for the exchange chosen in Phase 0**
