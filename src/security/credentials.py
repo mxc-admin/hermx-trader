@@ -80,6 +80,45 @@ def resolve_exchange_credentials(exchange: str, source_env: dict | None = None) 
             out["BYBIT_SECRET_KEY"] = secret_key
         return out
 
+    if key in {"binance", "binance_testnet"}:
+        api_key = _pick_first(env, "BINANCE_TESTNET_API_KEY", "BINANCE_API_KEY")
+        secret_key = _pick_first(env, "BINANCE_TESTNET_SECRET_KEY", "BINANCE_SECRET_KEY")
+        if api_key:
+            out["BINANCE_API_KEY"] = api_key
+        if secret_key:
+            out["BINANCE_SECRET_KEY"] = secret_key
+        return out
+
+    if key in {"bitget", "bitget_demo"}:
+        api_key = _pick_first(env, "BITGET_DEMO_API_KEY", "BITGET_API_KEY")
+        secret_key = _pick_first(env, "BITGET_DEMO_SECRET_KEY", "BITGET_SECRET_KEY")
+        passphrase = _pick_first(env, "BITGET_DEMO_PASSPHRASE", "BITGET_PASSPHRASE")
+        if api_key:
+            out["BITGET_API_KEY"] = api_key
+        if secret_key:
+            out["BITGET_SECRET_KEY"] = secret_key
+        if passphrase:
+            out["BITGET_PASSPHRASE"] = passphrase
+        return out
+
+    if key in {"gate", "gateio", "gate_io", "gate_testnet"}:
+        api_key = _pick_first(env, "GATE_TESTNET_API_KEY", "GATE_API_KEY")
+        secret_key = _pick_first(env, "GATE_TESTNET_SECRET_KEY", "GATE_SECRET_KEY")
+        if api_key:
+            out["GATE_API_KEY"] = api_key
+        if secret_key:
+            out["GATE_SECRET_KEY"] = secret_key
+        return out
+
+    if key in {"coinbase", "coinbase_sandbox", "coinbase_advanced"}:
+        api_key = _pick_first(env, "COINBASE_SANDBOX_API_KEY", "COINBASE_API_KEY")
+        secret_key = _pick_first(env, "COINBASE_SANDBOX_SECRET_KEY", "COINBASE_SECRET_KEY")
+        if api_key:
+            out["COINBASE_API_KEY"] = api_key
+        if secret_key:
+            out["COINBASE_SECRET_KEY"] = secret_key
+        return out
+
     if key in {"hyperliquid", "hyperliquid_testnet"}:
         # Hyperliquid auth differs from the apiKey/secret/passphrase venues: it is a
         # wallet address + private key (NO passphrase). Namespaced env names mirror
@@ -123,9 +162,30 @@ def redact_secrets(text: str | None) -> str:
         "OKX_PASSPHRASE",
         "KUCOIN_API_KEY",
         "KUCOIN_SECRET",
+        "KUCOIN_PAPER_SECRET",
         "KUCOIN_PASSPHRASE",
         "BYBIT_API_KEY",
         "BYBIT_SECRET_KEY",
+        "BYBIT_TESTNET_API_KEY",
+        "BYBIT_TESTNET_SECRET_KEY",
+        "BINANCE_API_KEY",
+        "BINANCE_SECRET_KEY",
+        "BINANCE_TESTNET_API_KEY",
+        "BINANCE_TESTNET_SECRET_KEY",
+        "BITGET_API_KEY",
+        "BITGET_SECRET_KEY",
+        "BITGET_PASSPHRASE",
+        "BITGET_DEMO_API_KEY",
+        "BITGET_DEMO_SECRET_KEY",
+        "BITGET_DEMO_PASSPHRASE",
+        "GATE_API_KEY",
+        "GATE_SECRET_KEY",
+        "GATE_TESTNET_API_KEY",
+        "GATE_TESTNET_SECRET_KEY",
+        "COINBASE_API_KEY",
+        "COINBASE_SECRET_KEY",
+        "COINBASE_SANDBOX_API_KEY",
+        "COINBASE_SANDBOX_SECRET_KEY",
         "HYPERLIQUID_WALLET_ADDRESS",
         "HYPERLIQUID_PRIVATE_KEY",
         "HYPERLIQUID_TESTNET_WALLET_ADDRESS",

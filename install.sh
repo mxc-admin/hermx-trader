@@ -70,7 +70,7 @@ EXCHANGE_TABLE=(
   "okx|OKX (recommended)|OKX_DEMO|apiKey,secret,passphrase"
   "binance|Binance|BINANCE_TESTNET|apiKey,secret"
   "bybit|Bybit|BYBIT_TESTNET|apiKey,secret"
-  "kucoin|KuCoin|KUCOIN_PAPER|apiKey,secret,passphrase"
+  "kucoin|KuCoin|KUCOIN_PAPER|apiKey,secret_bare,passphrase"
   "bitget|Bitget|BITGET_DEMO|apiKey,secret,passphrase"
   "gate|Gate.io|GATE_TESTNET|apiKey,secret"
   "coinbase|Coinbase Advanced|COINBASE_SANDBOX|apiKey,secret"
@@ -124,13 +124,18 @@ pick_exchange() {
         read -r -s -p "  Secret: " val; echo
         set_env "${prefix}_SECRET_KEY" "$val"
         ;;
+      secret_bare)
+        # KuCoin's resolver reads <PREFIX>_SECRET (no _KEY suffix).
+        read -r -s -p "  Secret: " val; echo
+        set_env "${prefix}_SECRET" "$val"
+        ;;
       passphrase)
         read -r -s -p "  Passphrase: " val; echo
         set_env "${prefix}_PASSPHRASE" "$val"
         ;;
       wallet_address)
         read -r -p "  Wallet Address: " val
-        set_env "${prefix}_WALLET" "$val"
+        set_env "${prefix}_WALLET_ADDRESS" "$val"
         ;;
       private_key)
         read -r -s -p "  Private Key: " val; echo
