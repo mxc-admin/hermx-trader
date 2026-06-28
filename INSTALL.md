@@ -79,6 +79,13 @@ master gate off — nothing is sent to the exchange.
 
 ---
 
+> **Automated path:** Run `bash install.sh` from the repo root for a script-driven
+> install covering Phases 1–5 + verification. This guide remains the reference for
+> every decision the script makes — consult it when a step fails or you want to
+> understand why.
+
+---
+
 ## PHASE 0 — Prerequisites check
 
 Before touching the machine, ask the user the following and record the answers. Do not proceed until
@@ -162,7 +169,7 @@ python3.11 --version
 ```
 
 On macOS you'll clone into a working directory of your choice instead of `/opt/hermx`, and use the
-foreground run mode in Phase 5 (Option C) — systemd is Linux-only and Docker Desktop for Mac does not
+foreground run mode in Phase 5 (Option A · Mac) — systemd is Linux-only and Docker Desktop for Mac does not
 support the `network_mode: host` this stack relies on.
 
 **✅ Verify Phase 1:** `python3.11 --version` prints `3.11.x`, and `git --version` / `curl --version`
@@ -450,20 +457,28 @@ serving port 8891, and `WEBHOOK_URL.txt` contains the full `/webhook` URL.
 
 ## PHASE 5 — Deploy HermX Services
 
-Choose your deployment mode:
+> **Not sure? Use Option A. It works everywhere.**
+>
+> Prefer the automated path? Run `bash install.sh` from the repo root instead.
 
-| Option | Best for | What you get |
-|--------|----------|--------------|
-| A — systemd | VPS, long-lived server | OS-supervised, minimal overhead |
-| B — Docker | VPS, prefer containers | Image-isolated, easy updates |
-| C — Foreground | Mac / local dev | No setup, ctrl+c to stop |
+There are exactly **two** ways to run HermX:
 
-> Mac users: use Option C. `network_mode: host` in Docker Desktop for Mac does not
-> bridge loopback correctly, so Option B will not work as expected on macOS.
+| Option | Where | What you get |
+|--------|-------|--------------|
+| **A — Source install** | **VPS *and* Mac** | systemd on a Linux VPS; foreground processes on Mac/local |
+| **B — Docker** | **VPS only** | Image-isolated containers, easy updates |
 
-Ask the user which mode they want, then do **one** of the following.
+Option A is the **base path** and works on every platform. Option B is a VPS-only
+convenience — do **not** use it on a Mac (see the warning under Option B).
 
-### Option A — systemd (VPS)
+Ask the user which option they want, then do **one** of the following.
+
+### Option A — Source install (VPS: systemd · Mac: foreground)
+
+This is the path that works everywhere. On a Linux VPS it installs OS-supervised
+systemd services; on macOS/local it runs the two processes in the foreground.
+
+#### A · VPS (systemd)
 
 You already cloned to `/opt/hermx` and built `/opt/hermx/.venv` in Phase 2, which is exactly where the
 units expect them — so deployment is just running the installer:
@@ -485,27 +500,7 @@ curl -sf http://127.0.0.1:8098/health && echo " dashboard OK"
 
 Follow logs if needed: `journalctl -u hermx-receiver -f` (Ctrl-C to stop).
 
-### Option B — Docker (VPS)
-
-The repo ships a `Dockerfile` and `docker-compose.yml` (one image, two services,
-`network_mode: host`, a named `hermx-data` volume for ledger persistence). With `.env` and
-`shadow-config.json` already in place:
-
-```bash
-docker compose up -d --build
-docker compose ps
-docker compose logs --tail=30 receiver    # check the receiver booted cleanly
-curl -sf http://127.0.0.1:8891/health && echo " receiver OK"
-curl -sf http://127.0.0.1:8098/health && echo " dashboard OK"
-```
-
-To stop later: `docker compose down` (the `hermx-data` volume and your ledgers survive).
-
-> **macOS note:** Docker Desktop for Mac does **not** implement `network_mode: host` the way Linux
-> does — the containers can't reach the host loopback, so the `/health` probes and Tailscale Funnel
-> forwarding won't work. On a Mac, use **Option C** instead.
-
-### Option C — Foreground (Mac / local dev)
+#### A · Mac / local (foreground)
 
 No supervisor — you run the two processes directly in two terminals and stop them with Ctrl-C. The
 processes read configuration from the environment (there is no auto-loaded `.env`), so source `.env`
@@ -531,6 +526,26 @@ curl -sf http://127.0.0.1:8098/health && echo " dashboard OK"
 ```
 
 Stop either service with Ctrl-C in its terminal.
+
+### Option B — Docker (VPS only)
+
+The repo ships a `Dockerfile` and `docker-compose.yml` (one image, two services,
+`network_mode: host`, a named `hermx-data` volume for ledger persistence). With `.env` and
+`shadow-config.json` already in place:
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs --tail=30 receiver    # check the receiver booted cleanly
+curl -sf http://127.0.0.1:8891/health && echo " receiver OK"
+curl -sf http://127.0.0.1:8098/health && echo " dashboard OK"
+```
+
+To stop later: `docker compose down` (the `hermx-data` volume and your ledgers survive).
+
+> **Not for Mac.** Docker Desktop for Mac does **not** implement `network_mode: host` the way Linux
+> does — the containers can't reach the host loopback, so the `/health` probes and Tailscale Funnel
+> forwarding won't work. On a Mac, use **Option A** (foreground) instead.
 
 **✅ Verify Phase 5:** Both `/health` endpoints return success. If either fails, check logs
 (`journalctl`, `docker compose logs`, or the terminal output) and resolve before continuing — see

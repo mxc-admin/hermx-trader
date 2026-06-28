@@ -1,0 +1,67 @@
+{
+  "mode": "duo_base_dev_strategy_demo",
+  "primary_policy": "strategy_file_duo_base_dev",
+  "execution_timeframe": "strategy_file",
+  "chart_type": "heikin_ashi",
+  "base_notional_usd": 0,
+  "fees": {
+    "maker_rate": 0.0002,
+    "taker_rate": 0.0005,
+    "default_liquidity": "taker"
+  },
+  "funding": {
+    "enabled": false,
+    "default_rate": 0.0
+  },
+  "policies": {
+    "enabled": []
+  },
+  "execution": {
+    "enabled": true,
+    "mode": "demo_live",
+    "exchange": "ccxt",
+    "ccxt_exchange": "bybit",
+    "ccxt_default_type": "swap",
+    "execution_policy": "strategy_file_duo_base_dev",
+    "shadow_policy": "none",
+    "route": "bybit_api",
+    "account": "testnet",
+    "td_mode": "isolated",
+    "simulated_trading": true,
+    "force_ipv4": true,
+    "submit_orders": false
+  },
+  "strategy_engine": {
+    "enabled": true,
+    "strategies_dir": "strategies",
+    "default_status": "trial_candidate",
+    "submit_orders": false,
+    "allow_strategy_alerts": true,
+    "require_strategy_id": true,
+    "quarantine_invalid_strategy_alerts": true,
+    "enforce_alert_schema": false,
+    "notes": "Bybit testnet demo profile. DISARMED by default: execution.submit_orders and strategy_engine.submit_orders are false and risk.allow_live_execution is false, so no order can be submitted until Bybit's gated sandbox write test has proven the venue. Credentials resolve from BYBIT_TESTNET_API_KEY / BYBIT_TESTNET_SECRET_KEY. The runtime kill switch (HERMX_SUBMIT_ENABLED) remains the final gate above all of these."
+  },
+  "assets": {
+    "BTCUSDT": {
+      "enabled": true,
+      "inst_id": "BTC-USDT-SWAP",
+      "budget_usd": 1500,
+      "leverage": 2,
+      "timeframe": "2h"
+    },
+    "ETHUSDT": {
+      "enabled": true,
+      "inst_id": "ETH-USDT-SWAP",
+      "budget_usd": 2000,
+      "leverage": 2,
+      "timeframe": "2h"
+    }
+  },
+  "risk": {
+    "allow_live_execution": false,
+    "duplicate_protection": true,
+    "paper_uses_signal_price_until_okx_fill": false
+  },
+  "notes": "Bybit testnet only. New venue stays DISARMED until its gated write test passes."
+}
