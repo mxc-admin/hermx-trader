@@ -151,8 +151,9 @@ HERMX_JOURNAL_SEGMENT_MAX_RECORDS = int(os.environ.get("HERMX_JOURNAL_SEGMENT_MA
 # replay-unnecessary), so they are pruned beyond K. Set < 0 to keep all.
 HERMX_JOURNAL_SEGMENT_RETENTION = int(os.environ.get("HERMX_JOURNAL_SEGMENT_RETENTION", "5") or "5")
 # Generic, exchange-agnostic execution ledgers. The legacy OKX-named mirror files
-# (okx-execution-plan.jsonl / okx-executions.jsonl) were removed: nothing wrote them
-# post-CCXT-cutover. The dashboard keeps a read-only historical fallback for old boxes.
+# (okx-execution-plan.jsonl / okx-executions.jsonl) are no longer written: nothing wrote
+# them post-CCXT-cutover and the fallback was removed. The dashboard now reads only the
+# canonical execution ledger below.
 EXECUTION_PLAN_LEDGER = LOG_DIR / "execution-plan.jsonl"
 EXECUTION_LEDGER = LOG_DIR / "executions.jsonl"
 # Submission-outcome state machine + write-ahead order journal (REFACTOR_PLAN.md:204,
@@ -3066,8 +3067,9 @@ def _cl_ord_id_from_readiness(readiness: dict) -> "str | None":
 def load_open_orders() -> list[dict]:
     """Restart-recovery reader consumed by Task 4 reconciliation: the LATEST record
     (highest seq) per cl_ord_id whose state is still non-terminal
-    (PLANNED/SUBMITTED/UNKNOWN). Folds read_jsonl_tolerant(ORDER_JOURNAL_LEDGER), so a
-    truncated trailing line is tolerated. Terminal (FILLED/REJECTED) orders are omitted.
+    (PLANNED/SUBMITTED/UNKNOWN). Reads the in-memory order index (verified checkpoint +
+    live-segment tail) rather than re-folding the journal, so records that have rotated
+    into sealed segments are still seen. Terminal (FILLED/REJECTED) orders are omitted.
 
     Each returned record is a COPY of the latest with an added ``origin_ts`` -- the ts of
     the order's FIRST (lowest-seq) journal record. The lifecycle backstop measures age
@@ -3531,7 +3533,7 @@ def reconcile_startup(executor=None) -> dict:
         try:
             state = load_paper_state()
             expected = _expected_positions_from_state(state)
-            sym_map = _symbol_inst_map_from_orders(read_jsonl_tolerant(ORDER_JOURNAL_LEDGER))
+            sym_map = _symbol_inst_map_from_orders(load_open_orders())
             summary["position_mismatches"] = reconcile_positions_once(executor, expected, sym_map)
         except Exception as exc:  # pragma: no cover - tolerant
             summary["errors"].append(f"reconcile_positions: {exc}")

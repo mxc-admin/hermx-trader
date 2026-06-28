@@ -53,6 +53,11 @@ STRATEGIES_DIR = ROOT / "strategies"
 STRATEGY_ALERTS_FILE = LOGS / "strategy-alerts.jsonl"
 # Read-only observability sources for the order / reconcile / operator panels.
 ORDER_JOURNAL_FILE = LOGS / "order-journal.jsonl"
+# Verified checkpoint written by the receiver before it seals+rotates the live segment.
+# It carries the latest record per cl_ord_id (index_records) for every order folded out
+# of the now-sealed segments, so the open-orders panel must merge it with the live tail
+# or it would miss any order whose latest record rotated into a sealed file.
+ORDER_JOURNAL_CHECKPOINT_FILE = LOGS / "order-journal.checkpoint.json"
 RECONCILE_ALERTS_FILE = LOGS / "reconcile-alerts.jsonl"
 OPERATOR_ALERTS_FILE = LOGS / "operator-alerts.jsonl"
 # Order states the open-orders panel filters out (terminal); mirrors the receiver's set.

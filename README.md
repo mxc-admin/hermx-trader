@@ -1,107 +1,136 @@
 # HermX
 
-**Deterministic crypto signal execution, operated by an AI assistant.**
+**Safe, deterministic execution of your TradingView strategies — with an optional AI co-pilot that cannot touch your money.**
 
-HermX turns TradingView strategy alerts into safe, gated exchange orders. A deterministic Python
-stack owns all money-safety — validation, idempotency, journaling, kill switches — and submits
-demo/sandbox orders only when every safety gate is open. On top of that sits the optional **Hermes
-Agent**: a natural-language operator that *reads* state and *relays* sanctioned signals over Telegram.
-It can never size a trade, override a gate, or call an exchange directly.
+HermX turns TradingView alerts into exchange orders through a hardened Python execution layer that refuses to place a trade unless *every* safety check passes. It ships demo-first, logs everything, and can optionally be paired with the Hermes Agent — an LLM-powered assistant that monitors your system and relays signals over Telegram, but has zero ability to size positions, override gates, or call exchanges directly.
 
-Execution runs through CCXT. Four venues have wired authenticated execution — **OKX** (recommended,
-fully tested), **KuCoin**, **Bybit**, and **Hyperliquid**. Binance, Bitget, Gate.io, and Coinbase
-Advanced ship runtime/credential profiles but are **config-only — not yet wired** into the CCXT
-adapter's authenticated client (`src/executors/ccxt_adapter.py`), so they cannot place authenticated
-orders today. Public TradingView alerts reach a loopback-only receiver
-through a **Tailscale Funnel** — a stable HTTPS URL with no domain to buy and no firewall ports to open.
-The Docker deploy uses bridge networking with a **Tailscale** sidecar for the same ingress — Funnel for the
-receiver, tailnet-only serve for the dashboard (see [INSTALL.md](INSTALL.md) → *Option B — Docker*).
+If you have (or are building) solid strategies on TradingView and want reliable 24/7 execution without babysitting charts or trusting fragile custom bots, HermX was built for you.
 
-## How it works
+## Why Should You Care?
 
-```text
-TradingView alert
-  -> Tailscale Funnel (stable public HTTPS URL)
-  -> Webhook receiver  (loopback 127.0.0.1:8891; validates strategy_id + schema)
-  -> Gate chain        (execution_mode + submit_orders; idempotency, journal, reconcile)
-  -> CCXT adapter      (venue translation)
-  -> Exchange          (OKX demo — live-verified)
-  -> Execution ledger -> Dashboard (loopback 127.0.0.1:8098, read-only)
+Most traders face an uncomfortable tradeoff:
+
+- **Manual trading** — You miss signals while sleeping, make emotional decisions, or waste hours staring at charts.
+- **Build your own executor** — One bug, missed edge case, or credential issue can be extremely expensive.
+- **Use black-box signal services** — You give up control, pay high fees, and still worry about execution quality.
+
+**HermX offers a different path.**
+
+It provides a **deterministic, auditable execution engine** that treats every alert as if real money is on the line — even in demo mode. Multiple independent safety layers (idempotency, kill switches, journaling, reconciliation, and more) must all agree before an order is submitted. There is a single execution chokepoint, and the entire money path is written in Python you can read and audit.
+
+On top of this rock-solid foundation sits the optional **Hermes Agent**. This AI assistant lives in your Telegram, can answer questions about your positions and system health, and can relay sanctioned signals. 
+
+**Most importantly**: The AI can **never** decide how much to trade, change risk parameters, bypass a safety gate, or talk directly to an exchange. All money logic stays in the deterministic Python layer.
+
+**Result**: You get reliable automation of *your* strategies with institutional-grade safety rails + a helpful AI teammate that has no keys to the vault.
+
+## How It Works
+
+```
+TradingView Pine Strategy
+        ↓ (webhook alert)
+Tailscale Funnel (stable public HTTPS URL — no domain or open ports needed)
+        ↓
+Webhook Receiver (validates, authenticates, rate-limits)
+        ↓
+Safety Gate Chain (submit_orders flag + execution_mode + idempotency + journal + reconciliation + more)
+        ↓
+CCXT Executor → Exchange (OKX fully tested; others supported)
+        ↓
+Append-only Ledger + Local Dashboard
+        ↑
+Hermes Agent (optional) — reads state → chats with you on Telegram
 ```
 
-The **Hermes Agent** reads the dashboard/health state and relays operator questions and sanctioned
-signals over Telegram. All risk policy stays in Python — the LLM is advisory and read/relay only.
+Everything is logged. Every decision is explainable. The system defaults to the safest possible state.
 
-## Key properties
+## Core Safety Guarantees
 
-- **Fail-closed safety** — an order submits only when its strategy sets `submit_orders: true`; `execution_mode` selects demo vs. live, and live also requires the global `HERMX_LIVE_TRADING` kill switch. Anything missing disarms.
-- **Loopback-only servers** — receiver and dashboard bind `127.0.0.1`; nothing is exposed directly.
-- **Stable URL, no domain** — Tailscale Funnel gives a free, reboot-surviving HTTPS endpoint.
-- **Supervised services** — runs under systemd (VPS) or Docker, auto-restarting on failure. The Docker compose adds bridge networking, a non-root (uid 10001) runtime, read-only config/strategy mounts, and a Tailscale sidecar for ingress; `docker-compose.host.yml` keeps the host-networking path (uses the host's own Tailscale).
-- **Low-frequency by design** — 1–2 signals/day on 2h–4h strategies; not a high-frequency bot.
+- **Fail-closed design** — If any check fails or required data is missing, no order is placed.
+- **Single execution chokepoint** — All orders flow through one audited Python service (`ExecutionService`).
+- **AI isolation** — The Hermes Agent is strictly read/relay. It cannot influence sizing or bypass any gate.
+- **Demo-first** — Live trading is disabled by default (`HERMX_LIVE_TRADING=false`). You must explicitly enable it.
+- **Full audit trail** — Every alert, gate decision, and order is permanently journaled.
 
-## Quick Start
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete safety model and design philosophy.
 
-### Step 1 — Install Hermes Agent (your AI assistant)
+## Quick Start (Recommended)
+
+The fastest way to get running is to let the **Hermes Agent** guide you interactively.
+
+### 1. Install the Hermes Agent
 
 ```bash
 curl -fsSL https://hermes-agent.nousresearch.com/install.sh | sh
-hermes provider setup   # choose your LLM provider (xAI, OpenAI, Anthropic, Ollama, etc.)
+hermes provider setup     # Choose your LLM (xAI, OpenAI, Anthropic, Ollama, etc.)
 ```
 
-### Step 2 — Register the HermX skill and start the install
+### 2. Register HermX and run the guided install
 
 ```bash
-# From inside this repo:
+# From inside this repository
 ln -sfn "$(pwd)/skills/hermx-control" ~/.hermes/skills/hermx-control
 cat INSTALL.md | hermes -z --skills hermx-control
 ```
 
-Hermes walks you through all 8 install phases interactively — asking for exchange API keys,
-reviewing strategies, setting up Tailscale (outputs your stable webhook URL), deploying services,
-and configuring the Telegram gateway. You answer questions; it runs the commands.
+Hermes will walk you through exchange API keys (start with demo/sandbox), strategy review, Tailscale setup (gives you a permanent webhook URL), service deployment, and Telegram connection.
 
-**Prefer a scripted wizard?** Run `./install.sh` — it walks the same install phases as the Hermes flow
-(exchange keys, strategy review, Tailscale, services, Telegram gateway) as a guided shell script, no LLM required.
+**Prefer no AI?** Run `./install.sh` instead — it follows the same guided flow without an LLM.
 
-**No Hermes?** Paste `INSTALL.md` into any AI assistant (Claude, Windsurf, Cursor, etc.) and follow along manually.
-See [INSTALL.md](INSTALL.md) for the full guide.
+Full instructions: [INSTALL.md](INSTALL.md)
 
-## What you'll have after install
+## Included Strategies
 
-- A stable public webhook URL (`https://hermx.<tailnet>.ts.net/webhook`)
-- TradingView alerts configured for each enabled strategy (BUY + SELL)
-- Hermes available on Telegram to query state and relay signals
-- Webhook receiver + dashboard supervised by systemd or Docker
+Four ready-to-run **demo** strategies ship with HermX (all on OKX, isolated margin, 2x leverage):
 
-## Strategies
+| Strategy | Timeframe | Symbol     | Budget (demo) | Notes |
+|----------|-----------|------------|---------------|-------|
+| BTC      | 2h        | BTC-USDT   | $1,500        | Active demo candidate |
+| ETH      | 2h        | ETH-USDT   | $1,500        | Active demo candidate |
+| SOL      | 3h        | SOL-USDT   | $1,500        | Active demo candidate |
+| XRP      | 4h        | XRP-USDT   | $1,500        | Active demo candidate |
 
-Four default strategies ship ready to run — BTC, ETH, SOL, and XRP USDT perpetuals on OKX, 2h–4h
-timeframes, isolated margin, 2x leverage, ~$6,000 total demo budget. **All are demo/sandbox by
-default**, and the strategy file (never the alert) owns position sizing. During install you review
-and confirm each strategy's risk parameters before anything is enabled. See
-[docs/STRATEGIES.md](docs/STRATEGIES.md) for detail.
+All use the `mxc duo-base v2.5` indicator logic. They are configured for demo/sandbox by default. Review and customize the JSON files in the `strategies/` folder. See [docs/STRATEGIES.md](docs/STRATEGIES.md) for the full schema and how to add your own strategies.
 
-## Architecture
+## Supported Exchanges
 
-A four-layer design: a deterministic execution substrate (built and tested) capped by a planned
-reasoning layer that only ever calls *down* into it. See [ARCHITECTURE.md](ARCHITECTURE.md) for the
-full design, runtime flow, and built-vs-planned status.
+**Fully wired (live-tested)**:
+- **OKX** (recommended — live-tested)
 
-## Safety
+**Wired, not yet live-tested**:
+- KuCoin
+- Bybit
+- Hyperliquid
 
-Every order is governed by **two per-strategy controls** — `submit_orders` (must be `true` to place
-anything) and `execution_mode` (`demo` → OKX sandbox/paper, always allowed; `live` → real account).
-Live orders additionally require the one global kill switch, `HERMX_LIVE_TRADING=true`; fresh installs
-leave it `false`, so nothing reaches a real account by accident (demo trading is unaffected). Sizing,
-idempotency, journaling, and reconciliation all live in first-party Python — **the LLM never touches
-sizing or money-safety**.
+**Credential profiles exist but execution not yet wired**:
+- Binance, Bitget, Gate.io, Coinbase Advanced
+
+## What You Get After Setup
+
+- A permanent, stable webhook URL (`https://hermx.<your-tailnet>.ts.net/webhook`)
+- TradingView alerts configured and sending signals
+- Local read-only dashboard (`http://127.0.0.1:8098`)
+- Hermes Agent in Telegram for monitoring and signal relay
+- Complete peace of mind that safety logic lives in auditable Python code
 
 ## Requirements
 
-- A VPS (fresh Ubuntu 22.04) **or** a local Mac
+- VPS (Ubuntu 22.04 recommended) or local Mac
 - Python 3.11+
-- OKX **demo** API keys (or sandbox keys for one of the other wired venues: KuCoin, Bybit, or Hyperliquid). Binance, Bitget, Gate.io, and Coinbase Advanced have config/credential profiles but are not yet wired for authenticated execution.
-- TradingView Pro+ (needed to send webhook request headers)
-- A free Tailscale account
-- An LLM provider API key (xAI, OpenAI, Anthropic, etc.) — only for the optional Hermes Agent
+- Demo/sandbox API keys from a supported exchange (OKX recommended to start)
+- TradingView Pro+ (for webhook headers)
+- Free Tailscale account
+- LLM API key (only needed for the optional Hermes Agent)
+
+## Philosophy
+
+> Safety lives in code, not in config or prose.  
+> Fail-closed on the money path. Fail-open on intelligence.
+
+HermX was built so serious traders can automate execution with real confidence.
+
+---
+
+**HermX is early-stage software.** Always begin in demo mode. Thoroughly test your strategies and understand the system before enabling live trading.
+
+If HermX helps you trade more reliably, consider starring the repo and sharing your experience.
