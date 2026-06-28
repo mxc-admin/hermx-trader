@@ -573,3 +573,38 @@ def test_startup_not_found_orphan_stays_unknown_not_rejected(wr):
     assert states == [wr.ORDER_STATE_PLANNED, wr.ORDER_STATE_SUBMITTED]  # unchanged, still open
     open_orders = wr.load_open_orders()
     assert len(open_orders) == 1 and open_orders[0]["state"] == wr.ORDER_STATE_SUBMITTED
+
+
+def test_startup_position_reconcile_uses_symbols_from_sealed_segments(wr, monkeypatch):
+    # After the order journal ROTATES, the open order's latest record lives in a sealed
+    # segment, NOT the live segment. reconcile_startup must source its symbol->inst map
+    # from load_open_orders() (checkpoint + live tail), not the live segment alone, or it
+    # goes blind to the symbol and silently fails to detect the position divergence.
+    monkeypatch.setattr(wr, "HERMX_JOURNAL_SEGMENT_MAX_RECORDS", 4)
+    intent = {"symbol": "XRPUSDT", "side": "buy", "inst_id": "XRP-USDT-SWAP", "planned_notional_usd": 1500.0, "policy": "weighted_v1"}
+    cl = "mxc-xrpusdt-buy-sealed00000001"
+    wr.record_order_state(cl, wr.ORDER_STATE_PLANNED, intent=intent, prev_state=None)
+    wr.record_order_state(cl, wr.ORDER_STATE_SUBMITTED, intent=intent, prev_state=wr.ORDER_STATE_PLANNED)
+    # Two filler PLANNED orders trip the cap (4 records) -> checkpoint + rotate. The
+    # XRPUSDT SUBMITTED record is now sealed; the live segment no longer carries it.
+    for fc in ("mxc-filler-aaaaaaaaaaaaaaaaa1", "mxc-filler-bbbbbbbbbbbbbbbbb2"):
+        wr.record_order_state(fc, wr.ORDER_STATE_PLANNED,
+                              intent={"symbol": "ETHUSDT", "side": "buy", "inst_id": "ETH-USDT-SWAP"}, prev_state=None)
+
+    assert wr.ORDER_JOURNAL_CHECKPOINT_FILE.exists()
+    # The whole point: the live segment is blind to XRPUSDT after rotation, but the
+    # checkpoint-aware reader still sees it (this is what the fix switches sym_map to).
+    assert wr._symbol_inst_map_from_orders(wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)) == {}
+    assert wr._symbol_inst_map_from_orders(wr.load_open_orders())["XRPUSDT"] == "XRP-USDT-SWAP"
+
+    # Local paper state is flat; the exchange holds a LONG XRP position => divergence that
+    # is only detectable if the symbol map came from the (sealed) open order.
+    wr.save_paper_state({"version": 3, "policies": {}, "realistic_policies": {}, "compound_policies": {}})
+    stub = ObserveOnlyStub(order=norm_not_found(), pending=[], archive=[],
+                           positions=[norm_position("XRP-USDT-SWAP", 10.0)])
+    summary = wr.reconcile_startup(executor=stub)
+
+    xrp = [m for m in summary["position_mismatches"] if m["symbol"] == "XRPUSDT"]
+    assert xrp, "sealed-segment symbol must be reconciled via load_open_orders()"
+    assert xrp[0]["inst_id"] == "XRP-USDT-SWAP"
+    assert xrp[0]["exchange_direction"] == "long" and xrp[0]["local_direction"] == "flat"

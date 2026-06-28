@@ -1698,13 +1698,42 @@ def strategy_execution_rows(strategy, okx_executions):
 # stays a pure consumer -- no submit/execute/cancel controls.
 # ---------------------------------------------------------------------------
 
+def _read_order_checkpoint_index():
+    """Read the receiver's verified order-journal checkpoint and return its
+    ``index_records`` (latest record per cl_ord_id for every sealed/folded order).
+
+    The checkpoint is a single JSON object (NOT JSONL), so it is read directly rather
+    than via the bounded JSONL reader. Missing/unreadable/malformed checkpoint => empty
+    list, so the panel degrades to a live-segment-only read exactly as before rotation."""
+    path = ORDER_JOURNAL_CHECKPOINT_FILE
+    if not path.exists():
+        return []
+    try:
+        ckpt = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(ckpt, dict):
+        return []
+    records = ckpt.get("index_records")
+    if not isinstance(records, list):
+        return []
+    return [r for r in records if isinstance(r, dict)]
+
+
 def order_journal_open_orders(limit=300):
-    """Bounded-tail fold of order-journal.jsonl to the latest record per cl_ord_id,
-    filtered to non-terminal (PLANNED/SUBMITTED/UNKNOWN) open orders. Returns
-    ``(open_orders, stats)``; stats carries the read/skipped/truncated counts."""
+    """Latest record per cl_ord_id across the verified checkpoint AND the live-segment
+    tail, filtered to non-terminal (PLANNED/SUBMITTED/UNKNOWN) open orders. Merging the
+    checkpoint is what keeps the panel correct after the journal rotates -- an order
+    whose latest record sealed into a segment lives only in the checkpoint's index.
+    Returns ``(open_orders, stats)``; stats carries the live-segment read/skipped/
+    truncated counts plus ``checkpoint_records`` for the count merged from the checkpoint."""
     rows, stats = read_jsonl_stats(ORDER_JOURNAL_FILE, limit)
+    checkpoint_records = _read_order_checkpoint_index()
+    stats = dict(stats)
+    stats["checkpoint_records"] = len(checkpoint_records)
     latest = {}
-    for rec in rows:
+    # Seed with the checkpoint first; live-tail records (newer seq) then win the merge.
+    for rec in [*checkpoint_records, *rows]:
         if not isinstance(rec, dict):
             continue
         seq = rec.get("seq")

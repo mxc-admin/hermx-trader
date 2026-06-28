@@ -483,6 +483,58 @@ def test_open_orders_panel_surfaces_corrupt_count(dash):
     assert stats["skipped"] >= 1  # corrupt mid-tail line counted, not hidden
 
 
+def test_open_orders_panel_reads_sealed_records_via_checkpoint(dash):
+    # After the order journal rotates, an order whose LATEST record sealed into a
+    # segment lives only in the verified checkpoint's index_records -- the live segment
+    # no longer carries it. The panel must merge the checkpoint or it goes blind to
+    # those open orders. Here mxc-sealed exists ONLY in the checkpoint; mxc-live only
+    # in the live tail; mxc-both has a stale checkpoint record superseded by the tail.
+    dash_mod, _core, root = dash
+    logs = root / "logs"
+    checkpoint = {
+        "schema_version": 1,
+        "checkpoint_version": 1,
+        "last_seq": 10,
+        "index_records": [
+            {"schema_version": 1, "seq": 4, "ts": "2026-06-28T00:00:04Z", "cl_ord_id": "mxc-sealed",
+             "state": "SUBMITTED", "prev_state": "PLANNED", "intent": {"symbol": "BTCUSDT", "inst_id": "BTC-USDT-SWAP"}, "detail": {}},
+            {"schema_version": 1, "seq": 5, "ts": "2026-06-28T00:00:05Z", "cl_ord_id": "mxc-both",
+             "state": "PLANNED", "prev_state": None, "intent": {"symbol": "ETHUSDT"}, "detail": {}},
+            {"schema_version": 1, "seq": 6, "ts": "2026-06-28T00:00:06Z", "cl_ord_id": "mxc-done",
+             "state": "FILLED", "prev_state": "SUBMITTED", "intent": {"symbol": "XRPUSDT"}, "detail": {}},
+        ],
+        "origins": [["mxc-sealed", 4, "2026-06-28T00:00:04Z"], ["mxc-both", 5, "2026-06-28T00:00:05Z"]],
+    }
+    (logs / "order-journal.checkpoint.json").write_text(json.dumps(checkpoint), encoding="utf-8")
+    # Live segment: a fresh order, plus a newer record for mxc-both that wins the merge.
+    _write_jsonl(logs / "order-journal.jsonl", [
+        {"schema_version": 1, "seq": 11, "ts": "2026-06-28T00:00:11Z", "cl_ord_id": "mxc-both",
+         "state": "SUBMITTED", "prev_state": "PLANNED", "intent": {"symbol": "ETHUSDT"}, "detail": {}},
+        {"schema_version": 1, "seq": 12, "ts": "2026-06-28T00:00:12Z", "cl_ord_id": "mxc-live",
+         "state": "PLANNED", "prev_state": None, "intent": {"symbol": "SOLUSDT"}, "detail": {}},
+    ])
+
+    open_orders, stats = dash_mod.order_journal_open_orders()
+    by_cl = {r["cl_ord_id"]: r["state"] for r in open_orders}
+    # Sealed-only open order is visible; FILLED checkpoint record is excluded;
+    # mxc-both reflects the newer live-tail record, not the stale checkpoint one.
+    assert by_cl == {"mxc-sealed": "SUBMITTED", "mxc-both": "SUBMITTED", "mxc-live": "PLANNED"}
+    assert stats["read"] == 2                 # live-segment rows
+    assert stats["checkpoint_records"] == 3   # records merged from the checkpoint index
+
+
+def test_open_orders_panel_without_checkpoint_reads_live_only(dash):
+    # No checkpoint file (pre-rotation box): degrade to live-segment-only, unchanged.
+    dash_mod, _core, root = dash
+    _write_jsonl(root / "logs" / "order-journal.jsonl", [
+        {"schema_version": 1, "seq": 0, "ts": "2026-06-28T00:00:00Z", "cl_ord_id": "mxc-a",
+         "state": "SUBMITTED", "prev_state": "PLANNED", "intent": {"symbol": "BTCUSDT"}, "detail": {}},
+    ])
+    open_orders, stats = dash_mod.order_journal_open_orders()
+    assert {r["cl_ord_id"] for r in open_orders} == {"mxc-a"}
+    assert stats["checkpoint_records"] == 0
+
+
 def test_reconcile_and_operator_panels_render_in_html(dash):
     dash_mod, _core, root = dash
     _write_jsonl(root / "logs" / "reconcile-alerts.jsonl", [
