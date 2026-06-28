@@ -784,7 +784,12 @@ def stable_client_order_id(identity: str, role: str = "base") -> str:
 
 
 def _dedupe_window_seconds() -> float:
-    return max(1.0, HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS, HERMX_REPLAY_WINDOW_SECONDS)
+    # BUSINESS idempotency window ONLY. Deliberately INDEPENDENT of the SECURITY replay
+    # window (HERMX_REPLAY_WINDOW_SECONDS), which is enforced separately in HMAC
+    # verification. Conflating them (the old max(..., replay)) let a long replay window
+    # silently widen idempotency retention -- two unrelated concerns. Neither widens the
+    # other now: freshness is the HMAC's job, idempotency is this ledger's job.
+    return max(1.0, HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS)
 
 
 def _epoch_from_iso(ts: str | None) -> float | None:
@@ -1226,6 +1231,39 @@ def _alert_schema_validator():
         logging.warning("alert schema unavailable; schema enforcement disabled: %s", exc)
         _ALERT_SCHEMA_LOAD_FAILED = True
         return None
+
+
+# Set once we have warned that enforcement is armed but unenforceable -- the alert is a
+# config-level condition, so a single operator alert per process suffices (no per-webhook
+# spam). Reset by tests via monkeypatch.
+_ALERT_SCHEMA_UNENFORCEABLE_ALERTED = False
+
+
+def _alert_schema_enforcement_status() -> tuple[bool, bool]:
+    """Return (armed, enforceable) for alert-schema enforcement.
+
+    ``armed``       = strategy_engine.enforce_alert_schema is true.
+    ``enforceable`` = an alert-schema validator is actually available.
+
+    Armed-but-not-enforceable is a fail-open-WHILE-ARMED safety hole: the operator
+    believes intake is guarded but validation silently passes everything. Emit a deduped
+    error-severity operator alert the first time we observe it."""
+    global _ALERT_SCHEMA_UNENFORCEABLE_ALERTED
+    armed = bool(STRATEGY_ENGINE.get("enforce_alert_schema", False))
+    enforceable = _alert_schema_validator() is not None
+    if armed and not enforceable and not _ALERT_SCHEMA_UNENFORCEABLE_ALERTED:
+        _ALERT_SCHEMA_UNENFORCEABLE_ALERTED = True
+        logging.error(
+            "enforce_alert_schema is ARMED but the alert-schema validator is UNAVAILABLE; "
+            "intake schema validation is failing OPEN."
+        )
+        emit_operator_alert(
+            "ALERT_SCHEMA_ENFORCEMENT_UNAVAILABLE",
+            {"detail": "enforce_alert_schema=true but the alert-schema validator is unavailable; "
+                       "alert validation is failing OPEN (every alert passes unchecked)."},
+            severity="error",
+        )
+    return armed, enforceable
 
 
 def validate_alert_schema(normalized: dict) -> tuple[bool, str | None]:
@@ -3670,6 +3708,9 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
     # When OFF, a schema-invalid alert is logged + counted but processed exactly
     # as before (zero behavior change). When ON, it is routed to the EXISTING
     # strategy-alert quarantine path and never processed.
+    # Surface the fail-open-while-armed hole: if enforcement is armed but the validator
+    # cannot load, operators are alerted (deduped) instead of silently trusting nothing.
+    _alert_schema_enforcement_status()
     schema_ok, schema_error = validate_alert_schema(normalized)
     if not schema_ok:
         ALERT_SCHEMA_METRICS["invalid"] += 1
@@ -4013,12 +4054,36 @@ def log_execution_arm_state() -> None:
     )
 
 
+_LOOPBACK_BIND_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", ""})
+
+
+def bind_security_warnings(bind_host: "str | None" = None, require_hmac: "bool | None" = None) -> list:
+    """PURE: startup security warnings for the receiver's network exposure.
+
+    Binding a non-loopback interface (e.g. 0.0.0.0 or a LAN IP) makes the webhook
+    reachable OFF-HOST. With HERMX_REQUIRE_HMAC=false the only protection is the shared
+    secret -- no per-request HMAC + replay-freshness check -- so a leaked/guessed secret
+    is fully replayable. Surface this loudly at boot so it is a deliberate choice."""
+    host = HERMX_BIND_HOST if bind_host is None else bind_host
+    rh = HERMX_REQUIRE_HMAC if require_hmac is None else require_hmac
+    out: list = []
+    if str(host or "").strip().lower() not in _LOOPBACK_BIND_HOSTS and not rh:
+        out.append(
+            f"SECURITY: receiver bound to non-loopback {host} with HERMX_REQUIRE_HMAC=false -- "
+            "the webhook is reachable off-host protected ONLY by the shared secret (no HMAC / "
+            "replay-freshness). Set HERMX_REQUIRE_HMAC=true (+ HERMX_WEBHOOK_HMAC_KEY) or bind 127.0.0.1."
+        )
+    return out
+
+
 def main():
     ROOT.mkdir(parents=True, exist_ok=True)
     if not SECRET:
         logging.error("Webhook auth misconfigured: HERMX_SECRET is missing/blank. Receiver FAILS CLOSED with 401 for all webhook requests.")
     if HERMX_REQUIRE_HMAC and not HERMX_WEBHOOK_HMAC_KEY:
         logging.error("HMAC is required but HERMX_WEBHOOK_HMAC_KEY is missing/blank. Receiver FAILS CLOSED with 401 for all webhook requests.")
+    for warning in bind_security_warnings():
+        logging.warning(warning)
     if not env_file_permissions_healthy():
         logging.error(".env permissions are too broad; expected 600-style owner-only access.")
     quarantine_summary = startup_quarantine_partial_ledgers()

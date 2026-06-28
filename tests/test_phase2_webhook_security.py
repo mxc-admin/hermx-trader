@@ -154,6 +154,34 @@ def test_missing_secret_fails_closed(wr, monkeypatch):
         _stop(server, thread)
 
 
+def test_blank_secret_blocks_submission_regardless_of_strategy(wr, monkeypatch):
+    # A blank HERMX_SECRET must 401 at the handler BEFORE the alert is ever enqueued --
+    # even for a fully-armed strategy alert. Auth precedes (and therefore blocks) the
+    # entire submission pipeline; strategy config can never override a missing secret.
+    monkeypatch.setattr(wr, "SECRET", "")
+    monkeypatch.setattr(wr, "HERMX_REQUIRE_HMAC", False)
+    monkeypatch.setattr(wr, "CONFIG", {"execution": {"exchange": "ccxt"}, "risk": {"allow_live_execution": True}})
+    q = queue.Queue(maxsize=10)
+    monkeypatch.setattr(wr, "PROCESS_QUEUE", q)
+
+    armed_alert = {
+        "source": "tradingview",
+        "strategy_id": "btcusdt_duo_base_dev_2h",
+        "symbol": "BTCUSDT",
+        "side": "buy",
+        "timeframe": "2h",
+    }
+    server, thread = _serve(wr.Handler)
+    try:
+        status, body = _post(server.server_address[1], "/webhook", armed_alert,
+                             headers={"X-Webhook-Secret": "anything"})
+        assert status == 401
+        assert body.get("error") == "missing_webhook_secret"
+        assert q.qsize() == 0  # nothing was enqueued => nothing can be submitted
+    finally:
+        _stop(server, thread)
+
+
 def test_hmac_replay_window_enforced(wr, monkeypatch):
     monkeypatch.setattr(wr, "SECRET", "s3cr3t")
     monkeypatch.setattr(wr, "HERMX_REQUIRE_HMAC", True)
