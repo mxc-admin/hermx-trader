@@ -144,7 +144,8 @@ set_env() {
 
 ensure_dashboard_token() {
   local auth_enabled="${HERMX_DASH_AUTH:-true}"
-  [[ "${auth_enabled,,}" =~ ^(false|0|no|)$ ]] && return 0
+  auth_enabled="$(printf '%s' "$auth_enabled" | tr '[:upper:]' '[:lower:]')"
+  [[ "$auth_enabled" =~ ^(false|0|no|)$ ]] && return 0
 
   local now_epoch max_age created_at token
   now_epoch=$(date +%s)
@@ -359,6 +360,10 @@ ${BOLD}Local services:${RESET}
   Receiver health:  http://127.0.0.1:${SHADOW_PORT}/health
   Dashboard health: http://127.0.0.1:${CLEAN_DASHBOARD_PORT}/health
   Dashboard UI:     http://127.0.0.1:${CLEAN_DASHBOARD_PORT}/shadow/dashboard
+
+${BOLD}Dashboard auth:${RESET}
+  Token: ${HERMX_DASH_AUTH_TOKEN:-<not set>}
+  Pass as X-Dashboard-Token header, or as Bearer/Basic password.
 
 ${BOLD}TradingView webhook URL:${RESET}
 SUMMARY

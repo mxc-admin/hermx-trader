@@ -2030,6 +2030,8 @@ class Handler(BaseHTTPRequestHandler):
         body = {"ok": False, "error": "unauthorized"}
         raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.send_response(401)
+        # Offer both Basic (browser native prompt) and Bearer (tools/APIs).
+        self.send_header("WWW-Authenticate", 'Basic realm="hermx-dashboard"')
         self.send_header("WWW-Authenticate", 'Bearer realm="hermx-dashboard"')
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
