@@ -12,13 +12,13 @@ def test_resolve_executor_env_scopes_credentials_to_selected_exchange():
         "KUCOIN_PAPER_API_KEY": "kucoin-key",
         "UNRELATED_SECRET": "should-not-leak",
     }
-    env = resolve_executor_env("okx_demo", source, {"OKX_SUBMIT_ORDERS": "false"})
+    env = resolve_executor_env("okx_demo", source, {"HERMX_LIVE_TRADING": "false"})
 
     assert env["PATH"] == "/usr/bin"
     assert env["OKX_API_KEY"] == "okx-demo-key"
     assert env["OKX_SECRET_KEY"] == "okx-demo-secret"
     assert env["OKX_PASSPHRASE"] == "okx-demo-pass"
-    assert env["OKX_SUBMIT_ORDERS"] == "false"
+    assert env["HERMX_LIVE_TRADING"] == "false"
     assert "KUCOIN_PAPER_API_KEY" not in env
     assert "UNRELATED_SECRET" not in env
 

@@ -42,7 +42,7 @@ def test_durable_signal_dedupe_survives_reload(wr, wr_root):
 
 
 def test_execute_blocks_duplicate_cl_ord_id_from_order_journal(wr, monkeypatch):
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "1")
     monkeypatch.setattr(
         wr,
         "CONFIG",

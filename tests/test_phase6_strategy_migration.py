@@ -79,7 +79,7 @@ def _load_module_at(root: Path):
     import webhook_receiver as module  # noqa: WPS433
 
     os.environ["SHADOW_ROOT"] = str(root)
-    os.environ.pop("HERMX_SUBMIT_ENABLED", None)
+    os.environ.pop("HERMX_LIVE_TRADING", None)
     importlib.reload(module)
     return module
 

@@ -126,7 +126,7 @@ def test_unknown_resolver_timeout_pauses_symbol_and_alerts(wr, monkeypatch):
 def test_symbol_pause_blocks_submit_path(wr, monkeypatch):
     wr.pause_symbol("XRPUSDT", "manual pause test")
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "1")
 
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
         result = wr.execute_okx_if_enabled(_armed_record())

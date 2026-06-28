@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 #
 # smoke_run.sh — Boot the webhook receiver + dashboard against the DEMO profile
-# for manual smoke testing. Submission is FORCED OFF (kill switch armed).
+# for manual smoke testing. Submission is FORCED OFF for every strategy.
 #
 # REFACTOR_PLAN.md:181 — "Write a make/script target to run the receiver +
 # dashboard against the demo profile locally for manual smoke testing."
 #
-# SAFETY: this script exports HERMX_SUBMIT_ENABLED=false, which hard-blocks all
-# OKX order submission before any subprocess is spawned (see Level 0 in
-# skills/emergency-stop.md). It is a smoke-test harness, never a live launcher.
+# SAFETY: the real submit gate is the per-strategy submit_orders flag. This
+# script seeds a throwaway SHADOW_ROOT with a demo shadow-config.json and a
+# strategies/ copy whose every submit_orders is false, then exports
+# HERMX_LIVE_TRADING=false. No strategy can submit orders. It is a smoke-test
+# harness, never a live launcher.
 #
 # Usage:
 #   ./scripts/smoke_run.sh            boot both services (dry-run, no submit)
@@ -61,16 +63,29 @@ load_env() {
   fi
 }
 
-# --- ensure shadow-config.json exists (copy from demo profile if missing) ----
-ensure_config() {
-  if [ ! -f "$ROOT/shadow-config.json" ]; then
-    if [ ! -f "$ROOT/config/runtime.demo.json" ]; then
-      echo "ERROR: config/runtime.demo.json missing; cannot seed shadow-config.json." >&2
-      return 1
-    fi
-    cp "$ROOT/config/runtime.demo.json" "$ROOT/shadow-config.json"
-    echo "Created shadow-config.json from config/runtime.demo.json"
+# --- seed a throwaway dry-run SHADOW_ROOT (no strategy can submit orders) ----
+# Copies config/runtime.demo.json -> $TMP_SHADOW/shadow-config.json and copies
+# strategies/*.json -> $TMP_SHADOW/strategies/ with every submit_orders forced
+# false. The originals under the repo are never modified.
+TMP_SHADOW=""
+seed_shadow_root() {
+  if [ ! -f "$ROOT/config/runtime.demo.json" ]; then
+    echo "ERROR: config/runtime.demo.json missing; cannot seed shadow root." >&2
+    return 1
   fi
+  TMP_SHADOW="$(mktemp -d "${TMPDIR:-/tmp}/hermx-smoke.XXXXXX")"
+  cp "$ROOT/config/runtime.demo.json" "$TMP_SHADOW/shadow-config.json"
+  mkdir -p "$TMP_SHADOW/strategies"
+  "$PYTHON" - "$ROOT/strategies" "$TMP_SHADOW/strategies" <<'PY'
+import json, sys
+from pathlib import Path
+src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+for path in sorted(src.glob("*.json")):
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["submit_orders"] = False
+    (dst / path.name).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+PY
+  echo "Seeded dry-run SHADOW_ROOT: $TMP_SHADOW (submit_orders forced false)"
 }
 
 # --- prerequisite / sanity check (no servers launched) ----------------------
@@ -104,7 +119,7 @@ do_check() {
 
   echo "  SHADOW_PORT:       $SHADOW_PORT"
   echo "  DASHBOARD_PORT:    $CLEAN_DASHBOARD_PORT"
-  echo "  HERMX_SUBMIT_ENABLED would be forced to: false (dry-run / no submit)"
+  echo "  dry-run posture:   strategies seeded with submit_orders=false; HERMX_LIVE_TRADING=false"
   if [ "$ok" -eq 0 ]; then
     echo "CHECK: OK"
   else
@@ -123,22 +138,25 @@ esac
 
 # --- launch -----------------------------------------------------------------
 load_env
-ensure_config
+seed_shadow_root
 
-export SHADOW_ROOT="$ROOT"
+# Run from the repo root (so src/ resolves) but point every config/strategy/
+# ledger lookup at the throwaway dry-run shadow root seeded above.
+export SHADOW_ROOT="$TMP_SHADOW"
 export SHADOW_PORT
 export CLEAN_DASHBOARD_PORT
-# SAFETY: force the global kill switch ON for smoke runs. Hard-blocks all order
-# submission regardless of config (skills/emergency-stop.md, Level 0).
-export HERMX_SUBMIT_ENABLED="false"
+# SAFETY: HERMX_LIVE_TRADING=false blocks live submission; combined with the
+# submit_orders=false strategy copies, no strategy can submit orders at all.
+export HERMX_LIVE_TRADING="false"
 
 cat <<BANNER
 ============================================================
  HermX SMOKE RUN — DEMO profile
- DRY-RUN / NO-SUBMIT: HERMX_SUBMIT_ENABLED=false (kill switch ARMED)
- No OKX orders can be submitted in this mode.
+ DRY-RUN / NO-SUBMIT: every strategy seeded with submit_orders=false
+ plus HERMX_LIVE_TRADING=false. No strategy can submit orders.
 ------------------------------------------------------------
  python:    $PYTHON
+ shadow:    $TMP_SHADOW
  receiver:  http://127.0.0.1:$SHADOW_PORT
  dashboard: http://127.0.0.1:$CLEAN_DASHBOARD_PORT
 ============================================================
@@ -156,6 +174,9 @@ cleanup() {
       wait "$pid" 2>/dev/null || true
     fi
   done
+  if [ -n "${TMP_SHADOW:-}" ] && [ -d "$TMP_SHADOW" ]; then
+    rm -rf "$TMP_SHADOW"
+  fi
   echo "Stopped."
 }
 trap cleanup INT TERM EXIT

@@ -28,7 +28,7 @@ from dashboard_core import (
     read_jsonl,
     shadow_config,
 )
-from hermx_shared import canonical_timeframe
+from hermx_shared import canonical_timeframe, live_trading_enabled
 
 try:
     from executors import ExecutorFactory
@@ -1164,29 +1164,18 @@ def api_payload():
 def health_payload():
     cfg = shadow_config()
     policies = list(((cfg.get("policies") or {}).get("enabled")) or [])
-    execution_cfg = cfg.get("execution") or {}
-    allow_live_execution = bool(((cfg.get("risk") or {}).get("allow_live_execution")))
 
-    # Read-only mirror of webhook_receiver.submit_kill_switch_armed() (the source
-    # of truth): HERMX_SUBMIT_ENABLED unset => armed (NOT engaged); value in
-    # {"false","0","no",""} (stripped/lowered) => engaged/blocked; else NOT engaged.
-    # The dashboard cannot import the receiver, so the rule is duplicated here.
-    raw_kill = os.environ.get("HERMX_SUBMIT_ENABLED")
-    if raw_kill is None:
-        kill_switch_engaged = False
-    elif raw_kill.strip().lower() in {"false", "0", "no", ""}:
-        kill_switch_engaged = True
-    else:
-        kill_switch_engaged = False
+    # Arming is driven by the 2-control model (execution_mode per strategy +
+    # the global HERMX_LIVE_TRADING kill switch), not the dead config-flag chain.
+    # ``live_trading_enabled()`` is the single source of truth for the global gate;
+    # kill_switch_engaged means live trading is DISABLED.
+    live_enabled, _live_raw = live_trading_enabled()
+    kill_switch_engaged = not live_enabled
 
-    submit_orders = bool(execution_cfg.get("submit_orders"))
-    execution_enabled = bool(execution_cfg.get("enabled"))
-    armed_summary = (
-        (not kill_switch_engaged)
-        and submit_orders
-        and execution_enabled
-        and allow_live_execution
-    )
+    strategies = active_strategies()
+    demo_count = sum(1 for s in strategies if (s.get("execution_mode") or "demo") != "live")
+    live_count = sum(1 for s in strategies if (s.get("execution_mode") or "demo") == "live")
+    armed = live_count > 0 and live_enabled
 
     return {
         "ok": True,
@@ -1194,15 +1183,14 @@ def health_payload():
         "mode": "paper_shadow",
         "policies": policies,
         "primary_policy": cfg.get("primary_policy"),
-        "allow_live_execution": allow_live_execution,
         "arm": {
             "kill_switch_engaged": kill_switch_engaged,
-            "submit_orders": submit_orders,
-            "execution_enabled": execution_enabled,
-            "allow_live_execution": allow_live_execution,
-            "armed_summary": armed_summary,
+            "live_trading_enabled": live_enabled,
+            "demo_strategies": demo_count,
+            "live_strategies": live_count,
+            "armed": armed,
         },
-        "strategy_files": [row.get("strategy_id") for row in active_strategies()],
+        "strategy_files": [row.get("strategy_id") for row in strategies],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 

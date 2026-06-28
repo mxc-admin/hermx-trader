@@ -384,68 +384,61 @@ def test_model_contract_keys(dash):
 
 # ---------------------------------------------------------------------------
 # Read-only "arm" status in /health (Hermes Agent operator interface).
-# kill_switch_engaged mirrors webhook_receiver.submit_kill_switch_armed(); the
-# armed_summary is the AND of (NOT engaged) and the three config gates.
+# The 2-control model: kill_switch_engaged is the inverse of the global
+# HERMX_LIVE_TRADING switch (live_trading_enabled()), and `armed` is true only
+# when at least one loaded strategy runs execution_mode="live" AND the global
+# switch is on. The dead config-flag chain (execution.enabled/submit_orders,
+# risk.allow_live_execution) is gone.
 # ---------------------------------------------------------------------------
 
-def _armed_config():
-    """A config whose three gates are all live (so only the kill switch varies)."""
-    return {
-        "execution": {"enabled": True, "submit_orders": True},
-        "risk": {"allow_live_execution": True},
-    }
-
-
-def test_arm_kill_switch_unset_is_not_engaged(dash, monkeypatch):
-    dash_mod, _core, _root = dash
-    monkeypatch.delenv("HERMX_SUBMIT_ENABLED", raising=False)
-    monkeypatch.setattr(dash_mod, "shadow_config", _armed_config)
+def test_arm_live_trading_unset_engages_kill_switch(dash, monkeypatch):
+    dash_mod, _core, root = dash
+    monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
+    _write_strategy(root / "strategies", "btc_live", execution_mode="live")
 
     arm = dash_mod.health_payload()["arm"]
-    assert arm["kill_switch_engaged"] is False
-    # Unset kill switch + all gates live => fully armed.
-    assert arm["armed_summary"] is True
-    assert arm["submit_orders"] is True
-    assert arm["execution_enabled"] is True
-    assert arm["allow_live_execution"] is True
+    # Fail-closed default: an unset switch means live trading is DISABLED.
+    assert arm["kill_switch_engaged"] is True
+    assert arm["live_trading_enabled"] is False
+    assert arm["live_strategies"] == 1
+    # A live strategy is present but the global switch is off => NOT armed.
+    assert arm["armed"] is False
 
 
-def test_arm_kill_switch_false_is_engaged(dash, monkeypatch):
-    dash_mod, _core, _root = dash
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "false")
-    monkeypatch.setattr(dash_mod, "shadow_config", _armed_config)
+def test_arm_live_trading_false_engages_kill_switch(dash, monkeypatch):
+    dash_mod, _core, root = dash
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "false")
+    _write_strategy(root / "strategies", "btc_live", execution_mode="live")
 
     arm = dash_mod.health_payload()["arm"]
     assert arm["kill_switch_engaged"] is True
-    # Engaged kill switch vetoes the summary even though every config gate is live.
-    assert arm["armed_summary"] is False
+    assert arm["live_trading_enabled"] is False
+    assert arm["armed"] is False
 
 
-def test_arm_kill_switch_true_is_not_engaged(dash, monkeypatch):
-    dash_mod, _core, _root = dash
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "true")
-    monkeypatch.setattr(dash_mod, "shadow_config", _armed_config)
+def test_arm_live_trading_true_with_live_strategy_arms(dash, monkeypatch):
+    dash_mod, _core, root = dash
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "true")
+    _write_strategy(root / "strategies", "btc_live", execution_mode="live")
 
     arm = dash_mod.health_payload()["arm"]
     assert arm["kill_switch_engaged"] is False
-    assert arm["armed_summary"] is True
+    assert arm["live_trading_enabled"] is True
+    assert arm["live_strategies"] == 1
+    # Global switch on + a live strategy loaded => armed.
+    assert arm["armed"] is True
 
 
-def test_arm_summary_requires_all_gates(dash, monkeypatch):
-    dash_mod, _core, _root = dash
-    monkeypatch.delenv("HERMX_SUBMIT_ENABLED", raising=False)  # not engaged
+def test_arm_requires_a_live_strategy(dash, monkeypatch):
+    dash_mod, _core, root = dash
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "true")  # switch on
+    # Only demo strategies loaded — nothing to arm even with the switch on.
+    _write_strategy(root / "strategies", "btc_demo", execution_mode="demo")
+    _write_strategy(root / "strategies", "eth_demo", asset="ETHUSDT", execution_mode="demo")
 
-    # Each single gate falsy must drop armed_summary to False (AND-logic).
-    cases = [
-        {"execution": {"enabled": True, "submit_orders": False},
-         "risk": {"allow_live_execution": True}},
-        {"execution": {"enabled": False, "submit_orders": True},
-         "risk": {"allow_live_execution": True}},
-        {"execution": {"enabled": True, "submit_orders": True},
-         "risk": {"allow_live_execution": False}},
-    ]
-    for cfg in cases:
-        monkeypatch.setattr(dash_mod, "shadow_config", lambda cfg=cfg: cfg)
-        arm = dash_mod.health_payload()["arm"]
-        assert arm["kill_switch_engaged"] is False
-        assert arm["armed_summary"] is False
+    arm = dash_mod.health_payload()["arm"]
+    assert arm["kill_switch_engaged"] is False
+    assert arm["live_trading_enabled"] is True
+    assert arm["demo_strategies"] == 2
+    assert arm["live_strategies"] == 0
+    assert arm["armed"] is False

@@ -135,7 +135,7 @@ def _run_forced_submit(wr, monkeypatch, adapter_fn):
     writes vs the executor.execute() invocation. ``adapter_fn`` returns the normalized
     adapter result (or raises to simulate a submit exception). Returns (events, result)."""
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "1")
 
     events: list[tuple] = []
     orig_durable = wr.append_jsonl_durable

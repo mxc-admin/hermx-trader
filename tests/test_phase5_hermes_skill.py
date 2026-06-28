@@ -39,6 +39,7 @@ def _strategy(**over):
         "inst_id": "XRP-USDT-SWAP",
         "budget_usd": 1500,
         "leverage": 2,
+        "execution_mode": "live",
     }
     base.update(over)
     return base
@@ -148,7 +149,7 @@ def test_kill_switch_not_submitted_reason_is_surfaced():
     service = mock.Mock(execute=mock.Mock(return_value={
         "ok": True,
         "mode": "not_submitted",
-        "reason": "HERMX_SUBMIT_ENABLED kill switch engaged",
+        "reason": "live_trading_disabled",
     }))
     skill = HermesExecutionSkill(service=service)
 
@@ -156,7 +157,7 @@ def test_kill_switch_not_submitted_reason_is_surfaced():
 
     service.execute.assert_called_once()
     assert out["mode"] == "not_submitted"
-    assert "kill switch" in out["reason"].lower()
+    assert out["reason"] == "live_trading_disabled"
 
 
 def test_gate_false_not_submitted_reason_is_surfaced():

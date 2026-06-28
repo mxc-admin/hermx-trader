@@ -110,13 +110,13 @@ def test_hermes_skill_to_execution_service_kill_switch_blocks_okx_paper_submit(r
     _load_local_env(repo_root)
     _require_okx_credentials()
     monkeypatch.setenv("HERMX_EXEC_BACKEND", "ccxt")
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "false")
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "false")
 
     execution_ledger = tmp_path / "executions.jsonl"
     order_journal = tmp_path / "order-journal.jsonl"
 
     hooks = {
-        "submit_kill_switch_armed": lambda: (False, "false"),
+        "live_trading_enabled": lambda: (False, "false"),
         "append_jsonl": lambda path, row: Path(path).open("a").write(json.dumps(row) + "\n"),
         "execution_ledger": execution_ledger,
         "order_journal": order_journal,

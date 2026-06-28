@@ -242,7 +242,7 @@ def _submit_executor(*, ok=True, mode="submit_enabled"):
 
 def _force_submit(wr, monkeypatch, *, stub, submit_executor=None):
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "1")
     monkeypatch.setenv("HERMX_RECONCILE_ENABLED", "1")
     # Submit goes through the CCXT executor (success => tentative FILLED); the
     # post-submit reconciliation then queries the read-only `stub`.
@@ -294,7 +294,7 @@ def test_reconcile_disabled_uses_stdout_outcome(wr, monkeypatch):
     # HERMX_RECONCILE_ENABLED unset => legacy stdout-driven outcome, executor untouched.
     cl = "mxc-xrpusdt-buy-abc0123456789de"
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
-    monkeypatch.setenv("HERMX_SUBMIT_ENABLED", "1")
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "1")
     monkeypatch.delenv("HERMX_RECONCILE_ENABLED", raising=False)
     exec_calls = []
     monkeypatch.setattr(wr, "_reconciliation_executor", lambda: exec_calls.append(1) or StubExecutor())
