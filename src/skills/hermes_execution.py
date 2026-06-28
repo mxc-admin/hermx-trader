@@ -73,17 +73,20 @@ def _resolve_inst_id(signal: dict, strategy: dict, account_context: dict) -> "st
     fail closed rather than submit against an unknown instrument.
     """
     for source in (strategy or {}, signal or {}):
-        for key in ("inst_id", "okx_inst_id"):
-            value = str((source or {}).get(key) or "").strip()
+        value = str((source or {}).get("inst_id") or "").strip()
+        if value:
+            return value
+        inst = (source or {}).get("instrument")
+        if isinstance(inst, dict):
+            value = str(inst.get("inst_id") or "").strip()
             if value:
                 return value
     symbol = _norm_symbol((signal or {}).get("symbol") or (strategy or {}).get("asset"))
     assets = (account_context or {}).get("assets") or {}
     asset_cfg = assets.get(symbol) or {}
-    for key in ("inst_id", "okx_inst_id"):
-        value = str(asset_cfg.get(key) or "").strip()
-        if value:
-            return value
+    value = str(asset_cfg.get("inst_id") or "").strip()
+    if value:
+        return value
     return None
 
 
@@ -145,7 +148,6 @@ def build_execution_record(
         "live_execution_enabled": (mode == "live"),
         "symbol": intent.get("symbol"),
         "signal_side": intent.get("side"),
-        "okx_inst_id": intent.get("inst_id"),
         "inst_id": intent.get("inst_id"),
         "td_mode": (strategy or {}).get("td_mode") or (account_context or {}).get("td_mode"),
         "execution_intent": dict(intent),

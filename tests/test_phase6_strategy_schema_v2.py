@@ -1,13 +1,18 @@
-"""Phase 6 / M1: strategy schema v2 + v1->v2 loader shim.
+"""Phase 6 / Layer C: strategy schema v2 (canonical) + loader canonicalization.
 
 Proves:
-  * the four LIVE v1 strategy files still validate against the schema,
+  * the four LIVE strategy files (schema_version 2) validate against the schema,
   * a schema_version 2 strategy (generic `instrument` block + `submit_orders`,
     relaxed asset regex, CCXT-unified symbol) validates,
-  * inline credentials are forbidden in BOTH versions,
-  * a v1 strategy and its v2 twin load to the SAME internal representation
-    (same instrument + same legacy okx_inst_id/okx_submit_orders the execution
-    readiness path reads), so v2 produces byte-identical execution behavior.
+  * inline credentials are forbidden in a v2 strategy,
+  * the loader shim canonicalizes the v2 `instrument` block in place and never
+    injects the legacy `okx_inst_id` key, and
+  * a v2 strategy file loads end-to-end and produces an execution readiness with
+    the money-path fields (inst_id, td_mode, execution_intent, ...) intact.
+
+Layer C removed the runtime v1 (`okx_inst_id`) bridge; strategy files are
+canonical v2 on disk. The transitional v1 schema branch is intentionally still
+present in strategy.schema.json (deferred), but no test depends on a v1 twin.
 
 No network, no OKX subprocess: schema checks are pure jsonschema; the end-to-end
 load test reloads webhook_receiver against an isolated temp SHADOW_ROOT (mirrors
@@ -45,28 +50,7 @@ def _is_valid(payload: dict) -> bool:
     return not list(_validator().iter_errors(payload))
 
 
-# A v1 strategy and its exact v2 twin (same venue/instrument, same submit posture).
-V1_TWIN = {
-    "schema_version": 1,
-    "strategy_id": "btcusdt_duo_base_dev_2h",
-    "name": "BTCUSDT Duo Base Dev 2H",
-    "asset": "BTCUSDT",
-    "okx_inst_id": "BTC-USDT-SWAP",
-    "timeframe": "2h",
-    "chart_type": "heikin_ashi",
-    "indicator": "mxc duo-base",
-    "indicator_version": "duo-base-2.5",
-    "upper_band_mult": 1.40,
-    "lower_band_mult": 0.95,
-    "auto_alpha": False,
-    "budget_usd": 1500,
-    "leverage": 2,
-    "margin_mode": "isolated",
-    "execution_mode": "demo",
-    "okx_submit_orders": True,
-    "status": "active_demo",
-}
-
+# The canonical v2 strategy (generic instrument block + submit_orders posture).
 V2_TWIN = {
     "schema_version": 2,
     "strategy_id": "btcusdt_duo_base_dev_2h",
@@ -100,8 +84,10 @@ def test_schema_is_well_formed():
 
 @pytest.mark.parametrize("path", sorted(LIVE_STRATEGIES_DIR.glob("*.json")), ids=lambda p: p.name)
 def test_live_strategy_files_validate(path):
-    """The four production strategy files (now schema_version 2) MUST validate."""
-    assert _is_valid(json.loads(path.read_text(encoding="utf-8")))
+    """The four production strategy files (schema_version 2) MUST validate."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 2
+    assert _is_valid(payload)
 
 
 def test_v2_strategy_validates():
@@ -137,13 +123,6 @@ def test_inline_credentials_forbidden_v2(cred_field):
     assert not _is_valid(v2), f"{cred_field} must be rejected in a v2 strategy"
 
 
-@pytest.mark.parametrize("cred_field", ["api_key", "secret_key", "passphrase", "private_key", "wallet"])
-def test_inline_credentials_forbidden_v1(cred_field):
-    v1 = json.loads(json.dumps(V1_TWIN))
-    v1[cred_field] = "leaked-value"
-    assert not _is_valid(v1), f"{cred_field} must be rejected in a v1 strategy"
-
-
 def test_wrong_schema_version_rejected():
     v3 = json.loads(json.dumps(V2_TWIN))
     v3["schema_version"] = 3
@@ -151,7 +130,7 @@ def test_wrong_schema_version_rejected():
 
 
 # --------------------------------------------------------------------------- #
-# Loader shim: v1 and v2 resolve to the SAME internal representation           #
+# Loader shim: v2 instrument is canonicalized, no legacy key injection         #
 # --------------------------------------------------------------------------- #
 
 
@@ -161,41 +140,45 @@ def _module():
     return module
 
 
-def test_normalize_shim_bridges_v2_to_legacy_keys():
+def test_normalize_shim_canonicalizes_v2_instrument():
     m = _module()
     out = m.normalize_strategy_record(json.loads(json.dumps(V2_TWIN)))
-    assert out["okx_inst_id"] == "BTC-USDT-SWAP"
+    # Layer C: canonicalize the instrument block in place.
+    assert out["instrument"]["inst_id"] == "BTC-USDT-SWAP"
+    assert out["instrument"]["exchange"] == "okx"
+    assert out["instrument"]["type"] == "swap"
+    # The okx_submit_orders bridge is preserved (out of scope for this slice).
     assert out["okx_submit_orders"] is True
 
 
-def test_normalize_shim_leaves_v1_unchanged():
+def test_normalize_shim_does_not_inject_legacy_okx_inst_id():
     m = _module()
-    original = json.loads(json.dumps(V1_TWIN))
-    out = m.normalize_strategy_record(json.loads(json.dumps(V1_TWIN)))
-    assert out == original  # byte-identical: no new keys, nothing dropped
+    out = m.normalize_strategy_record(json.loads(json.dumps(V2_TWIN)))
+    # Layer C removed the v1 bridge: no legacy okx_inst_id is synthesized.
+    assert "okx_inst_id" not in out
 
 
-@pytest.mark.parametrize("row", [V1_TWIN, V2_TWIN], ids=["v1", "v2"])
-def test_strategy_instrument_is_version_agnostic(row):
+def test_strategy_instrument_resolves_canonical_v2_row():
     m = _module()
-    assert m.strategy_instrument(row) == {
+    normalized = m.normalize_strategy_record(json.loads(json.dumps(V2_TWIN)))
+    assert m.strategy_instrument(normalized) == {
         "exchange": "okx",
         "inst_id": "BTC-USDT-SWAP",
         "type": "swap",
     }
 
 
-def test_v1_and_v2_resolve_identically():
+def test_normalize_is_idempotent_for_v2():
     m = _module()
-    v1 = m.normalize_strategy_record(json.loads(json.dumps(V1_TWIN)))
-    v2 = m.normalize_strategy_record(json.loads(json.dumps(V2_TWIN)))
-    assert m.strategy_instrument(v1) == m.strategy_instrument(v2)
-    assert v1["okx_inst_id"] == v2["okx_inst_id"]
-    assert bool(v1["okx_submit_orders"]) == bool(v2["okx_submit_orders"])
+    once = m.normalize_strategy_record(json.loads(json.dumps(V2_TWIN)))
+    twice = m.normalize_strategy_record(json.loads(json.dumps(once)))
+    assert m.strategy_instrument(once) == m.strategy_instrument(twice)
+    assert once["instrument"]["inst_id"] == twice["instrument"]["inst_id"]
+    assert bool(once["okx_submit_orders"]) == bool(twice["okx_submit_orders"])
 
 
 # --------------------------------------------------------------------------- #
-# End-to-end: a v2 strategy file loads and matches an alert identically to v1  #
+# End-to-end: a v2 strategy file loads, matches an alert, and is money-ready   #
 # --------------------------------------------------------------------------- #
 
 
@@ -227,40 +210,32 @@ def _readiness_for_btc_buy(module):
     return strategy, module.build_strategy_execution_readiness(record)
 
 
-def test_v2_strategy_file_loads_and_matches_like_v1(tmp_path):
+def test_v2_strategy_file_loads_and_is_money_ready(tmp_path):
     """A v2 strategy file routed through the real module load + matching +
-    readiness path produces the same instrument/readiness as its v1 twin."""
+    readiness path resolves via the canonical instrument block and carries the
+    money-path execution fields."""
     orig_root = os.environ.get("SHADOW_ROOT")
     try:
-        v1_root = tmp_path / "v1-root"
-        _build_root_with_strategy(v1_root, V1_TWIN)
-        m = _load_module_at(v1_root)
-        assert "btcusdt_duo_base_dev_2h" in m.STRATEGIES
-        v1_strategy, v1_readiness = _readiness_for_btc_buy(m)
-
         v2_root = tmp_path / "v2-root"
         _build_root_with_strategy(v2_root, V2_TWIN)
         m = _load_module_at(v2_root)
         loaded = m.STRATEGIES["btcusdt_duo_base_dev_2h"]
-        # shim bridged the v2 instrument block to the legacy keys downstream reads
-        assert loaded["okx_inst_id"] == "BTC-USDT-SWAP"
+        # Layer C: the loaded v2 strategy resolves via the canonical instrument block.
+        assert loaded["instrument"]["inst_id"] == "BTC-USDT-SWAP"
+        assert "okx_inst_id" not in loaded
         assert loaded["okx_submit_orders"] is True
-        v2_strategy, v2_readiness = _readiness_for_btc_buy(m)
 
-        # Identical execution-relevant readiness across both versions.
-        for key in (
-            "okx_inst_id",
-            "live_execution_enabled",
-            "symbol",
-            "expected_leverage",
-            "signal_side",
-        ):
-            assert v1_readiness[key] == v2_readiness[key]
-        assert v1_readiness["execution_intent"]["actions"] == v2_readiness["execution_intent"]["actions"]
-        assert (
-            v1_readiness["execution_intent"]["planned_notional_usd"]
-            == v2_readiness["execution_intent"]["planned_notional_usd"]
-        )
+        _, readiness = _readiness_for_btc_buy(m)
+
+        # Money-path readiness fields are present and internally consistent.
+        assert readiness["inst_id"] == "BTC-USDT-SWAP"
+        assert readiness["instrument"]["inst_id"] == readiness["inst_id"]
+        assert readiness["td_mode"] == "isolated"
+        assert readiness["expected_leverage"] == 2
+        assert readiness["signal_side"] == "buy"
+        intent = readiness["execution_intent"]
+        assert intent["planned_notional_usd"] == 3000.0  # budget 1500 * leverage 2
+        assert intent["actions"]
     finally:
         os.environ["SHADOW_ROOT"] = orig_root if orig_root is not None else str(_SHADOW_ROOT)
         _load_module_at(Path(os.environ["SHADOW_ROOT"]))

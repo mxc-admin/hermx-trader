@@ -174,7 +174,8 @@ def test_instrument_exchange_kucoin_resolves_kucoin_venue():
 
 def test_v1_okx_strategy_resolves_okx_identically():
     config = {"execution": {"exchange": "ccxt", "ccxt_exchange": "okx", "ccxt_default_type": "swap"}}
-    # strategy_instrument() maps a v1 okx_inst_id strategy to instrument.exchange == "okx".
+    # A canonical okx instrument block resolves to the okx venue, byte-identical
+    # to the no-instrument default (Layer C: no legacy okx_inst_id bridge).
     okx_readiness = {"instrument": {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap"}}
 
     with_instrument = resolve_execution_config(config, okx_readiness)
@@ -190,12 +191,16 @@ def test_v1_okx_strategy_resolves_okx_identically():
     assert executor._exchange_id() == "okx"
 
 
-def test_strategy_instrument_v1_shim_maps_to_okx():
-    # The M1 shim: a v1 strategy (okx_inst_id only) presents instrument.exchange == okx.
-    from webhook_receiver import strategy_instrument
+def test_strategy_instrument_resolves_canonical_instrument_block():
+    # Layer C: the v1 (okx_inst_id) runtime bridge is gone. strategy_instrument
+    # resolves the venue/instrument directly from the canonical v2 instrument
+    # block, normalizing exchange/type defaults.
+    from webhook_receiver import normalize_strategy_record, strategy_instrument
 
-    v1 = strategy_instrument({"okx_inst_id": "BTC-USDT-SWAP"})
-    assert v1 == {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap"}
+    okx = strategy_instrument(
+        normalize_strategy_record({"instrument": {"exchange": "okx", "inst_id": "BTC-USDT-SWAP"}})
+    )
+    assert okx == {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap"}
 
-    v2_kucoin = strategy_instrument({"instrument": {"exchange": "kucoin", "inst_id": "BTC-USDT-SWAP"}})
-    assert v2_kucoin["exchange"] == "kucoin"
+    kucoin = strategy_instrument({"instrument": {"exchange": "kucoin", "inst_id": "BTC-USDT-SWAP"}})
+    assert kucoin["exchange"] == "kucoin"

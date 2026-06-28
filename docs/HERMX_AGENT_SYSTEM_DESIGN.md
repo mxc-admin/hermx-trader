@@ -211,7 +211,7 @@ the agent*.
         - else: one-shot `hermes -z "<prompt>" --skills <HERMX_ADVISOR_SKILLS>`
         - agent returns {action: proceed|skip, risk_note?, score?}
         - FAILS OPEN: timeout / malformed / missing binary → proceed
-        - veto only honored if HERMX_ADVISOR_ALLOW_VETO is also true
+        - when enabled, a `skip` blocks the trade (reason: vetoed_by_advisor)
         ▼
 [6] ExecutionService.execute(readiness)  ← deterministic gate chain (see §3.4)
         ▼
@@ -712,15 +712,13 @@ lever that returns to the prior phase's behavior with no code change.
 
 ### Phase 2 — Hermes validates signals; veto power **[NEAR]**
 
-- **Built:** Turn on the advisor as a binary gate: `HERMX_ADVISOR_ENABLED=true` +
-  `HERMX_ADVISOR_ALLOW_VETO=true`. The agent (via `hermx-control`, then
-  `kronos-validate`/`dashboard-risk`) returns `proceed | skip`. A `skip` blocks
-  execution with `reason: vetoed_by_advisor`. Fails open.
-- **Entry gate:** advisor has run in **annotate-only** mode (enabled, veto OFF) for a
-  burn-in period with logged verdicts that the operator agrees with; `test_phase8_advisor.py`
-  green.
-- **Rollback:** set `HERMX_ADVISOR_ALLOW_VETO=false` (annotate-only) or
-  `HERMX_ADVISOR_ENABLED=false` (off) — instant return to Phase 1.
+- **Built:** Turn on the advisor as a binary gate: `HERMX_ADVISOR_ENABLED=true`
+  (enabling makes the veto live — there is no separate veto flag). The agent (via
+  `hermx-control`, then `kronos-validate`/`dashboard-risk`) returns `proceed | skip`.
+  A `skip` blocks execution with `reason: vetoed_by_advisor`. Fails open.
+- **Entry gate:** advisor verdicts have been logged and reviewed over a burn-in period
+  and the operator agrees with them; `test_phase8_advisor.py` green.
+- **Rollback:** set `HERMX_ADVISOR_ENABLED=false` (off) — instant return to Phase 1.
 
 ### Phase 3 — Conviction score gates execution **[MID]**
 
@@ -828,7 +826,7 @@ services:
 | Exchange (OKX) | `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE`, `OKX_DEMO_API_KEY`, `OKX_DEMO_SECRET_KEY`, `OKX_DEMO_PASSPHRASE`, `OKX_SIMULATED_TRADING` |
 | Exchange (others) | `KUCOIN_PAPER_API_KEY/SECRET/PASSPHRASE`, `BYBIT_TESTNET_API_KEY/SECRET_KEY` |
 | Ingress | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_TUNNEL_NAME` *(legacy/alt ingress)*; Tailscale via `TS_AUTHKEY` |
-| Advisor [BUILT, OFF] | `HERMX_ADVISOR_ENABLED`, `HERMX_ADVISOR_ALLOW_VETO`, `HERMX_ADVISOR_COMMAND`, `HERMX_ADVISOR_SKILLS`, `HERMX_ADVISOR_MODEL`, `HERMX_ADVISOR_TIMEOUT_SECONDS` |
+| Advisor [BUILT, OFF] | `HERMX_ADVISOR_ENABLED`, `HERMX_ADVISOR_COMMAND`, `HERMX_ADVISOR_SKILLS`, `HERMX_ADVISOR_MODEL`, `HERMX_ADVISOR_TIMEOUT_SECONDS` |
 | Intelligence [PLANNED] | `KRONOS_API_URL`, `MXC_DASHBOARD_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USERS`, `WHATSAPP_*`, `HERMX_ADVISOR_MIN_SCORE`, `HERMX_PROACTIVE_ENABLED` |
 
 ### 8.4 Copy-and-deploy (step by step)
@@ -973,10 +971,10 @@ Ordered by **what unlocks the most value next**, with the build/plan boundary ex
 | **1** | `signal-memory` read endpoint + skill | executions/advisor ledgers (exist) | agent continuity; ML corpus surfaced | [PLANNED] |
 | **2** | `messenger-gateway` (Telegram first) | `hermx-control` (exists) | conversational ops — the headline UX win | [PLANNED] |
 | **3** | Confirmation flow (§6.4) | step 2 | safe human-instructed relay over chat | [PLANNED] |
-| **4** | Advisor burn-in: enable annotate-only | advisor seam (exists) | logged verdicts to validate before veto | config-only |
+| **4** | Advisor burn-in: log & review verdicts | advisor seam (exists) | verdicts validated before relying on the veto | config-only |
 | **5** | `kronos-validate` skill + `KRONOS_API_URL` | Kronos API stood up | direction/conviction confirmation | [PLANNED] |
 | **6** | `dashboard-risk` skill (MXC parse) | MXC reachable | regime/risk context in verdicts | [PLANNED] |
-| **7** | Enable veto (`HERMX_ADVISOR_ALLOW_VETO`) → **Phase 2** | steps 4–6 | agent can block weak signals | config-only |
+| **7** | Enable advisor (`HERMX_ADVISOR_ENABLED=true`) → **Phase 2** | steps 4–6 | agent can block weak signals | config-only |
 | **8** | `tradingview-chart` skill (CDP MCP) | desktop CDP available | chart confirmation | [PLANNED] |
 | **9** | Conviction scoring + threshold (`HERMX_ADVISOR_MIN_SCORE`) → **Phase 3** | steps 5–8 | graded gating | [PLANNED] |
 | **10** | WhatsApp channel | step 2 | fallback comms channel | [PLANNED] |

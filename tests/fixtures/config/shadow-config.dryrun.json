@@ -40,10 +40,10 @@
     "quarantine_invalid_strategy_alerts": true
   },
   "assets": {
-    "BTCUSDT": {"enabled": true, "okx_inst_id": "BTC-USDT-SWAP", "budget_usd": 1500, "leverage": 2, "timeframe": "2h"},
-    "ETHUSDT": {"enabled": true, "okx_inst_id": "ETH-USDT-SWAP", "budget_usd": 2000, "leverage": 2, "timeframe": "2h"},
-    "SOLUSDT": {"enabled": true, "okx_inst_id": "SOL-USDT-SWAP", "budget_usd": 1500, "leverage": 2, "timeframe": "3h"},
-    "XRPUSDT": {"enabled": true, "okx_inst_id": "XRP-USDT-SWAP", "budget_usd": 1500, "leverage": 2, "timeframe": "4h"}
+    "BTCUSDT": {"enabled": true, "inst_id": "BTC-USDT-SWAP", "budget_usd": 1500, "leverage": 2, "timeframe": "2h"},
+    "ETHUSDT": {"enabled": true, "inst_id": "ETH-USDT-SWAP", "budget_usd": 2000, "leverage": 2, "timeframe": "2h"},
+    "SOLUSDT": {"enabled": true, "inst_id": "SOL-USDT-SWAP", "budget_usd": 1500, "leverage": 2, "timeframe": "3h"},
+    "XRPUSDT": {"enabled": true, "inst_id": "XRP-USDT-SWAP", "budget_usd": 1500, "leverage": 2, "timeframe": "4h"}
   },
   "risk": {
     "allow_live_execution": false,

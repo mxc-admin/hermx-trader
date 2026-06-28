@@ -222,7 +222,7 @@ def _armed_record(cl="mxc-xrpusdt-buy-abc0123456789de") -> dict:
             "live_execution_enabled": True,
             "symbol": "XRPUSDT",
             "signal_side": "buy",
-            "okx_inst_id": "XRP-USDT-SWAP",
+            "inst_id": "XRP-USDT-SWAP",
             "execution_intent": {"policy": "weighted_v1", "planned_notional_usd": 1500.0, "client_order_id": cl},
             "okx_fill": {"client_order_id": cl},
             "block_reason": None,
@@ -370,6 +370,26 @@ def test_expected_positions_pure_helper(wr):
     # Held long by one policy and short by another => 'mixed' (sign-incomparable).
     assert expected["XRPUSDT"]["direction"] == "mixed"
     assert sorted(expected["XRPUSDT"]["policies"]) == ["policies:p1", "realistic_policies:p2"]
+
+
+def test_expected_positions_prefers_side_over_direction(wr):
+    state = {
+        "policies": {"p1": {"symbols": {"XRPUSDT": {"side": "short", "direction": "long"}}}},
+        "realistic_policies": {},
+        "compound_policies": {},
+    }
+    expected = wr._expected_positions_from_state(state)
+    assert expected["XRPUSDT"]["direction"] == "short"
+
+
+def test_expected_positions_uses_side_when_direction_absent(wr):
+    state = {
+        "policies": {"p1": {"symbols": {"XRPUSDT": {"side": "short"}}}},
+        "realistic_policies": {},
+        "compound_policies": {},
+    }
+    expected = wr._expected_positions_from_state(state)
+    assert expected["XRPUSDT"]["direction"] == "short"
 
 
 # ---------------------------------------------------------------------------

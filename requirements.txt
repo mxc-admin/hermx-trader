@@ -1,5 +1,5 @@
-# Core uses pure stdlib for OKX executor
-# KuCoin paper trading support via official SDK
-kucoin-python>=1.0.0
+# Core runtime deps (stdlib-heavy; only third-party listed here)
 # CCXT exchange transport for multi-venue execution/polling
 ccxt>=4.0.0,<5
+# alert schema enforcement (lazy import in webhook_receiver; fails open if absent)
+jsonschema>=4.23.0,<5

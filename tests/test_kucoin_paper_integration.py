@@ -175,7 +175,7 @@ def test_kucoin_paper_ccxt_write_path_open_query_close(repo_root):
 
     open_readiness = {
         "signal_side": "buy",
-        "okx_inst_id": inst_id,
+        "inst_id": inst_id,
         "amount": 1,
         "execution_intent": {
             "client_order_id": client_order_id,
@@ -197,7 +197,7 @@ def test_kucoin_paper_ccxt_write_path_open_query_close(repo_root):
 
     close_readiness = {
         "signal_side": "sell",
-        "okx_inst_id": inst_id,
+        "inst_id": inst_id,
         "execution_intent": {
             "client_order_id": client_order_id + "c",
             "target_direction": "short",

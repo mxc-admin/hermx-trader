@@ -66,7 +66,7 @@ def test_execute_blocks_duplicate_cl_ord_id_from_order_journal(wr, monkeypatch):
             "live_execution_enabled": True,
             "symbol": "XRPUSDT",
             "signal_side": "buy",
-            "okx_inst_id": "XRP-USDT-SWAP",
+            "inst_id": "XRP-USDT-SWAP",
             "execution_intent": {
                 "policy": "duo_raw",
                 "planned_notional_usd": 1000.0,

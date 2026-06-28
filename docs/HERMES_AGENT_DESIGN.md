@@ -141,10 +141,9 @@ door**, so it can never be "down" in a way that stops trades.
 - **Authority:** binary only — `proceed` or `skip` (+ free-text `risk_note`, optional
   0–100 `score`). It **cannot** change symbol, side, size, leverage, or strategy;
   those are already fixed by the alert's `strategy_id` and the strategy file.
-- **Two separate off switches.** `HERMX_ADVISOR_ENABLED` turns it on as
-  **annotate-only** (a `skip` is recorded but the trade still executes).
-  `HERMX_ADVISOR_ALLOW_VETO` additionally lets a `skip` **block** the trade
-  (`okx_execution.reason = "vetoed_by_advisor"`). Both default OFF.
+- **Single switch.** `HERMX_ADVISOR_ENABLED` (default OFF). When ON, a `skip`
+  response **blocks** the trade (`okx_execution.reason = "vetoed_by_advisor"`).
+  No annotate-only middle mode — if you turn it on, the veto is live.
 - **Fails OPEN.** Timeout / transport error / malformed reply ⇒ proceed
   deterministically (logged). A down or slow LLM never blocks a sanctioned trade.
 - **Seams:** `run_execution_advisor` / `execute_okx_with_advisor`
@@ -160,7 +159,7 @@ door**, so it can never be "down" in a way that stops trades.
 
 This narrows the earlier "deferred agent mode": the agent gains a veto **within
 the fixed envelope** (it can only decline a trade, never originate or resize one),
-gated behind two explicit switches and a fail-open default.
+gated behind a single explicit switch and a fail-open default.
 
 ## 9. Compact layer sketch
 

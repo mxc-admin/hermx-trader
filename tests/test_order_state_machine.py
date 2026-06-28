@@ -105,7 +105,7 @@ def _armed_record(cl: str = "mxc-xrpusdt-buy-abc0123456789de") -> dict:
             "live_execution_enabled": True,
             "symbol": "XRPUSDT",
             "signal_side": "buy",
-            "okx_inst_id": "XRP-USDT-SWAP",
+            "inst_id": "XRP-USDT-SWAP",
             "execution_intent": {"policy": "weighted_v1", "planned_notional_usd": 1500.0, "client_order_id": cl},
             "okx_fill": {"client_order_id": cl},
             "block_reason": None,

@@ -1,17 +1,17 @@
-"""Phase 6 / task 4: live strategy file migration v1 -> v2, behavior-preserving.
+"""Phase 6 / Layer C: live strategy files are canonical v2, money-path safe.
 
-The four production strategy files were migrated from schema_version 1
-(``okx_inst_id`` + ``okx_submit_orders``) to schema_version 2 (generic
-``instrument`` block + ``submit_orders``). This test LOCKS that migration as
-byte-for-byte behavior-preserving for the money path:
+The four production strategy files are schema_version 2 (generic ``instrument``
+block + ``submit_orders``). Layer C removed the runtime v1 (``okx_inst_id``)
+bridge, so this test no longer reconstructs or validates a v1 twin. It instead
+LOCKS the live v2 corpus as money-path safe:
 
-  * each migrated file on disk validates against the v2 branch of the schema,
-  * its in-test reconstructed v1 twin (instrument -> okx_inst_id,
-    submit_orders -> okx_submit_orders) validates against the v1 branch,
+  * each on-disk file is schema_version 2 and validates against the schema,
+  * the ``instrument`` block is sane (okx swap, inst_id matches the file),
+  * no legacy ``okx_inst_id`` / ``okx_submit_orders`` keys remain on disk,
   * routed through the REAL module load + alert matching + execution-readiness
-    path, the v2 file and its v1 twin produce an IDENTICAL readiness payload
-    (okx_inst_id, td_mode, planned_notional_usd, client_order_id, signal_side,
-    and the M3 exchange-agnostic instrument/intent fields are all unchanged).
+    path, the readiness payload is internally consistent and stable across loads
+    (inst_id, td_mode, planned_notional_usd, client_order_id, signal_side, and
+    the M3 exchange-agnostic instrument/intent fields).
 
 No network, no OKX subprocess: each file is loaded into an isolated temp
 SHADOW_ROOT with execution hard-disabled by the dry-run corpus config (mirrors
@@ -65,23 +65,6 @@ def _matches_branch(payload: dict, branch: str) -> bool:
     return not list(jsonschema.Draft202012Validator(branch_schema).iter_errors(payload))
 
 
-def _reconstruct_v1(v2: dict) -> dict:
-    """Rebuild the ORIGINAL v1 form of a migrated v2 strategy file in-test.
-
-    Inverse of the task-4 migration: instrument.inst_id -> okx_inst_id,
-    submit_orders -> okx_submit_orders, schema_version 2 -> 1. Every other field
-    is carried over untouched so the only delta is the schema restructuring.
-    """
-    v1 = json.loads(json.dumps(v2))
-    instrument = v1.pop("instrument")
-    assert instrument["exchange"] == "okx", "migration must keep exchange=okx"
-    v1["schema_version"] = 1
-    v1["okx_inst_id"] = instrument["inst_id"]
-    if "submit_orders" in v1:
-        v1["okx_submit_orders"] = bool(v1.pop("submit_orders"))
-    return v1
-
-
 def _build_root_with_strategy(root: Path, strategy: dict) -> None:
     (root / "logs").mkdir(parents=True, exist_ok=True)
     strategies_dir = root / "strategies"
@@ -111,8 +94,9 @@ def _readiness(module, strategy_id: str, alert_rel: str) -> dict:
 
 
 @pytest.mark.parametrize("strategy_id,alert_rel", MIGRATED, ids=[m[0] for m in MIGRATED])
-def test_migrated_file_is_v2_and_twin_is_v1(strategy_id, alert_rel):
-    """The on-disk file is now v2; its reconstructed twin is the original v1."""
+def test_live_file_is_canonical_v2(strategy_id, alert_rel):
+    """The on-disk file is canonical v2 with a sane instrument block and no
+    leftover legacy keys."""
     v2 = json.loads((LIVE_STRATEGIES_DIR / f"{strategy_id}.json").read_text(encoding="utf-8"))
     assert v2["schema_version"] == 2
     assert v2["instrument"] == {
@@ -120,49 +104,48 @@ def test_migrated_file_is_v2_and_twin_is_v1(strategy_id, alert_rel):
         "inst_id": v2["instrument"]["inst_id"],
         "type": "swap",
     }
+    assert v2["instrument"]["inst_id"].endswith("-USDT-SWAP")
     assert "okx_inst_id" not in v2 and "okx_submit_orders" not in v2
     assert _is_valid(v2) and _matches_branch(v2, "strategy_v2")
 
-    v1 = _reconstruct_v1(v2)
-    assert _is_valid(v1) and _matches_branch(v1, "strategy_v1")
-
 
 @pytest.mark.parametrize("strategy_id,alert_rel", MIGRATED, ids=[m[0] for m in MIGRATED])
-def test_migrated_v2_readiness_identical_to_v1(strategy_id, alert_rel, tmp_path):
-    """End-to-end: the migrated v2 file and its v1 twin produce a byte-identical
-    execution-readiness payload through the real load + match + readiness path."""
+def test_live_v2_readiness_stable_and_consistent(strategy_id, alert_rel, tmp_path):
+    """End-to-end: the live v2 file produces an internally-consistent execution
+    readiness that is stable (deterministic) across two isolated loads."""
     v2 = json.loads((LIVE_STRATEGIES_DIR / f"{strategy_id}.json").read_text(encoding="utf-8"))
-    v1 = _reconstruct_v1(v2)
 
     orig_root = os.environ.get("SHADOW_ROOT")
     try:
-        v1_root = tmp_path / "v1-root"
-        _build_root_with_strategy(v1_root, v1)
-        m = _load_module_at(v1_root)
-        assert strategy_id in m.STRATEGIES
-        v1_readiness = _readiness(m, strategy_id, alert_rel)
-
-        v2_root = tmp_path / "v2-root"
-        _build_root_with_strategy(v2_root, v2)
-        m = _load_module_at(v2_root)
+        a_root = tmp_path / "v2-root-a"
+        _build_root_with_strategy(a_root, v2)
+        m = _load_module_at(a_root)
         loaded = m.STRATEGIES[strategy_id]
-        # the M1 shim bridged the v2 instrument block to the legacy keys downstream reads
-        assert loaded["okx_inst_id"] == v2["instrument"]["inst_id"]
+        # Layer C: resolves via the canonical instrument block; bridge preserved.
+        assert loaded["instrument"]["inst_id"] == v2["instrument"]["inst_id"]
+        assert "okx_inst_id" not in loaded
         assert loaded["okx_submit_orders"] is bool(v2.get("submit_orders", False))
-        v2_readiness = _readiness(m, strategy_id, alert_rel)
+        readiness_a = _readiness(m, strategy_id, alert_rel)
 
-        # The whole readiness payload is identical -- orders are unchanged.
-        assert v1_readiness == v2_readiness
+        b_root = tmp_path / "v2-root-b"
+        _build_root_with_strategy(b_root, v2)
+        m = _load_module_at(b_root)
+        readiness_b = _readiness(m, strategy_id, alert_rel)
 
-        # Spell out the money-critical fields the migration must not perturb.
-        assert v1_readiness["okx_inst_id"] == v2_readiness["okx_inst_id"] == v2["instrument"]["inst_id"]
-        assert v1_readiness["td_mode"] == v2_readiness["td_mode"]
-        assert v1_readiness["signal_side"] == v2_readiness["signal_side"]
-        assert v1_readiness["instrument"] == v2_readiness["instrument"]  # M3 agnostic block
-        v1_intent, v2_intent = v1_readiness["execution_intent"], v2_readiness["execution_intent"]
-        assert v1_intent["planned_notional_usd"] == v2_intent["planned_notional_usd"]
-        assert v1_intent["client_order_id"] == v2_intent["client_order_id"]
-        assert v1_intent["actions"] == v2_intent["actions"]
+        # Deterministic across loads -- the corpus is reproducible.
+        assert readiness_a == readiness_b
+
+        # Money-critical readiness fields are present and internally consistent.
+        assert readiness_a["inst_id"] == v2["instrument"]["inst_id"]
+        assert readiness_a["instrument"] == v2["instrument"]  # M3 agnostic block
+        assert readiness_a["instrument"]["inst_id"] == readiness_a["inst_id"]
+        assert readiness_a["td_mode"] == v2["margin_mode"]
+        assert readiness_a["expected_leverage"] == v2["leverage"]
+        assert readiness_a["signal_side"] in {"buy", "sell"}
+        intent = readiness_a["execution_intent"]
+        assert intent["planned_notional_usd"] == float(v2["budget_usd"]) * float(v2["leverage"])
+        assert intent["client_order_id"]
+        assert intent["actions"]
     finally:
         os.environ["SHADOW_ROOT"] = orig_root if orig_root is not None else str(_SHADOW_ROOT)
         _load_module_at(Path(os.environ["SHADOW_ROOT"]))

@@ -107,7 +107,7 @@ def test_live_routes_through_service_and_maps_filled():
     record = service.execute.call_args.args[0]
     # The skill hands the service a venue-neutral record with live intent expressed.
     assert record["execution_readiness"]["live_execution_enabled"] is True
-    assert record["execution_readiness"]["okx_inst_id"] == "XRP-USDT-SWAP"
+    assert record["execution_readiness"]["inst_id"] == "XRP-USDT-SWAP"
     assert record["execution_readiness"]["execution_intent"]["client_order_id"] == out["client_order_id"]
     assert out["mode"] == "filled"
     assert out["ok"] is True

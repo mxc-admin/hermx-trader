@@ -1,9 +1,9 @@
 """Phase 8 -- pre-execution advisor (Hermes/LLM overseer).
 
-The advisor is OFF by default and, when on, can only VETO (skip) or annotate a
-trade whose symbol/side/size/leverage/strategy are ALREADY fixed in code. It can
-never change them. Veto power is a second, separately-off switch. Any timeout /
-transport error / malformed reply FAILS OPEN to deterministic execution.
+The advisor is OFF by default and, when on, can only VETO (skip) a trade whose
+symbol/side/size/leverage/strategy are ALREADY fixed in code. It can never change
+them. A single switch grants veto power. Any timeout / transport error /
+malformed reply FAILS OPEN to deterministic execution.
 
 These tests monkeypatch the transport seam (``_advisor_agent_query``, which shells
 out to ``hermes -z --skills hermx-control``) so no real agent is ever invoked, and
@@ -16,9 +16,8 @@ RECEIVED_AT = "2026-06-24T00:00:00Z"
 ALERT = "strategy/btcusdt_buy.json"
 
 
-def _enable(wr, monkeypatch, *, allow_veto: bool):
+def _enable(wr, monkeypatch):
     monkeypatch.setattr(wr, "HERMX_ADVISOR_ENABLED", True)
-    monkeypatch.setattr(wr, "HERMX_ADVISOR_ALLOW_VETO", allow_veto)
 
 
 # --- default OFF: byte-identical to pre-Phase-8 -----------------------------
@@ -36,10 +35,10 @@ def test_run_execution_advisor_returns_none_when_disabled(wr, monkeypatch):
     assert wr.run_execution_advisor({"normalized": {}}) is None
 
 
-# --- veto path (enabled + allow_veto) ---------------------------------------
+# --- veto path (enabled) ----------------------------------------------------
 
 def test_advisor_skip_with_veto_blocks_execution(wr, monkeypatch):
-    _enable(wr, monkeypatch, allow_veto=True)
+    _enable(wr, monkeypatch)
     monkeypatch.setattr(
         wr, "_advisor_agent_query",
         lambda prompt: '{"action": "skip", "risk_note": "elevated risk", "score": 88}',
@@ -55,7 +54,7 @@ def test_advisor_skip_with_veto_blocks_execution(wr, monkeypatch):
 
 
 def test_advisor_skip_writes_advisor_ledger(wr, wr_root, monkeypatch):
-    _enable(wr, monkeypatch, allow_veto=True)
+    _enable(wr, monkeypatch)
     monkeypatch.setattr(
         wr, "_advisor_agent_query",
         lambda prompt: '{"action": "skip", "risk_note": "x", "score": 50}',
@@ -70,7 +69,7 @@ def test_advisor_skip_writes_advisor_ledger(wr, wr_root, monkeypatch):
 # --- proceed path -----------------------------------------------------------
 
 def test_advisor_proceed_executes_normally(wr, monkeypatch):
-    _enable(wr, monkeypatch, allow_veto=True)
+    _enable(wr, monkeypatch)
     monkeypatch.setattr(
         wr, "_advisor_agent_query",
         lambda prompt: '{"action": "proceed", "risk_note": "looks fine", "score": 10}',
@@ -82,26 +81,10 @@ def test_advisor_proceed_executes_normally(wr, monkeypatch):
     assert record["advisor"]["veto_applied"] is False
 
 
-# --- annotate-only: skip but veto power NOT granted -------------------------
-
-def test_advisor_skip_without_veto_is_annotate_only(wr, monkeypatch):
-    _enable(wr, monkeypatch, allow_veto=False)
-    monkeypatch.setattr(
-        wr, "_advisor_agent_query",
-        lambda prompt: '{"action": "skip", "risk_note": "would veto if allowed", "score": 95}',
-    )
-    status, record = wr.build_record(load_alert(ALERT), RECEIVED_AT)
-    assert status == 200
-    # Decision recorded, but execution is NOT blocked (veto not granted).
-    assert record["advisor"]["action"] == "skip"
-    assert record["advisor"]["veto_applied"] is False
-    assert record["okx_execution"]["reason"] != "vetoed_by_advisor"
-
-
 # --- fail OPEN: any LLM failure proceeds deterministically ------------------
 
 def test_advisor_timeout_fails_open(wr, monkeypatch):
-    _enable(wr, monkeypatch, allow_veto=True)
+    _enable(wr, monkeypatch)
 
     def _boom(prompt):
         raise TimeoutError("agent timed out")
@@ -117,7 +100,7 @@ def test_advisor_timeout_fails_open(wr, monkeypatch):
 
 
 def test_advisor_malformed_reply_fails_open(wr, monkeypatch):
-    _enable(wr, monkeypatch, allow_veto=True)
+    _enable(wr, monkeypatch)
     monkeypatch.setattr(wr, "_advisor_agent_query", lambda prompt: "not json at all")
     status, record = wr.build_record(load_alert(ALERT), RECEIVED_AT)
     assert status == 200
@@ -129,7 +112,7 @@ def test_advisor_malformed_reply_fails_open(wr, monkeypatch):
 def test_advisor_missing_hermes_binary_fails_open(wr, monkeypatch):
     # Real transport seam, but the hermes binary does not exist -> FileNotFoundError
     # -> fails open to deterministic execution (the agent is never the front door).
-    _enable(wr, monkeypatch, allow_veto=True)
+    _enable(wr, monkeypatch)
     monkeypatch.setattr(wr, "HERMX_ADVISOR_COMMAND", "hermes-nonexistent-xyz-123")
     status, record = wr.build_record(load_alert(ALERT), RECEIVED_AT)
     assert status == 200

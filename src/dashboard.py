@@ -159,7 +159,8 @@ def strategy_inst_id(config, sym):
         pass
     for strategy in load_strategy_files():
         if strategy.get("asset") == sym:
-            return strategy.get("okx_inst_id")
+            inst = strategy.get("instrument") or {}
+            return strategy.get("inst_id") or inst.get("inst_id")
     return str(sym or "").replace("USDT", "-USDT-SWAP")
 
 
@@ -708,7 +709,8 @@ def okx_execution_records(config, limit=500):
         plan = payload.get("plan") or {}
         fill = payload.get("okx_fill_summary") or {}
         orders = payload.get("executed_orders") or []
-        symbol = plan.get("symbol") or symbol_from_inst_id(config, plan.get("instId") or plan.get("okx_inst_id"))
+        plan_inst_id = plan.get("inst_id") or plan.get("instId")
+        symbol = plan.get("symbol") or symbol_from_inst_id(config, plan_inst_id)
         signal_side = str(plan.get("signal_side") or "").upper()
         signal_price = as_float(plan.get("signal_price"))
         base = {
@@ -716,7 +718,7 @@ def okx_execution_records(config, limit=500):
             "received_colombia": colombia_time(received_at),
             "tv_time": plan.get("tv_time"),
             "symbol": symbol,
-            "inst_id": plan.get("instId") or plan.get("okx_inst_id"),
+            "inst_id": plan_inst_id,
             "signal": signal_side,
             "alert_price": signal_price,
             "mode": result.get("mode") or payload.get("mode"),

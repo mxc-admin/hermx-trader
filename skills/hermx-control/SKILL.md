@@ -1,7 +1,7 @@
 ---
 name: hermx-control
 description: Use when the user asks about the HermX trading system — open positions, PnL, whether execution is armed — or relays a TradingView signal / a manual trading request. Talks ONLY to the local HermX HTTP API on the same VPS (loopback, no key). Never touches an exchange directly; never invents an order size.
-version: 1.0.0
+version: 1.1.0
 author: HermX
 license: MIT
 metadata:
@@ -11,11 +11,19 @@ metadata:
 ---
 # HermX Control
 
+## Current posture (read this first)
+- **Mode: deterministic.** The TradingView webhook drives execution end-to-end. You
+  are an **advisory observer** — you read state and relay signals; you do not decide
+  trades. (Pre-execution advisor is built, default OFF — enable via HERMX_ADVISOR_ENABLED.)
+- **Venue: OKX, demo/paper only.** The dashboard reports `mode: paper_shadow`. Treat
+  every position and balance as demo until told otherwise. Do not imply live capital.
+- **One order path only:** `POST 127.0.0.1:8891/webhook`. Nothing else submits.
+
 ## Overview
 HermX is a local, money-safety-critical crypto trading system running on this same
 VPS. It already does the hard part deterministically: a TradingView webhook is
 matched to a strategy file and executed through a Python gate chain (kill switch,
-gate precedence, write-ahead order journal, idempotency, reconciliation). **That
+5-gate precedence, write-ahead order journal, idempotency, reconciliation). **That
 safety lives in Python, not in this skill.** This skill text is guidance only — it
 cannot and must not be the thing that keeps an order safe.
 
@@ -50,10 +58,11 @@ All endpoints are on this VPS over loopback. No API key is required locally.
   - `okx_live.account` → balances/equity.
   - `okx_executions` / ledger views → what the system actually did (the money record).
   - `executor` health, `ledger_health`, `freshness` → data trust signals.
-- `GET http://127.0.0.1:8098/health` → includes `allow_live_execution` (config gate)
-  and an `arm` object: `kill_switch_engaged`, `submit_orders`, `execution_enabled`,
-  `allow_live_execution`, and `armed_summary` (true only when the kill switch is
-  off AND all three config gates are live). This is read-only status, not a control.
+- `GET http://127.0.0.1:8098/health` → includes `mode` (`paper_shadow` today),
+  `allow_live_execution`, and an `arm` object: `kill_switch_engaged`, `submit_orders`,
+  `execution_enabled`, `allow_live_execution`, and `armed_summary` (true only when the
+  kill switch is off AND all three config gates are live). This is read-only status,
+  not a control, and it shows the **global** gates only — see the gate chain below.
 - `GET http://127.0.0.1:8891/health` and `GET http://127.0.0.1:8891/latest` →
   receiver liveness and the last processed alert.
 
@@ -109,10 +118,23 @@ to *educate yourself* about a strategy; never copy numbers out of them into a re
    and `allow_live_execution` are all true. If it's false, name which of
    `kill_switch_engaged` / `submit_orders` / `execution_enabled` /
    `allow_live_execution` is blocking. Read `/api` `executor` health too.
-2. Be precise, not reassuring. `armed_summary` reflects the kill switch and the
-   config gates the dashboard can see; the receiver still runs the full gate chain
-   (auth health, watchdog, symbol pause, idempotency) at submit time, so "armed"
-   means "all visible gates open", not "this next order will definitely submit".
+2. Be precise, not reassuring. `armed_summary` reflects only the kill switch and the
+   global config gates the dashboard can see. The receiver runs a stricter chain at
+   submit time, so "armed" means "all visible gates open", **not** "this next order
+   will definitely submit".
+
+**The real submit-time gate chain (5 gates, all must pass, in this order):**
+1. **Kill switch** — `HERMX_SUBMIT_ENABLED` off → `not_submitted` (engaged). Hard stop.
+2. **`readiness.live_execution_enabled`** — per-signal readiness; computed by the
+   receiver from the matched strategy. **Not in the dashboard `arm` block** — this is
+   why "armed" ≠ "will submit".
+3. **`execution.enabled`** — global config (`execution_enabled` in `arm`).
+4. **`execution.submit_orders`** — global config (`submit_orders` in `arm`).
+5. **`risk.allow_live_execution`** — global config (`allow_live_execution` in `arm`).
+
+After those 5, the receiver still enforces: auth-health, watchdog, symbol pause, and
+idempotency (duplicate `cl_ord_id`). Any failure → `not_submitted` with a `reason`.
+Report the chain honestly; never claim a gate is open that you cannot read.
 
 **Relaying a TradingView alert**
 1. Confirm the payload has all required fields and valid enums.

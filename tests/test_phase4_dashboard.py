@@ -23,17 +23,17 @@ import pytest
 # ---------------------------------------------------------------------------
 
 STRATEGY_TEMPLATE = {
-    "schema_version": 1,
+    "schema_version": 2,
     "name": "Test Strategy",
     "asset": "BTCUSDT",
-    "okx_inst_id": "BTC-USDT-SWAP",
+    "instrument": {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap"},
     "timeframe": "2h",
     "chart_type": "heikin_ashi",
     "budget_usd": 1500,
     "leverage": 2,
     "margin_mode": "isolated",
     "execution_mode": "demo",
-    "okx_submit_orders": True,
+    "submit_orders": True,
     "status": "active_demo",
 }
 

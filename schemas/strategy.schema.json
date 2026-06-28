@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://kftradingsystem.local/schemas/strategy.schema.json",
   "title": "Kinetic Flow Strategy File",
-  "description": "Validates both schema_version 1 (OKX-coupled, legacy) and schema_version 2 (exchange-agnostic) strategy files. A v1->v2 loader shim keeps both shapes producing identical internal behavior.",
+  "description": "schema_version 2 (exchange-agnostic instrument block) is the CANONICAL strategy file shape; all live strategy files are v2. The schema_version 1 (OKX-coupled, okx_inst_id) branch is TRANSITIONAL/DEPRECATED and retained only for backward-compatible validation of legacy files -- the runtime v1->v2 loader bridge was removed in Layer C and v1 will be dropped in a later slice.",
   "oneOf": [
     { "$ref": "#/$defs/strategy_v1" },
     { "$ref": "#/$defs/strategy_v2" }

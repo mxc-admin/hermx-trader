@@ -181,7 +181,8 @@ def colombia_time(iso):
 
 
 def asset_inst_id(config: dict, symbol: str) -> str:
-    configured = (((config.get("assets") or {}).get(symbol) or {}).get("okx_inst_id") or "").strip()
+    asset_cfg = ((config.get("assets") or {}).get(symbol) or {})
+    configured = (asset_cfg.get("inst_id") or "").strip()
     if configured:
         return configured
     return {

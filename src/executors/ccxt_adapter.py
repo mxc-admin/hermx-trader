@@ -313,7 +313,7 @@ class CcxtExecutor(BaseExecutor):
             return price
         symbol = (
             (readiness or {}).get("ccxt_symbol")
-            or _okx_inst_to_ccxt_symbol((readiness or {}).get("okx_inst_id") or (readiness or {}).get("inst_id"))
+            or _okx_inst_to_ccxt_symbol((readiness or {}).get("inst_id") or ((readiness or {}).get("instrument") or {}).get("inst_id"))
             or _okx_inst_to_ccxt_symbol((readiness or {}).get("symbol"))
         )
         if not symbol:
@@ -396,7 +396,7 @@ class CcxtExecutor(BaseExecutor):
 
         symbol = (
             (readiness or {}).get("ccxt_symbol")
-            or _okx_inst_to_ccxt_symbol((readiness or {}).get("okx_inst_id") or (readiness or {}).get("inst_id"))
+            or _okx_inst_to_ccxt_symbol((readiness or {}).get("inst_id") or ((readiness or {}).get("instrument") or {}).get("inst_id"))
             or _okx_inst_to_ccxt_symbol((readiness or {}).get("symbol"))
         )
         direction = self._target_direction(readiness)

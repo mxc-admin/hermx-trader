@@ -234,8 +234,7 @@ def load_shadow_config() -> dict:
             "route": "okx_api",
             "account": "sandbox",
         },
-        # Assets use the generic "inst_id"; "okx_inst_id" remains readable as a
-        # fallback for older configs (see asset_inst_id()).
+        # Assets use the canonical generic instrument id key.
         "assets": {
             "XRPUSDT": {"enabled": True, "budget_usd": 1500, "leverage": 2, "inst_id": "XRP-USDT-SWAP", "timeframe": "30m"},
             "SOLUSDT": {"enabled": True, "budget_usd": 1500, "leverage": 2, "inst_id": "SOL-USDT-SWAP", "timeframe": "30m"},
@@ -244,12 +243,11 @@ def load_shadow_config() -> dict:
         "risk": {"allow_live_execution": False, "duplicate_protection": True, "max_slippage_pct": 0.25, "max_daily_loss_usd": 150.0},
         # Phase 8: optional pre-execution Hermes/LLM advisor. DEFAULT OFF -> when
         # disabled the strategy/shadow execution path is byte-identical to before.
-        # The advisor can only VETO (skip) or annotate; it can NEVER change symbol,
-        # side, size, leverage, or strategy -- those stay locked in code. ``allow_veto``
-        # is a second, separately-off switch: enabling the advisor alone is
-        # annotate-only; veto power must be granted explicitly. Any timeout / error /
-        # malformed response FAILS OPEN to deterministic execution (front door is
-        # never down because of the LLM).
+        # The advisor can only VETO (skip); it can NEVER change symbol,
+        # side, size, leverage, or strategy -- those stay locked in code. A single
+        # switch grants veto power: when enabled, a "skip" blocks the trade. Any
+        # timeout / error / malformed response FAILS OPEN to deterministic
+        # execution (front door is never down because of the LLM).
         # The advisor invokes the **Hermes Agent** as a one-shot, loading the skills
         # we built (`skills/hermx-control` -- and any we add later) so the agent can
         # read the live local API (positions / PnL / arm state) before its verdict:
@@ -258,7 +256,6 @@ def load_shadow_config() -> dict:
         # bare LLM call. ``skills`` is a comma-separated list that will grow.
         "advisor": {
             "enabled": False,
-            "allow_veto": False,
             "command": "hermes",
             "skills": "hermx-control",
             "model": "",
@@ -301,7 +298,6 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 HERMX_ADVISOR_ENABLED = _env_bool("HERMX_ADVISOR_ENABLED", bool(_ADVISOR_CFG.get("enabled", False)))
-HERMX_ADVISOR_ALLOW_VETO = _env_bool("HERMX_ADVISOR_ALLOW_VETO", bool(_ADVISOR_CFG.get("allow_veto", False)))
 HERMX_ADVISOR_COMMAND = (os.environ.get("HERMX_ADVISOR_COMMAND") or str(_ADVISOR_CFG.get("command") or "hermes")).strip()
 HERMX_ADVISOR_SKILLS = (os.environ.get("HERMX_ADVISOR_SKILLS") or str(_ADVISOR_CFG.get("skills") or "hermx-control")).strip()
 HERMX_ADVISOR_MODEL = (os.environ.get("HERMX_ADVISOR_MODEL") or str(_ADVISOR_CFG.get("model") or "")).strip()
@@ -338,13 +334,16 @@ from hermx_shared import canonical_timeframe  # noqa: E402,F401
 
 
 def strategy_instrument(row: dict) -> dict:
-    """PURE: canonical instrument block for a strategy of EITHER schema version.
+    """PURE: canonical instrument block for a strategy.
 
-    v2 carries a generic ``instrument`` block ({exchange, inst_id, type}); v1 is
-    OKX-coupled (``okx_inst_id`` only). This returns the same shape for both so
-    callers resolve venue/instrument identically regardless of file version. The
-    strategy NEVER carries credentials (REFACTOR_PLAN.md §0.4) -- this only maps
-    the public venue/instrument selection.
+    A v2 strategy carries a generic ``instrument`` block ({exchange, inst_id,
+    type}); this resolver reads it directly and never touches the legacy
+    ``okx_inst_id`` key (Layer C removed that runtime bridge). As a defensive
+    fallback it also accepts a top-level canonical ``inst_id`` so an
+    already-flattened record still resolves. Callers resolve venue/instrument
+    identically regardless of caller. The strategy NEVER carries credentials
+    (REFACTOR_PLAN.md §0.4) -- this only maps the public venue/instrument
+    selection.
     """
     inst = (row or {}).get("instrument")
     if isinstance(inst, dict) and inst.get("inst_id"):
@@ -353,25 +352,32 @@ def strategy_instrument(row: dict) -> dict:
             "inst_id": str(inst.get("inst_id")),
             "type": str(inst.get("type") or "swap"),
         }
-    okx_inst = (row or {}).get("okx_inst_id")
-    if okx_inst:
-        return {"exchange": "okx", "inst_id": str(okx_inst), "type": "swap"}
+    top_inst_id = (row or {}).get("inst_id")
+    if top_inst_id:
+        return {"exchange": "okx", "inst_id": str(top_inst_id), "type": "swap"}
     return {}
 
 
 def normalize_strategy_record(row: dict) -> dict:
-    """v1->v2 loader shim (REFACTOR_PLAN.md Phase 6 / M1).
+    """v2 loader shim (REFACTOR_PLAN.md Phase 6 / Layer C).
 
     A schema_version 2 strategy selects its exchange via the generic
-    ``instrument`` block and uses ``submit_orders``. The execution-readiness path
-    still reads the legacy ``okx_inst_id`` / ``okx_submit_orders`` keys, so bridge
-    them here for v2 records. v1 records already have those keys and are returned
-    unchanged, so existing strategies keep byte-identical behavior.
+    ``instrument`` block and uses ``submit_orders``. This canonicalizes the
+    instrument-first shape in place:
+
+      * v2 records (carry ``instrument``): normalize exchange/type defaults so
+        downstream resolvers see a complete block.
+
+    Layer C removes the legacy ``okx_inst_id`` -> ``instrument`` runtime bridge:
+    strategy files are now canonical v2 on disk, so no v1 synthesis happens here.
+    The ``okx_submit_orders`` bridge is deliberately left untouched (out of scope
+    for this slice) so the execution-readiness / submit path keeps byte-identical
+    behavior.
     """
     inst = row.get("instrument")
-    if isinstance(inst, dict):
-        if not row.get("okx_inst_id") and inst.get("inst_id"):
-            row["okx_inst_id"] = str(inst.get("inst_id"))
+    if isinstance(inst, dict) and inst.get("inst_id"):
+        inst["exchange"] = str(inst.get("exchange") or "okx").lower()
+        inst["type"] = str(inst.get("type") or "swap")
         if "okx_submit_orders" not in row:
             row["okx_submit_orders"] = bool(row.get("submit_orders", False))
     return row
@@ -404,6 +410,7 @@ PROCESS_QUEUE: queue.Queue[tuple] = queue.Queue(maxsize=max(1, HERMX_QUEUE_MAXSI
 _RATE_LIMIT_LOCK = threading.Lock()
 _RATE_LIMIT_BUCKETS: dict[str, list[float]] = {}
 _STATE_WRITE_LOCK = threading.RLock()
+_ORDER_JOURNAL_LOCK = threading.Lock()
 _SIGNAL_DEDUPE_LOCK = threading.Lock()
 _SIGNAL_DEDUPE_INDEX: dict[str, dict] = {"signals": {}, "keys": {}, "loaded": False}
 _SYMBOL_LOCKS: dict[str, threading.Lock] = {}
@@ -2376,6 +2383,7 @@ def build_okx_execution_readiness(record: dict, paper_events: list[dict]) -> dic
     execution_event = find_policy_event(paper_events, execution_policy)
     shadow_event = find_policy_event(paper_events, shadow_policy)
     asset_cfg = CONFIG.get("assets", {}).get(normalized.get("symbol"), {}) or {}
+    inst_id = asset_cfg.get("inst_id")
     live_allowed = bool(execution_cfg.get("enabled")) and bool(risk_cfg.get("allow_live_execution"))
     signal_identity = _signal_identity(normalized)
     client_order_id = stable_client_order_id(signal_identity, role="open")
@@ -2393,7 +2401,7 @@ def build_okx_execution_readiness(record: dict, paper_events: list[dict]) -> dic
         "route": execution_cfg.get("route", "okx_api"),
         "account": execution_cfg.get("account", "sandbox"),
         "symbol": normalized.get("symbol"),
-        "okx_inst_id": asset_cfg.get("okx_inst_id"),
+        "inst_id": inst_id,
         "expected_leverage": asset_cfg.get("leverage"),
         "td_mode": execution_cfg.get("td_mode", "cross"),
         "timeframe": normalized.get("timeframe"),
@@ -2440,7 +2448,9 @@ def build_strategy_execution_readiness(record: dict) -> dict:
     strategy = record.get("strategy_config") or {}
     execution_cfg = CONFIG.get("execution", {}) or {}
     risk_cfg = CONFIG.get("risk", {}) or {}
-    strategy_submit = bool(STRATEGY_ENGINE.get("submit_orders")) and bool(strategy.get("okx_submit_orders"))
+    strategy_submit = bool(STRATEGY_ENGINE.get("submit_orders")) and bool(
+        strategy.get("submit_orders", strategy.get("okx_submit_orders"))
+    )
     live_allowed = (
         strategy_submit
         and bool(execution_cfg.get("enabled"))
@@ -2465,13 +2475,13 @@ def build_strategy_execution_readiness(record: dict) -> dict:
         "route": execution_cfg.get("route", "okx_api"),
         "account": execution_cfg.get("account", "sandbox"),
         "symbol": normalized.get("symbol"),
-        "okx_inst_id": strategy.get("okx_inst_id"),
+        "inst_id": instrument.get("inst_id"),
         "expected_leverage": strategy.get("leverage"),
         "td_mode": margin_mode,
         # --- Exchange-agnostic instruction contract (Phase 6 / M3) ---
-        # THE wire contract going forward (ARCHITECTURE.md). The okx_inst_id / td_mode
+        # THE wire contract going forward (ARCHITECTURE.md). The inst_id / td_mode
         # keys above stay present but are now adapter-derived translations of these:
-        # the CCXT adapter maps okx_inst_id<->symbol and tdMode<-margin_mode. Every value
+        # the CCXT adapter maps inst_id<->symbol and tdMode<-margin_mode. Every value
         # here is byte-identical to its OKX-named twin / execution_intent field, so orders
         # and downstream readers are unchanged.
         "instrument": instrument,
@@ -2589,17 +2599,18 @@ def record_order_state(
     if not order_state_can_transition(prev_state, new_state):
         logging.error("ILLEGAL order-state transition for %s: %s -> %s", cl_ord_id, prev_state, new_state)
         raise ValueError(f"illegal order-state transition {prev_state} -> {new_state} for {cl_ord_id}")
-    record = {
-        "schema_version": ORDER_JOURNAL_SCHEMA_VERSION,
-        "seq": _order_journal_next_seq(),
-        "ts": now_iso(),
-        "cl_ord_id": cl_ord_id,
-        "state": new_state,
-        "prev_state": prev_state,
-        "intent": canonicalize_decimal_fields(intent or {}),
-        "detail": canonicalize_decimal_fields(detail or {}),
-    }
-    append_jsonl_durable(ORDER_JOURNAL_LEDGER, record)
+    with _ORDER_JOURNAL_LOCK:
+        record = {
+            "schema_version": ORDER_JOURNAL_SCHEMA_VERSION,
+            "seq": _order_journal_next_seq(),
+            "ts": now_iso(),
+            "cl_ord_id": cl_ord_id,
+            "state": new_state,
+            "prev_state": prev_state,
+            "intent": canonicalize_decimal_fields(intent or {}),
+            "detail": canonicalize_decimal_fields(detail or {}),
+        }
+        append_jsonl_durable(ORDER_JOURNAL_LEDGER, record)
     return record
 
 
@@ -2609,7 +2620,7 @@ def _order_intent_from_readiness(readiness: dict) -> dict:
     return {
         "symbol": readiness.get("symbol"),
         "side": readiness.get("signal_side"),
-        "inst_id": readiness.get("okx_inst_id"),
+        "inst_id": readiness.get("inst_id") or (readiness.get("instrument") or {}).get("inst_id"),
         "planned_notional_usd": exec_intent.get("planned_notional_usd"),
         "policy": exec_intent.get("policy"),
     }
@@ -2915,7 +2926,7 @@ def _expected_positions_from_state(state: dict) -> dict:
             for symbol, pos in ((ps or {}).get("symbols") or {}).items():
                 if not isinstance(pos, dict):
                     continue
-                direction = pos.get("direction") or "long"
+                direction = pos.get("side") or pos.get("direction") or "long"
                 cur = out.setdefault(symbol, {"direction": direction, "policies": []})
                 if cur["direction"] != direction:
                     cur["direction"] = "mixed"
@@ -3329,9 +3340,8 @@ def _execute_okx_authoritative(record: dict) -> dict:
 # The advisor is a SAFETY OVERSEER, never a trader. It sees the (already fully
 # determined) trade intent and may only return action="proceed" or "skip", plus
 # a free-text risk_note and an optional 0-100 score. It can NEVER change symbol,
-# side, size, leverage, or strategy -- those are locked in code upstream. A
-# "skip" is honored (veto) ONLY when HERMX_ADVISOR_ALLOW_VETO is set; otherwise
-# the decision is recorded for visibility but execution proceeds (annotate-only).
+# side, size, leverage, or strategy -- those are locked in code upstream. When
+# enabled, a "skip" is a veto and blocks the trade.
 # Any timeout / transport error / malformed reply FAILS OPEN to deterministic
 # execution: the deterministic front door is never down because of the LLM.
 #
@@ -3446,14 +3456,13 @@ def run_execution_advisor(record: dict) -> "dict | None":
         "risk_note": "",
         "score": None,
         "veto_applied": False,
-        "allow_veto": HERMX_ADVISOR_ALLOW_VETO,
         "model": HERMX_ADVISOR_MODEL or "(hermes default)",
         "skills": HERMX_ADVISOR_SKILLS,
     }
     try:
         parsed = _advisor_parse(_advisor_agent_query(_advisor_build_prompt(record)))
         decision.update(ok=True, action=parsed["action"], risk_note=parsed["risk_note"], score=parsed["score"])
-        decision["veto_applied"] = bool(parsed["action"] == "skip" and HERMX_ADVISOR_ALLOW_VETO)
+        decision["veto_applied"] = bool(parsed["action"] == "skip")
     except Exception as exc:  # fail OPEN -> proceed deterministically
         decision["error"] = str(exc)[:300]
         logging.warning("execution advisor failed open (proceeding): %s", exc)
@@ -3595,7 +3604,7 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
                     "budget_usd": strategy_config.get("budget_usd"),
                     "leverage": strategy_config.get("leverage"),
                     "margin_mode": strategy_config.get("margin_mode"),
-                    "okx_submit_orders": strategy_config.get("okx_submit_orders"),
+                    "submit_orders": strategy_config.get("submit_orders", strategy_config.get("okx_submit_orders")),
                     "status": strategy_config.get("status"),
                 },
             },

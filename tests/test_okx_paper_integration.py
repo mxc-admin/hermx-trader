@@ -190,7 +190,7 @@ def test_okx_paper_ccxt_write_path_open_query_close(repo_root):
 
     open_readiness = {
         "signal_side": "buy",
-        "okx_inst_id": inst_id,
+        "inst_id": inst_id,
         "td_mode": td_mode,
         "amount": 1,
         "execution_intent": {
@@ -214,7 +214,7 @@ def test_okx_paper_ccxt_write_path_open_query_close(repo_root):
 
     close_readiness = {
         "signal_side": "sell",
-        "okx_inst_id": inst_id,
+        "inst_id": inst_id,
         "td_mode": td_mode,
         "execution_intent": {
             "client_order_id": client_order_id + "c",

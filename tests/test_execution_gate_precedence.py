@@ -28,7 +28,7 @@ def _record(*, live_execution_enabled=True, auth_healthy=True):
             "live_execution_enabled": live_execution_enabled,
             "symbol": "XRPUSDT",
             "signal_side": "buy",
-            "okx_inst_id": "XRP-USDT-SWAP",
+            "inst_id": "XRP-USDT-SWAP",
             "execution_intent": {"policy": "weighted_v1", "planned_notional_usd": 1500.0, "client_order_id": "cid"},
             "okx_fill": {"client_order_id": "cid"},
             "block_reason": None,

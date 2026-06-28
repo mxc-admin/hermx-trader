@@ -154,7 +154,7 @@ def test_execute_contract_sizing_and_close_flip_semantics(monkeypatch):
     readiness = {
         "signal_side": "buy",
         "signal_price": 60000.0,
-        "okx_inst_id": "BTC-USDT-SWAP",
+        "inst_id": "BTC-USDT-SWAP",
         "td_mode": "cross",
         "execution_intent": {
             "client_order_id": "cid-p5",
