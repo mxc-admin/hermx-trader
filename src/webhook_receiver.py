@@ -150,12 +150,11 @@ HERMX_JOURNAL_SEGMENT_MAX_RECORDS = int(os.environ.get("HERMX_JOURNAL_SEGMENT_MA
 # checkpoint already subsumes every sealed segment (older sealed files are
 # replay-unnecessary), so they are pruned beyond K. Set < 0 to keep all.
 HERMX_JOURNAL_SEGMENT_RETENTION = int(os.environ.get("HERMX_JOURNAL_SEGMENT_RETENTION", "5") or "5")
-# Generic, exchange-agnostic execution ledgers. The legacy OKX-named files are
-# kept as compatibility mirrors so older dashboards/tools keep reading history.
+# Generic, exchange-agnostic execution ledgers. The legacy OKX-named mirror files
+# (okx-execution-plan.jsonl / okx-executions.jsonl) were removed: nothing wrote them
+# post-CCXT-cutover. The dashboard keeps a read-only historical fallback for old boxes.
 EXECUTION_PLAN_LEDGER = LOG_DIR / "execution-plan.jsonl"
 EXECUTION_LEDGER = LOG_DIR / "executions.jsonl"
-LEGACY_EXECUTION_PLAN_LEDGER = LOG_DIR / "okx-execution-plan.jsonl"
-LEGACY_EXECUTION_LEDGER = LOG_DIR / "okx-executions.jsonl"
 # Submission-outcome state machine + write-ahead order journal (REFACTOR_PLAN.md:204,
 # :216 -- Phase 1 task 5). Append-only, durable (fsync) log of the lifecycle
 # PLANNED -> SUBMITTED -> (FILLED | REJECTED | UNKNOWN). The PLANNED/SUBMITTED records
@@ -376,12 +375,12 @@ def strategy_instrument(row: dict) -> dict:
 
     A v2 strategy carries a generic ``instrument`` block ({exchange, inst_id,
     type}); this resolver reads it directly and never touches the legacy
-    ``okx_inst_id`` key (Layer C removed that runtime bridge). As a defensive
-    fallback it also accepts a top-level canonical ``inst_id`` so an
-    already-flattened record still resolves. Callers resolve venue/instrument
-    identically regardless of caller. The strategy NEVER carries credentials
-    (REFACTOR_PLAN.md §0.4) -- this only maps the public venue/instrument
-    selection.
+    ``okx_inst_id`` key (Layer C removed that runtime bridge). Every strategy on
+    disk is v2, so a record WITHOUT an instrument block resolves to {} -- the
+    venue-less top-level ``inst_id`` -> okx fallback is gone (it silently assumed a
+    venue, which is a money-safety hazard once non-okx venues exist). Callers fail
+    closed on an empty result. The strategy NEVER carries credentials
+    (REFACTOR_PLAN.md §0.4) -- this only maps the public venue/instrument selection.
     """
     inst = (row or {}).get("instrument")
     if isinstance(inst, dict) and inst.get("inst_id"):
@@ -390,9 +389,6 @@ def strategy_instrument(row: dict) -> dict:
             "inst_id": str(inst.get("inst_id")),
             "type": str(inst.get("type") or "swap"),
         }
-    top_inst_id = (row or {}).get("inst_id")
-    if top_inst_id:
-        return {"exchange": "okx", "inst_id": str(top_inst_id), "type": "swap"}
     return {}
 
 
@@ -998,8 +994,6 @@ def startup_quarantine_partial_ledgers(paths: "list[Path] | tuple[Path, ...] | N
         PAPER_TRADES_LEDGER,
         EXECUTION_PLAN_LEDGER,
         EXECUTION_LEDGER,
-        LEGACY_EXECUTION_PLAN_LEDGER,
-        LEGACY_EXECUTION_LEDGER,
         POSITION_JOURNAL_LEDGER,
         ORDER_JOURNAL_LEDGER,
         RECONCILE_ALERT_LEDGER,

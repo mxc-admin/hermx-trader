@@ -917,7 +917,7 @@ evaluates — and it cannot relay anything while the kill switch is engaged.
 | Decisions per strategy | `shadow-decisions.jsonl` | JSONL | audit |
 | Duplicates / dedupe index | `shadow-duplicates.jsonl`, `seen-signals.jsonl`/`.json` | JSONL/JSON | idempotency |
 | Execution plan | `execution-plan.jsonl` | JSONL | readiness record |
-| Execution outcomes | `executions.jsonl` (+ legacy `okx-executions.jsonl`) | JSONL | **money record** |
+| Execution outcomes | `executions.jsonl` (legacy `okx-executions.jsonl` mirror removed; read-only dashboard fallback) | JSONL | **money record** |
 | Order state machine | `order-journal.jsonl` | JSONL | write-ahead (PLANNED→SUBMITTED→terminal) |
 | Position state | `position-journal.jsonl` + `position-journal.checkpoint.json` | JSONL/JSON | authoritative in `journal` backend |
 | Reconciliation mismatches | `reconcile-alerts.jsonl` | JSONL | safety alerts |

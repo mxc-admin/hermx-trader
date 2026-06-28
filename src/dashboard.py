@@ -170,15 +170,24 @@ def trial_symbols(config=None):
 
 
 def strategy_inst_id(config, sym):
-    try:
-        return asset_inst_id(config, sym)
-    except Exception:
-        pass
+    # Venue-aware: the strategy file's OWN instrument block is the source of truth (a
+    # kucoin spot pair, a hyperliquid perp, an okx swap all resolve to THEIR id), then
+    # any explicitly configured per-asset inst_id. No hardcoded -USDT-SWAP transform --
+    # an unknown symbol resolves to "" (the caller degrades gracefully, never fabricates
+    # a fake okx instrument).
     for strategy in load_strategy_files():
         if strategy.get("asset") == sym:
             inst = strategy.get("instrument") or {}
-            return strategy.get("inst_id") or inst.get("inst_id")
-    return str(sym or "").replace("USDT", "-USDT-SWAP")
+            inst_id = inst.get("inst_id") or strategy.get("inst_id")
+            if inst_id:
+                return inst_id
+    try:
+        configured = asset_inst_id(config, sym)
+        if configured:
+            return configured
+    except Exception:
+        pass
+    return ""
 
 
 def strategy_alert_rows(limit=500):
@@ -595,7 +604,10 @@ def symbol_from_inst_id(config, inst_id):
             return sym
     if not inst_id:
         return "-"
-    return str(inst_id).replace("-USDT-SWAP", "USDT").replace("-", "")
+    # Venue-neutral derivation (shared helper): drop the instrument-type suffix + unify
+    # separators -- handles OKX-native BTC-USDT-SWAP and CCXT-unified BTC/USDT:USDT alike,
+    # instead of a hardcoded -USDT-SWAP replace that only understood okx swaps.
+    return strategy_asset({"inst_id": inst_id})
 
 
 def signed_position_side(value):
@@ -717,7 +729,11 @@ def enrich_close_rows_with_okx_history(records, history_rows):
 
 
 def okx_execution_records(config, limit=500):
-    rows = read_jsonl(LOGS / "okx-executions.jsonl", limit)
+    # Canonical, venue-neutral execution ledger. The legacy okx-executions.jsonl mirror
+    # is no longer written; read it ONLY as a historical fallback for pre-cutover boxes.
+    rows = read_jsonl(LOGS / "executions.jsonl", limit)
+    if not rows:
+        rows = read_jsonl(LOGS / "okx-executions.jsonl", limit)
     out = []
     for row in rows:
         received_at = row.get("received_at")

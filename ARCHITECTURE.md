@@ -254,7 +254,7 @@ All ledgers live under `logs/` except `latest.json` (repo root). Writes use `app
 | `logs/seen-signals.jsonl` / `shadow-duplicates.jsonl` | Dedupe window + duplicate hits | receiver | dashboard |
 | `latest.json` (repo root) | Last processed signal snapshot | receiver | hermx-control skill, `/latest` |
 
-Legacy mirrors `logs/okx-executions.jsonl` / `okx-execution-plan.jsonl` are kept so older tooling keeps reading history.
+The legacy OKX-named mirrors (`logs/okx-executions.jsonl` / `okx-execution-plan.jsonl`) were removed — nothing wrote them after the CCXT cutover. The dashboard keeps a read-only historical fallback so a pre-cutover box still renders old executions.
 
 ### 6.2 Corruption handling
 
