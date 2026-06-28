@@ -213,20 +213,33 @@ chmod 600 .env                                    # owner-only — the receiver 
 Open `.env` and fill in the values below **one at a time**, asking the user for each. Show the user
 what each variable does before asking. Leave all other `HERMX_*` tuning variables at their defaults.
 
-**(a) Webhook authentication — REQUIRED**
+**(a) Unified secret — REQUIRED**
 
 ```text
-SHADOW_WEBHOOK_SECRET=      # the shared secret TradingView sends as the X-Webhook-Secret header
+HERMX_SECRET=              # ONE secret for BOTH webhook and dashboard auth
+                          #   - webhook: sent by TradingView as the X-Webhook-Secret header
+                          #   - dashboard: used as the X-Dashboard-Token / Bearer / Basic password
 ```
 
-Ask: *"Do you have a webhook secret in mind, or should I generate a strong random one?"* If they
+Ask: *"Do you have a secret in mind, or should I generate a strong random one?"* If they
 want one generated:
 
 ```bash
-openssl rand -hex 32        # show the user the output; paste it as SHADOW_WEBHOOK_SECRET
+openssl rand -hex 32        # show the user the output; paste it as HERMX_SECRET
 ```
 
-**Record this value** — the user will paste the exact same string into TradingView in Phase 7.
+**Record this value** — the user will paste the exact same string into TradingView in Phase 7,
+and use it to log into the dashboard.
+
+> `run.sh` generates `HERMX_SECRET` automatically on first run if it is blank, and `bash run.sh
+> --new-secret` regenerates it on demand. There is no automatic time-based rotation.
+
+> **Migrating from the old two-secret layout.** Earlier releases used a separate
+> `SHADOW_WEBHOOK_SECRET` (webhook) and `HERMX_DASH_AUTH_TOKEN` (dashboard). Both are still
+> accepted as fallbacks: if `HERMX_SECRET` is blank, the receiver honours
+> `SHADOW_WEBHOOK_SECRET` and the dashboard honours `HERMX_DASH_AUTH_TOKEN`. `run.sh` also
+> adopts an existing `HERMX_DASH_AUTH_TOKEN` as `HERMX_SECRET` on first run. To migrate, set a
+> single `HERMX_SECRET` and delete the two legacy keys.
 
 ```text
 HERMX_REQUIRE_HMAC=false    # leave false unless you also configure an HMAC key
@@ -276,10 +289,10 @@ to be supplied and record it. Confirm it points at **testnet**.
 
 ```text
 HERMX_DASH_AUTH=true        # set false only for a single-user loopback host
-HERMX_DASH_AUTH_TOKEN=      # REQUIRED if HERMX_DASH_AUTH=true — generate one if needed
 ```
 
-Generate a token if they want auth on: `openssl rand -hex 24`.
+The dashboard authenticates with the same `HERMX_SECRET` from step (a) — there is no separate
+dashboard token. Send it as the `X-Dashboard-Token` header, or as the Bearer / Basic password.
 
 **(d) Ports — defaults are correct; change only if a port is already taken**
 
@@ -311,7 +324,7 @@ python scripts/validate_package.py    # sanity-check the package (if present)
 
 **✅ Verify Phase 2:**
 - `ls -l .env` shows `-rw-------` (mode 600).
-- `SHADOW_WEBHOOK_SECRET` and the chosen exchange's demo credentials are filled in (non-blank).
+- `HERMX_SECRET` and the chosen exchange's demo credentials are filled in (non-blank).
 - `HERMX_LIVE_TRADING=false` (or unset) — live execution disabled; demo strategies route to the sandbox.
 - `shadow-config.json` is the demo profile — confirm it routes to the sandbox: `"account": "sandbox"`
   and `"td_mode": "isolated"`. Run: `grep -E '"(mode|account|td_mode|ccxt_exchange)"' shadow-config.json`.
@@ -471,8 +484,8 @@ The dashboard is then reachable at:
 
 > `https://hermx.<tailnet>.ts.net:8443/shadow/dashboard`
 
-Because this URL is public, it **still requires the dashboard auth token** — send the
-`HERMX_DASH_AUTH_TOKEN` value from `.env` (Phase 2.3c) as the `X-Dashboard-Token` header,
+Because this URL is public, it **still requires the unified secret** — send the
+`HERMX_SECRET` value from `.env` (Phase 2.3a) as the `X-Dashboard-Token` header,
 or as the Bearer/Basic password. `bash install.sh` enables this funnel for you (prompting,
 or automatically when `TS_AUTHKEY` is set), and `bash run.sh` does the same for local smoke
 runs; both save the URL to `DASHBOARD_URL.txt`. Save it manually otherwise:
@@ -693,7 +706,7 @@ hermes skills list | grep hermx-control      # expect: enabled, category trading
 ```
 
 Make sure the agent can read the dashboard: either set `HERMX_DASH_AUTH=false` (loopback,
-single-user) in `.env`, or give the agent the `HERMX_DASH_AUTH_TOKEN` to send as the
+single-user) in `.env`, or give the agent the `HERMX_SECRET` to send as the
 `X-Dashboard-Token` header.
 
 ### 6.4 Start the Telegram gateway
@@ -767,7 +780,7 @@ For **each enabled strategy** from Phase 3, give the user the exact alert messag
 For **every** alert, also give the user:
 
 - **Webhook URL:** `https://hermx.<tailnet>.ts.net/webhook` (from `WEBHOOK_URL.txt`)
-- **Request header:** `X-Webhook-Secret: <the SHADOW_WEBHOOK_SECRET value from Phase 2>`
+- **Request header:** `X-Webhook-Secret: <the HERMX_SECRET value from Phase 2>`
 
 ### 7.d TradingView UI — step by step
 
@@ -793,7 +806,7 @@ Confirm the receiver accepts a well-formed payload before relying on TradingView
 ```bash
 curl -s -X POST http://127.0.0.1:8891/webhook \
   -H "Content-Type: application/json" \
-  -H "X-Webhook-Secret: <SHADOW_WEBHOOK_SECRET>" \
+  -H "X-Webhook-Secret: <HERMX_SECRET>" \
   -d '{
     "strategy_id": "btcusdt_duo_base_dev_2h",
     "symbol": "BTCUSDT",
@@ -823,7 +836,7 @@ Run every check and report status to the user:
 - [ ] **Receiver healthy** — `curl -sf http://127.0.0.1:8891/health`
 - [ ] **Dashboard healthy** — `curl -sf http://127.0.0.1:8098/health`
 - [ ] **Public URL healthy** — `curl -sf https://hermx.<tailnet>.ts.net/health`
-- [ ] **Dashboard public URL healthy** — `curl -sf -H "X-Dashboard-Token: <token>" https://hermx.<tailnet>.ts.net:8443/health`
+- [ ] **Dashboard public URL healthy** — `curl -sf -H "X-Dashboard-Token: <HERMX_SECRET>" https://hermx.<tailnet>.ts.net:8443/health`
 - [ ] **Tailscale Funnel active** — `tailscale funnel status` shows `https://hermx.<tailnet>.ts.net`
       (webhook on `:443` → 8891) **and** a `:8443` entry (dashboard → 8098)
 - [ ] **At least one strategy enabled** — confirmed in `ENABLED_STRATEGIES.txt`
@@ -838,7 +851,7 @@ Then print the final summary (fill in the real values):
 ```text
 === HermX Installation Complete ===
 Webhook URL:    https://hermx.XXXXX.ts.net/webhook
-Dashboard URL:  https://hermx.XXXXX.ts.net:8443/shadow/dashboard  (needs HERMX_DASH_AUTH_TOKEN)
+Dashboard URL:  https://hermx.XXXXX.ts.net:8443/shadow/dashboard  (needs HERMX_SECRET)
 Dashboard (local): http://localhost:8098
 Receiver:       http://localhost:8891
 Strategies:   btcusdt_duo_base_dev_2h, ethusdt_duo_base_dev_2h, solusdt_duo_base_dev_3h, xrpusdt_duo_base_dev_4h
@@ -883,7 +896,7 @@ order is blocked (`live_trading_disabled`). Never enable live unless the user ex
   message to the strategy JSON **exactly** — `strategy_id` is lowercase with underscores
   (`^[a-z0-9]+(?:_[a-z0-9]+)*$`), `symbol` is uppercase (`BTCUSDT`), `timeframe` is one of
   `30m/1h/2h/3h/4h`.
-- **Receiver returns 401 on every webhook**: `SHADOW_WEBHOOK_SECRET` is missing/blank, or
+- **Receiver returns 401 on every webhook**: `HERMX_SECRET` is missing/blank, or
   `HERMX_REQUIRE_HMAC=true` without `HERMX_WEBHOOK_HMAC_KEY` (it fails closed). Set the secret/HMAC
   key and restart. The header name is exactly `X-Webhook-Secret`.
 - **`.env` permissions too broad**: logs warn if `.env` is group/world-readable — run
@@ -897,7 +910,7 @@ order is blocked (`live_trading_disabled`). Never enable live unless the user ex
   `submit_orders: true` routes to the sandbox automatically. Any `false`/disabled control blocks
   submission **by design**.
 - **Dashboard reads fail / agent says UNKNOWN**: `HERMX_DASH_AUTH=true` but no token supplied —
-  either set `HERMX_DASH_AUTH=false` (loopback) or pass `HERMX_DASH_AUTH_TOKEN` via the
+  either set `HERMX_DASH_AUTH=false` (loopback) or pass `HERMX_SECRET` via the
   `X-Dashboard-Token` header.
 - **Docker healthcheck unhealthy**: `docker compose logs receiver` for the boot error; confirm
   `.env` and `shadow-config.json` are present and readable (both are bind-mounted into the

@@ -18,6 +18,7 @@
 #   bash run.sh --skip-tests   # validate + start services, skip pytest
 #   bash run.sh --check        # validate + test only, do not start services
 #   bash run.sh --honor-submit # do not force HERMX_LIVE_TRADING=false
+#   bash run.sh --new-secret   # regenerate HERMX_SECRET (webhook + dashboard auth)
 #
 # SAFETY: order submission is hard-blocked (HERMX_LIVE_TRADING=false) unless
 # you pass --honor-submit. This is a development / smoke runner, not a live
@@ -75,19 +76,21 @@ fi
 SKIP_TESTS=false
 HONOR_SUBMIT=false
 CHECK_ONLY=false
+NEW_SECRET=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-tests)   SKIP_TESTS=true; shift ;;
     --honor-submit) HONOR_SUBMIT=true; shift ;;
     --check)        CHECK_ONLY=true; shift ;;
+    --new-secret)   NEW_SECRET=true; shift ;;
     -h|--help)
-      sed -n '3,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '3,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
       err "Unknown argument: $1"
-      sed -n '3,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '3,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 2
       ;;
   esac
@@ -126,7 +129,7 @@ load_env() {
 load_env
 
 # ---------------------------------------------------------------------------
-# Dashboard auth token: generate if missing, rotate every 60 days
+# Unified secret (HERMX_SECRET): authenticates both the webhook and the dashboard
 # ---------------------------------------------------------------------------
 # Idempotently upsert KEY=VALUE in $ROOT/.env
 set_env() {
@@ -142,48 +145,49 @@ set_env() {
   chmod 600 "$ROOT/.env" 2>/dev/null || true
 }
 
-ensure_dashboard_token() {
-  local auth_enabled="${HERMX_DASH_AUTH:-true}"
-  auth_enabled="$(printf '%s' "$auth_enabled" | tr '[:upper:]' '[:lower:]')"
-  [[ "$auth_enabled" =~ ^(false|0|no|)$ ]] && return 0
-
-  local now_epoch max_age created_at token
-  now_epoch=$(date +%s)
-  max_age=$((60 * 60 * 24 * 60))  # 60 days
-  created_at="${HERMX_DASH_AUTH_TOKEN_CREATED_AT:-}"
-
-  if [[ -z "${HERMX_DASH_AUTH_TOKEN:-}" ]]; then
-    if have openssl; then
-      token="$(openssl rand -hex 24)"
-    else
-      token="$(python3 -c 'import secrets, sys; sys.stdout.write(secrets.token_hex(24))' 2>/dev/null || python -c 'import secrets, sys; sys.stdout.write(secrets.token_hex(24))')"
-    fi
-    set_env "HERMX_DASH_AUTH_TOKEN" "$token"
-    set_env "HERMX_DASH_AUTH_TOKEN_CREATED_AT" "$now_epoch"
-    export HERMX_DASH_AUTH_TOKEN="$token"
-    export HERMX_DASH_AUTH_TOKEN_CREATED_AT="$now_epoch"
-    ok "Generated dashboard auth token"
-  elif [[ -z "$created_at" ]]; then
-    set_env "HERMX_DASH_AUTH_TOKEN_CREATED_AT" "$now_epoch"
-    export HERMX_DASH_AUTH_TOKEN_CREATED_AT="$now_epoch"
-    info "Recorded dashboard auth token creation date"
-  elif [[ $((now_epoch - created_at)) -gt $max_age ]]; then
-    if have openssl; then
-      token="$(openssl rand -hex 24)"
-    else
-      token="$(python3 -c 'import secrets, sys; sys.stdout.write(secrets.token_hex(24))' 2>/dev/null || python -c 'import secrets, sys; sys.stdout.write(secrets.token_hex(24))')"
-    fi
-    set_env "HERMX_DASH_AUTH_TOKEN" "$token"
-    set_env "HERMX_DASH_AUTH_TOKEN_CREATED_AT" "$now_epoch"
-    export HERMX_DASH_AUTH_TOKEN="$token"
-    export HERMX_DASH_AUTH_TOKEN_CREATED_AT="$now_epoch"
-    ok "Rotated dashboard auth token (older than 60 days)"
+# Generate a random secret using openssl, falling back to Python's secrets module.
+gen_secret() {
+  if have openssl; then
+    openssl rand -hex 32
   else
-    export HERMX_DASH_AUTH_TOKEN
+    python3 -c 'import secrets, sys; sys.stdout.write(secrets.token_hex(32))' 2>/dev/null \
+      || python -c 'import secrets, sys; sys.stdout.write(secrets.token_hex(32))'
   fi
 }
 
-ensure_dashboard_token
+# HERMX_SECRET is generated once if absent. Pass --new-secret to force a fresh one.
+# No automatic rotation: the secret persists until you regenerate it on demand.
+ensure_secret() {
+  local secret
+  if [[ "$NEW_SECRET" == true ]]; then
+    secret="$(gen_secret)"
+    set_env "HERMX_SECRET" "$secret"
+    export HERMX_SECRET="$secret"
+    ok "Regenerated HERMX_SECRET (--new-secret)"
+    return
+  fi
+
+  # Migration shim: a pre-unification install only has HERMX_DASH_AUTH_TOKEN. Adopt
+  # it as HERMX_SECRET so the webhook + dashboard keep authenticating unchanged.
+  if [[ -z "${HERMX_SECRET:-}" && -n "${HERMX_DASH_AUTH_TOKEN:-}" ]]; then
+    secret="$HERMX_DASH_AUTH_TOKEN"
+    set_env "HERMX_SECRET" "$secret"
+    export HERMX_SECRET="$secret"
+    warn "Adopted legacy HERMX_DASH_AUTH_TOKEN as HERMX_SECRET (migrate your .env to HERMX_SECRET)."
+    return
+  fi
+
+  if [[ -z "${HERMX_SECRET:-}" ]]; then
+    secret="$(gen_secret)"
+    set_env "HERMX_SECRET" "$secret"
+    export HERMX_SECRET="$secret"
+    ok "Generated HERMX_SECRET"
+  else
+    export HERMX_SECRET
+  fi
+}
+
+ensure_secret
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -318,12 +322,13 @@ wait_for_health "http://127.0.0.1:$CLEAN_DASHBOARD_PORT/health" "Dashboard" 30
 # ---------------------------------------------------------------------------
 # Synthetic webhook test (optional)
 # ---------------------------------------------------------------------------
-if [[ -n "${SHADOW_WEBHOOK_SECRET:-}" ]]; then
+WEBHOOK_SECRET="${HERMX_SECRET:-${SHADOW_WEBHOOK_SECRET:-}}"
+if [[ -n "$WEBHOOK_SECRET" ]]; then
   info "Sending synthetic test alert..."
   response=$(curl -s -w "\n%{http_code}" -X POST \
     "http://127.0.0.1:$SHADOW_PORT/webhook" \
     -H "Content-Type: application/json" \
-    -H "X-Webhook-Secret: $SHADOW_WEBHOOK_SECRET" \
+    -H "X-Webhook-Secret: $WEBHOOK_SECRET" \
     -d '{"strategy_id":"btcusdt_duo_base_dev_2h","symbol":"BTCUSDT","timeframe":"2h","side":"buy","tv_signal_price":"65000","tv_time":"2026-06-28T00:00:00Z","exchange":"okx","source":"tradingview"}' 2>/dev/null || true)
   http_code=$(echo "$response" | tail -1)
   if [[ "$http_code" =~ ^(200|202|204)$ ]]; then
@@ -332,7 +337,7 @@ if [[ -n "${SHADOW_WEBHOOK_SECRET:-}" ]]; then
     warn "Synthetic webhook returned HTTP ${http_code:-unknown}"
   fi
 else
-  warn "No SHADOW_WEBHOOK_SECRET set — skipping synthetic webhook test"
+  warn "No HERMX_SECRET set — skipping synthetic webhook test"
 fi
 
 # ---------------------------------------------------------------------------
@@ -390,8 +395,9 @@ ${BOLD}Local services:${RESET}
   Dashboard UI:     http://127.0.0.1:${CLEAN_DASHBOARD_PORT}/shadow/dashboard
 
 ${BOLD}Dashboard auth:${RESET}
-  Token: ${HERMX_DASH_AUTH_TOKEN:-<not set>}
+  Secret: ${HERMX_SECRET:-<not set>}
   Pass as X-Dashboard-Token header, or as Bearer/Basic password.
+  (Same HERMX_SECRET is the webhook X-Webhook-Secret. Run --new-secret to rotate.)
 
 ${BOLD}Dashboard public URL:${RESET}
 SUMMARY
@@ -417,7 +423,7 @@ SUMMARY
 
 if [[ -n "$WEBHOOK_URL" ]]; then
   echo "  $WEBHOOK_URL"
-  echo "  Header: X-Webhook-Secret: ${SHADOW_WEBHOOK_SECRET:-<not set>}"
+  echo "  Header: X-Webhook-Secret: ${HERMX_SECRET:-<not set>}"
 else
   echo "  (local only) http://127.0.0.1:${SHADOW_PORT}/webhook"
   echo "  For a public HTTPS URL:"
@@ -432,7 +438,7 @@ cat <<SUMMARY
 ${BOLD}Test alert (run in another terminal):${RESET}
   curl -s -X POST http://127.0.0.1:${SHADOW_PORT}/webhook \\
     -H "Content-Type: application/json" \\
-    -H "X-Webhook-Secret: ${SHADOW_WEBHOOK_SECRET:-<secret>}" \\
+    -H "X-Webhook-Secret: ${HERMX_SECRET:-<secret>}" \\
     -d '{"strategy_id":"btcusdt_duo_base_dev_2h","symbol":"BTCUSDT","timeframe":"2h","side":"buy","tv_signal_price":"65000","tv_time":"2026-06-28T00:00:00Z","exchange":"okx","source":"tradingview"}'
 
 ${BOLD}Submit gate:${RESET}

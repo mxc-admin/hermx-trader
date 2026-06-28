@@ -27,6 +27,9 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 _SHADOW_ROOT = Path(tempfile.mkdtemp(prefix="hermx-test-shadow-root-"))
 (_SHADOW_ROOT / "logs").mkdir(parents=True, exist_ok=True)
 os.environ["SHADOW_ROOT"] = str(_SHADOW_ROOT)
+# Unified secret authenticates both the webhook and the dashboard. The legacy
+# per-service secrets are kept as fallbacks so older tests still resolve a value.
+os.environ.setdefault("HERMX_SECRET", "test-secret")
 os.environ.setdefault("SHADOW_WEBHOOK_SECRET", "test-webhook-secret")
 os.environ.setdefault("HERMX_DASH_AUTH_TOKEN", "test-dashboard-token")
 

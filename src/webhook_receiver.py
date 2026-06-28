@@ -77,7 +77,9 @@ PORT = int(os.environ.get("SHADOW_PORT", "8891"))
 # deploys loopback-only (unchanged behavior); the Docker bridge compose sets
 # HERMX_BIND_HOST=0.0.0.0 so the container is reachable on the compose network.
 HERMX_BIND_HOST = (os.environ.get("HERMX_BIND_HOST") or "127.0.0.1").strip() or "127.0.0.1"
-SECRET = (os.environ.get("SHADOW_WEBHOOK_SECRET") or "").strip()
+# Unified secret: HERMX_SECRET authenticates both the webhook (X-Webhook-Secret)
+# and the dashboard. SHADOW_WEBHOOK_SECRET is accepted as a legacy fallback.
+SECRET = (os.environ.get("HERMX_SECRET") or os.environ.get("SHADOW_WEBHOOK_SECRET") or "").strip()
 HERMX_REQUIRE_HMAC = (os.environ.get("HERMX_REQUIRE_HMAC") or "false").strip().lower() in {"1", "true", "yes"}
 HERMX_WEBHOOK_HMAC_KEY = (os.environ.get("HERMX_WEBHOOK_HMAC_KEY") or "").strip()
 HERMX_REPLAY_WINDOW_SECONDS = float(os.environ.get("HERMX_REPLAY_WINDOW_SECONDS", "300") or "300")
@@ -3916,7 +3918,7 @@ def log_execution_arm_state() -> None:
 def main():
     ROOT.mkdir(parents=True, exist_ok=True)
     if not SECRET:
-        logging.error("Webhook auth misconfigured: SHADOW_WEBHOOK_SECRET is missing/blank. Receiver FAILS CLOSED with 401 for all webhook requests.")
+        logging.error("Webhook auth misconfigured: HERMX_SECRET is missing/blank. Receiver FAILS CLOSED with 401 for all webhook requests.")
     if HERMX_REQUIRE_HMAC and not HERMX_WEBHOOK_HMAC_KEY:
         logging.error("HMAC is required but HERMX_WEBHOOK_HMAC_KEY is missing/blank. Receiver FAILS CLOSED with 401 for all webhook requests.")
     if not env_file_permissions_healthy():

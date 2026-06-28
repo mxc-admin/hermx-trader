@@ -76,12 +76,12 @@ The agent uses only the local loopback API that already runs:
 4. **Let the local agent reach the dashboard.** The agent runs on the same host. Choose one:
    - **No-auth loopback:** start the dashboard with `HERMX_DASH_AUTH=false` while it is bound
      to `127.0.0.1` only. Simplest on a single-user host.
-   - **Token:** keep `HERMX_DASH_AUTH=true`, set `HERMX_DASH_AUTH_TOKEN=<token>` in `.env`,
-     and give the agent that token to send as the `X-Dashboard-Token` header (the skill
-     already documents this header).
+   - **Token:** keep `HERMX_DASH_AUTH=true`, set `HERMX_SECRET=<secret>` in `.env`
+     (legacy `HERMX_DASH_AUTH_TOKEN` still accepted), and give the agent that secret to
+     send as the `X-Dashboard-Token` header (the skill already documents this header).
 
-   The receiver's `POST /webhook` uses the `X-Webhook-Secret` header
-   (`SHADOW_WEBHOOK_SECRET`) regardless of dashboard auth.
+   The receiver's `POST /webhook` uses the `X-Webhook-Secret` header — the same
+   `HERMX_SECRET` (legacy `SHADOW_WEBHOOK_SECRET` still accepted) — regardless of dashboard auth.
 
 ## Verification checklist
 
@@ -212,7 +212,8 @@ Concrete, copy-paste steps to talk to HermX from Telegram. This expands the
 7. **Dashboard auth note.** The agent reads state from the dashboard
    (`127.0.0.1:8098`). Either run the dashboard with `HERMX_DASH_AUTH=false` (loopback,
    single-user host) **or** keep `HERMX_DASH_AUTH=true` and give the agent the
-   `HERMX_DASH_AUTH_TOKEN` so it can send the `X-Dashboard-Token` header. If auth is on
+   `HERMX_SECRET` (legacy `HERMX_DASH_AUTH_TOKEN` still accepted) so it can send the
+   `X-Dashboard-Token` header. If auth is on
    and the agent has no token, reads will fail and it will report UNKNOWN — never "flat".
 
 ## WhatsApp (optional)

@@ -272,15 +272,16 @@ if [[ "$WRITE_ENV" == "true" ]]; then
   # Exchange selection + credentials + runtime profile (STEP 3).
   pick_exchange
 
-  # Generate a strong webhook secret.
+  # Generate a single strong secret used for BOTH webhook and dashboard auth.
   if have openssl; then
     SECRET="$(openssl rand -hex 32)"
-    set_env "SHADOW_WEBHOOK_SECRET" "$SECRET"
-    ok "Generated SHADOW_WEBHOOK_SECRET (saved to .env)."
-    info "Webhook secret: $SECRET"
-    info "(Paste this exact value as the X-Webhook-Secret header in TradingView.)"
+    set_env "HERMX_SECRET" "$SECRET"
+    ok "Generated HERMX_SECRET (saved to .env)."
+    info "Secret: $SECRET"
+    info "(Paste this exact value as the X-Webhook-Secret header in TradingView,"
+    info " and use it as the dashboard token / Bearer / Basic password.)"
   else
-    warn "openssl not found — set SHADOW_WEBHOOK_SECRET in .env manually."
+    warn "openssl not found — set HERMX_SECRET in .env manually."
   fi
 
   chmod 600 "$ENV_FILE"
@@ -416,10 +417,10 @@ if have tailscale; then
         DASHBOARD_URL="${DASH_HOST}:8443/shadow/dashboard"
         echo "$DASHBOARD_URL" > "$REPO_ROOT/DASHBOARD_URL.txt"
         ok "Dashboard URL: $DASHBOARD_URL"
-        info "(Saved to DASHBOARD_URL.txt — this public URL still requires HERMX_DASH_AUTH_TOKEN from .env.)"
+        info "(Saved to DASHBOARD_URL.txt — this public URL still requires HERMX_SECRET from .env.)"
       else
         warn "Could not parse a dashboard Funnel URL. Run 'tailscale funnel status' and use"
-        warn "https://hermx.<tailnet>.ts.net:8443/shadow/dashboard (needs HERMX_DASH_AUTH_TOKEN)."
+        warn "https://hermx.<tailnet>.ts.net:8443/shadow/dashboard (needs HERMX_SECRET)."
       fi
     else
       info "Skipped the dashboard Funnel — the dashboard stays loopback-only on :8098."
@@ -553,7 +554,7 @@ phase "Installation Summary"
 WEBHOOK_DISPLAY="(see WEBHOOK_URL.txt)"
 [[ -f "$REPO_ROOT/WEBHOOK_URL.txt" ]] && WEBHOOK_DISPLAY="$(cat "$REPO_ROOT/WEBHOOK_URL.txt")"
 DASH_DISPLAY="http://127.0.0.1:8098  (loopback only — no public Funnel)"
-[[ -f "$REPO_ROOT/DASHBOARD_URL.txt" ]] && DASH_DISPLAY="$(cat "$REPO_ROOT/DASHBOARD_URL.txt")  (needs HERMX_DASH_AUTH_TOKEN)"
+[[ -f "$REPO_ROOT/DASHBOARD_URL.txt" ]] && DASH_DISPLAY="$(cat "$REPO_ROOT/DASHBOARD_URL.txt")  (needs HERMX_SECRET)"
 info "Webhook URL:  $WEBHOOK_DISPLAY"
 info "Dashboard:    $DASH_DISPLAY"
 info "Receiver:     http://127.0.0.1:8891"

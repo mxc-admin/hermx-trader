@@ -44,7 +44,9 @@ PORT = int(os.environ.get("CLEAN_DASHBOARD_PORT", "8098"))
 # sets HERMX_BIND_HOST=0.0.0.0 so the container is reachable on the host port map.
 HERMX_BIND_HOST = (os.environ.get("HERMX_BIND_HOST") or "127.0.0.1").strip() or "127.0.0.1"
 DASH_AUTH_ENABLED = (os.environ.get("HERMX_DASH_AUTH") or "true").strip().lower() not in {"0", "false", "no", ""}
-DASH_AUTH_TOKEN = (os.environ.get("HERMX_DASH_AUTH_TOKEN") or "").strip()
+# Unified secret: HERMX_SECRET is the dashboard token (X-Dashboard-Token, Bearer,
+# or Basic password). HERMX_DASH_AUTH_TOKEN is accepted as a legacy fallback.
+DASH_AUTH_TOKEN = (os.environ.get("HERMX_SECRET") or os.environ.get("HERMX_DASH_AUTH_TOKEN") or "").strip()
 BACKFILL_FILE = ROOT / "research" / "mxc-backfill-jun11-jun16.json"
 STRATEGIES_DIR = ROOT / "strategies"
 STRATEGY_ALERTS_FILE = LOGS / "strategy-alerts.jsonl"
@@ -2066,5 +2068,5 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     if DASH_AUTH_ENABLED and not DASH_AUTH_TOKEN:
-        print("[dashboard] HERMX_DASH_AUTH enabled but HERMX_DASH_AUTH_TOKEN is blank; failing closed with 401 for protected routes.", file=sys.stderr)
+        print("[dashboard] HERMX_DASH_AUTH enabled but HERMX_SECRET is blank; failing closed with 401 for protected routes.", file=sys.stderr)
     ThreadingHTTPServer((HERMX_BIND_HOST, PORT), Handler).serve_forever()

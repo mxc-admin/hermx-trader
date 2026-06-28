@@ -184,7 +184,7 @@ the agent*.
 ```
 [1] TradingView Pine strategy fires an alert (2h/4h close)
         │  webhook URL: https://hermx.<tailnet>.ts.net/webhook
-        │  header:      X-Webhook-Secret: <SHADOW_WEBHOOK_SECRET>
+        │  header:      X-Webhook-Secret: <HERMX_SECRET>
         ▼
 [2] Tailscale Funnel forwards to 127.0.0.1:8891 (no inbound firewall rule)
         ▼
@@ -819,10 +819,10 @@ services:
 
 | Group | Keys |
 |-------|------|
-| Webhook/auth | `SHADOW_WEBHOOK_SECRET`, `HERMX_REQUIRE_HMAC`, `HERMX_WEBHOOK_HMAC_KEY`, `HERMX_REPLAY_WINDOW_SECONDS`, `HERMX_MAX_BODY_BYTES`, `HERMX_RATE_LIMIT_WINDOW_SECONDS`, `HERMX_RATE_LIMIT_MAX_REQUESTS` |
+| Webhook/auth | `HERMX_SECRET` *(legacy `SHADOW_WEBHOOK_SECRET` still accepted)*, `HERMX_REQUIRE_HMAC`, `HERMX_WEBHOOK_HMAC_KEY`, `HERMX_REPLAY_WINDOW_SECONDS`, `HERMX_MAX_BODY_BYTES`, `HERMX_RATE_LIMIT_WINDOW_SECONDS`, `HERMX_RATE_LIMIT_MAX_REQUESTS` |
 | Receiver/exec | `SHADOW_PORT`, `HERMX_QUEUE_MAXSIZE`, `HERMX_SUBMIT_TIMEOUT_SECONDS`, `HERMX_WORKER_POOL_SIZE`, `HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS`, `HERMX_WATCHDOG_ENABLED`, `HERMX_WATCHDOG_STALE_SECONDS`, `HERMX_QUEUE_LAG_SLO_SECONDS` |
 | Kill switch | `HERMX_LIVE_TRADING` *(`false`/unset = live trading disabled; `execution_mode=demo` is unaffected)* |
-| Dashboard | `CLEAN_DASHBOARD_PORT`, `HERMX_DASH_AUTH`, `HERMX_DASH_AUTH_TOKEN` |
+| Dashboard | `CLEAN_DASHBOARD_PORT`, `HERMX_DASH_AUTH`, `HERMX_SECRET` *(legacy `HERMX_DASH_AUTH_TOKEN` still accepted)* |
 | Exchange (OKX) | `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE`, `OKX_DEMO_API_KEY`, `OKX_DEMO_SECRET_KEY`, `OKX_DEMO_PASSPHRASE` |
 | Exchange (others) | `BINANCE_TESTNET_API_KEY/SECRET_KEY`, `BYBIT_TESTNET_API_KEY/SECRET_KEY`, `KUCOIN_PAPER_API_KEY/SECRET/PASSPHRASE`, `BITGET_DEMO_API_KEY/SECRET_KEY/PASSPHRASE`, `GATE_TESTNET_API_KEY/SECRET_KEY`, `COINBASE_SANDBOX_API_KEY/SECRET_KEY`, `HYPERLIQUID_WALLET_ADDRESS/PRIVATE_KEY` |
 | **Removed** | ~~`HERMX_SUBMIT_ENABLED`~~, ~~`OKX_SUBMIT_ORDERS`~~, ~~`OKX_SIMULATED_TRADING`~~, ~~`HERMX_EXEC_API`~~, ~~`HERMX_EXEC_BACKEND`~~, ~~`HERMX_EXEC_WRITE_BACKEND`~~, ~~`HERMX_EXEC_SHADOW`~~ — superseded by `execution_mode` + `submit_orders` + `HERMX_LIVE_TRADING` |
@@ -832,7 +832,8 @@ services:
 
 ### 8.4 Copy-and-deploy (step by step)
 
-This is the `skills/vps-deploy.md` flow, condensed:
+This is the deploy flow (see INSTALL.md §8.4, `deploy/install-services.sh`, and
+`docker-compose.yml`), condensed:
 
 1. Provision an Ubuntu 22.04 VPS.
 2. Copy the package to `/opt/hermx`.
@@ -893,7 +894,7 @@ The system never *guesses* a fill; it records `UNKNOWN` and reconciles.
 |---------|---------|
 | **Network** | All services bind `127.0.0.1` only. The *only* public surface is `:8891/webhook` via Tailscale Funnel. No other inbound ports. |
 | **Webhook auth** | `X-Webhook-Secret` (shared secret) mandatory; optional HMAC (`HERMX_REQUIRE_HMAC`) adds `X-Webhook-Timestamp` + `X-Webhook-Signature` (SHA256) with a replay window (`HERMX_REPLAY_WINDOW_SECONDS`, 300s). Body capped at `HERMX_MAX_BODY_BYTES`. Per-IP rate limit. |
-| **Dashboard auth** | Optional token (`HERMX_DASH_AUTH` + `HERMX_DASH_AUTH_TOKEN`) via `X-Dashboard-Token`; typically off on a same-host loopback deploy since it isn't publicly reachable. |
+| **Dashboard auth** | Optional token (`HERMX_DASH_AUTH` + `HERMX_SECRET`, legacy `HERMX_DASH_AUTH_TOKEN` still accepted) via `X-Dashboard-Token`; typically off on a same-host loopback deploy since it isn't publicly reachable. |
 | **Messaging auth** | Telegram bot token / WhatsApp business credentials, plus a **sender allowlist** so only the operator's accounts are accepted (§6.5). |
 | **Agent confinement** | The agent reaches the system **only** via loopback HTTP. It cannot read `.env`, hold exchange credentials, or call CCXT/shell/filesystem for order purposes. Its sole write is `POST /webhook`. |
 | **Safety location** | Money-safety gates are **Python code** in `ExecutionService.execute()`, *not* skill/agent text. The skill prose is guidance only and is explicitly stated to be non-authoritative. An adversarial or buggy LLM cannot widen its authority because the authority isn't in the prose. |
@@ -961,7 +962,8 @@ Ordered by **what unlocks the most value next**, with the build/plan boundary ex
 - CCXT executor (OKX/KuCoin/Bybit/Hyperliquid; OKX perpetual swap specifics).
 - Unknown-order resolver loop; reconciliation with backoff.
 - Dashboard (`/api`, `/health`, `/`).
-- `hermx-control` skill; `skills/vps-deploy.md`; systemd units in `deploy/`.
+- `hermx-control` skill; deploy flow in INSTALL.md §8.4 (`deploy/install-services.sh`,
+  `docker-compose.yml`); systemd units in `deploy/`.
 - Pre-execution **advisor seam** (`run_execution_advisor`, `execute_okx_with_advisor`),
   default OFF, fail-open, with `tests/test_phase8_advisor.py` green.
 
