@@ -442,3 +442,75 @@ def test_arm_requires_a_live_strategy(dash, monkeypatch):
     assert arm["demo_strategies"] == 2
     assert arm["live_strategies"] == 0
     assert arm["armed"] is False
+
+
+# ---------------------------------------------------------------------------
+# Order / reconcile / operator observability panels (read-only).
+# ---------------------------------------------------------------------------
+
+def _write_jsonl(path: Path, rows):
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def test_open_orders_panel_folds_non_terminal_only(dash):
+    dash_mod, _core, root = dash
+    _write_jsonl(root / "logs" / "order-journal.jsonl", [
+        {"schema_version": 1, "seq": 0, "ts": "2026-06-28T00:00:00Z", "cl_ord_id": "mxc-a",
+         "state": "PLANNED", "prev_state": None, "intent": {"symbol": "BTCUSDT", "inst_id": "BTC-USDT-SWAP"}, "detail": {}},
+        {"schema_version": 1, "seq": 1, "ts": "2026-06-28T00:00:01Z", "cl_ord_id": "mxc-a",
+         "state": "SUBMITTED", "prev_state": "PLANNED", "intent": {"symbol": "BTCUSDT", "inst_id": "BTC-USDT-SWAP"}, "detail": {}},
+        {"schema_version": 1, "seq": 2, "ts": "2026-06-28T00:00:02Z", "cl_ord_id": "mxc-b",
+         "state": "FILLED", "prev_state": "SUBMITTED", "intent": {"symbol": "ETHUSDT"}, "detail": {}},
+    ])
+
+    open_orders, stats = dash_mod.order_journal_open_orders()
+    by_cl = {r["cl_ord_id"]: r["state"] for r in open_orders}
+    assert by_cl == {"mxc-a": "SUBMITTED"}   # latest non-terminal per clOrdId; FILLED excluded
+    assert stats["read"] == 3
+
+
+def test_open_orders_panel_surfaces_corrupt_count(dash):
+    dash_mod, _core, root = dash
+    path = root / "logs" / "order-journal.jsonl"
+    good = {"schema_version": 1, "seq": 0, "ts": "2026-06-28T00:00:00Z", "cl_ord_id": "mxc-a",
+            "state": "UNKNOWN", "prev_state": "SUBMITTED", "intent": {"symbol": "BTCUSDT"}, "detail": {}}
+    good2 = {"schema_version": 1, "seq": 2, "ts": "2026-06-28T00:00:02Z", "cl_ord_id": "mxc-c",
+             "state": "PLANNED", "prev_state": None, "intent": {"symbol": "XRPUSDT"}, "detail": {}}
+    path.write_text(json.dumps(good) + "\n" + "{ broken mid line\n" + json.dumps(good2) + "\n", encoding="utf-8")
+
+    open_orders, stats = dash_mod.order_journal_open_orders()
+    assert {r["cl_ord_id"] for r in open_orders} == {"mxc-a", "mxc-c"}
+    assert stats["skipped"] >= 1  # corrupt mid-tail line counted, not hidden
+
+
+def test_reconcile_and_operator_panels_render_in_html(dash):
+    dash_mod, _core, root = dash
+    _write_jsonl(root / "logs" / "reconcile-alerts.jsonl", [
+        {"ts": "2026-06-28T00:00:03Z", "alert": "RECONCILE_MISMATCH",
+         "detail": {"stage": "startup_open_order", "cl_ord_id": "mxc-a", "symbol": "BTCUSDT", "reason": "not_found"}},
+    ])
+    _write_jsonl(root / "logs" / "operator-alerts.jsonl", [
+        {"ts": "2026-06-28T00:00:04Z", "alert": "PLANNED_ORDER_ABANDONED", "severity": "warning",
+         "detail": {"cl_ord_id": "mxc-x", "reason": "never_submitted", "age_s": 400}},
+    ])
+
+    html = dash_mod.render()
+    assert "Order &amp; Reconcile State" in html
+    assert "RECONCILE_MISMATCH" in html
+    assert "PLANNED_ORDER_ABANDONED" in html
+    # Read-only: tab-nav <button>s exist, but no submit/execute/cancel ACTION controls.
+    for forbidden in ("<form", "submit_order", "/execute", "cancel_order", 'method="post"'):
+        assert forbidden not in html.lower(), f"dashboard must stay read-only, found {forbidden!r}"
+
+
+def test_api_payload_exposes_order_reconcile_operator(dash):
+    dash_mod, _core, root = dash
+    _write_jsonl(root / "logs" / "order-journal.jsonl", [
+        {"schema_version": 1, "seq": 0, "ts": "2026-06-28T00:00:00Z", "cl_ord_id": "mxc-a",
+         "state": "SUBMITTED", "prev_state": "PLANNED", "intent": {"symbol": "BTCUSDT"}, "detail": {}},
+    ])
+    _bust_cache(dash_mod)
+    api = dash_mod.api_payload()
+    assert "open_orders" in api and "reconcile_alerts" in api and "operator_alerts" in api
+    assert len(api["open_orders"]["rows"]) == 1
+    assert "stats" in api["open_orders"]

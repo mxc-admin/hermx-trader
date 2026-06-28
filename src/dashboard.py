@@ -1174,6 +1174,9 @@ def api_payload():
     """
     model = dashboard_model()
     loaded = model["loaded"]
+    open_orders, oo_stats = order_journal_open_orders()
+    recon, rc_stats = reconcile_alert_records()
+    ops, op_stats = operator_alert_records()
     return {
         "generated_at": model["generated_at"],
         "source_counts": {k: loaded[k] for k in ("historical_count", "backfill_count", "live_count")},
@@ -1185,6 +1188,10 @@ def api_payload():
         "executor": model.get("executor") or {},
         "ledger_health": model.get("ledger_health") or {},
         "freshness": model.get("freshness") or {},
+        # Read-only order/reconcile/operator observability (each with its read stats).
+        "open_orders": {"rows": open_orders, "stats": oo_stats},
+        "reconcile_alerts": {"rows": recon, "stats": rc_stats},
+        "operator_alerts": {"rows": ops, "stats": op_stats},
     }
 
 
@@ -1678,6 +1685,198 @@ def strategy_execution_rows(strategy, okx_executions):
     ]
 
 
+# ---------------------------------------------------------------------------
+# Order / reconcile / operator observability panels (read-only). These fold the
+# bounded tail of the receiver's order-journal + alert ledgers via the same bounded
+# reader the rest of the dashboard uses (read_jsonl_stats), so a huge ledger can never
+# OOM the dashboard and corrupt/truncated lines are surfaced, not hidden. The dashboard
+# stays a pure consumer -- no submit/execute/cancel controls.
+# ---------------------------------------------------------------------------
+
+def order_journal_open_orders(limit=300):
+    """Bounded-tail fold of order-journal.jsonl to the latest record per cl_ord_id,
+    filtered to non-terminal (PLANNED/SUBMITTED/UNKNOWN) open orders. Returns
+    ``(open_orders, stats)``; stats carries the read/skipped/truncated counts."""
+    rows, stats = read_jsonl_stats(ORDER_JOURNAL_FILE, limit)
+    latest = {}
+    for rec in rows:
+        if not isinstance(rec, dict):
+            continue
+        seq = rec.get("seq")
+        if not isinstance(seq, int):
+            continue
+        cl = rec.get("cl_ord_id")
+        cur = latest.get(cl)
+        if cur is None or seq > int(cur.get("seq") or -1):
+            latest[cl] = rec
+    open_orders = []
+    for cl, rec in latest.items():
+        state = str(rec.get("state") or "").upper()
+        if state in ORDER_TERMINAL_STATES_DASH:
+            continue
+        intent = rec.get("intent") or {}
+        open_orders.append({
+            "cl_ord_id": cl,
+            "state": state,
+            "symbol": intent.get("symbol"),
+            "inst_id": intent.get("inst_id"),
+            "ts": rec.get("ts"),
+            "prev_state": rec.get("prev_state"),
+        })
+    open_orders.sort(
+        key=lambda r: parse_dt(r.get("ts")) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    return open_orders, stats
+
+
+def reconcile_alert_records(limit=60):
+    rows, stats = read_jsonl_stats(RECONCILE_ALERTS_FILE, limit)
+    return list(reversed(rows)), stats
+
+
+def operator_alert_records(limit=60):
+    rows, stats = read_jsonl_stats(OPERATOR_ALERTS_FILE, limit)
+    return list(reversed(rows)), stats
+
+
+def _ledger_stat_note(stats):
+    bits = [f"{int(stats.get('read') or 0)} rows"]
+    if stats.get("skipped"):
+        bits.append(f"{int(stats['skipped'])} corrupt")
+    if stats.get("truncated_tail"):
+        bits.append("truncated tail")
+    if stats.get("more"):
+        bits.append("older rows beyond window")
+    kind = "warn" if (stats.get("skipped") or stats.get("truncated_tail")) else "neutral"
+    return badge(" · ".join(bits), kind)
+
+
+def _alert_detail_str(detail):
+    if not isinstance(detail, dict):
+        return esc(detail)
+    return esc(", ".join(f"{k}={detail[k]}" for k in list(detail)[:8]))
+
+
+def _state_kind(state):
+    s = str(state or "").upper()
+    if s == "SUBMITTED":
+        return "good"
+    if s == "UNKNOWN":
+        return "warn"
+    if s == "PLANNED":
+        return "neutral"
+    return "neutral"
+
+
+def open_orders_table(open_orders):
+    if not open_orders:
+        return '<table><tbody><tr><td>No open orders (all PLANNED/SUBMITTED/UNKNOWN orders resolved).</td></tr></tbody></table>'
+    body = []
+    for row in open_orders:
+        body.append(f"""
+        <tr>
+          <td>{esc(display_time(row.get('ts')))}</td>
+          <td><code>{esc(row.get('cl_ord_id'))}</code></td>
+          <td><b>{esc(row.get('symbol') or '-')}</b></td>
+          <td>{esc(row.get('inst_id') or '-')}</td>
+          <td>{badge(row.get('state'), _state_kind(row.get('state')))}</td>
+          <td>{esc(row.get('prev_state') or '-')}</td>
+        </tr>
+        """)
+    return f"""
+    <table>
+      <thead><tr><th>Updated</th><th>clOrdId</th><th>Symbol</th><th>Instrument</th><th>State</th><th>Prev</th></tr></thead>
+      <tbody>{''.join(body)}</tbody>
+    </table>
+    """
+
+
+def reconcile_alert_table(rows):
+    if not rows:
+        return '<table><tbody><tr><td>No reconcile alerts.</td></tr></tbody></table>'
+    body = []
+    for row in rows:
+        detail = row.get("detail") or {}
+        body.append(f"""
+        <tr>
+          <td>{esc(display_time(row.get('ts')))}</td>
+          <td>{badge(row.get('alert'), 'warn')}</td>
+          <td>{esc(detail.get('stage') or '-')}</td>
+          <td><code>{esc(detail.get('cl_ord_id') or '-')}</code></td>
+          <td>{esc(detail.get('symbol') or '-')}</td>
+          <td>{esc(detail.get('reason') or detail.get('reconciled_state') or '-')}</td>
+        </tr>
+        """)
+    return f"""
+    <table>
+      <thead><tr><th>Time</th><th>Alert</th><th>Stage</th><th>clOrdId</th><th>Symbol</th><th>Reason</th></tr></thead>
+      <tbody>{''.join(body)}</tbody>
+    </table>
+    """
+
+
+def operator_alert_table(rows):
+    if not rows:
+        return '<table><tbody><tr><td>No operator alerts.</td></tr></tbody></table>'
+    body = []
+    for row in rows:
+        sev = str(row.get("severity") or "warning").lower()
+        sev_kind = "bad" if sev == "error" else "warn"
+        body.append(f"""
+        <tr>
+          <td>{esc(display_time(row.get('ts')))}</td>
+          <td>{badge(sev, sev_kind)}</td>
+          <td>{badge(row.get('alert'), 'neutral')}</td>
+          <td>{_alert_detail_str(row.get('detail'))}</td>
+        </tr>
+        """)
+    return f"""
+    <table>
+      <thead><tr><th>Time</th><th>Severity</th><th>Alert</th><th>Detail</th></tr></thead>
+      <tbody>{''.join(body)}</tbody>
+    </table>
+    """
+
+
+def order_state_section():
+    """The read-only Order / Reconcile / Operator observability section."""
+    open_orders, oo_stats = order_journal_open_orders()
+    recon, rc_stats = reconcile_alert_records()
+    ops, op_stats = operator_alert_records()
+    return f"""
+    <section class="subsection">
+      <div class="log-head">
+        <div>
+          <h3>Order &amp; Reconcile State</h3>
+          <p>Read-only view of the submission state machine and reconciliation alerts. The dashboard never submits or cancels.</p>
+        </div>
+      </div>
+      <section class="trade-log-card nested">
+        <div class="log-head">
+          <h3>Open Orders <span class="sub">{_ledger_stat_note(oo_stats)}</span></h3>
+          <p>Non-terminal orders (PLANNED / SUBMITTED / UNKNOWN) from order-journal.jsonl, latest state per clOrdId.</p>
+        </div>
+        <div class="table-wrap unified-log">{open_orders_table(open_orders)}</div>
+      </section>
+      <section class="trade-log-card nested">
+        <div class="log-head">
+          <h3>Reconcile Alerts <span class="sub">{_ledger_stat_note(rc_stats)}</span></h3>
+          <p>Latest entries from reconcile-alerts.jsonl (mismatches, resolver timeouts).</p>
+        </div>
+        <div class="table-wrap unified-log">{reconcile_alert_table(recon)}</div>
+      </section>
+      <section class="trade-log-card nested">
+        <div class="log-head">
+          <h3>Operator Alerts <span class="sub">{_ledger_stat_note(op_stats)}</span></h3>
+          <p>Latest entries from operator-alerts.jsonl (auth, queue, resolver, never_submitted).</p>
+        </div>
+        <div class="table-wrap unified-log">{operator_alert_table(ops)}</div>
+      </section>
+    </section>
+    """
+
+
 def strategy_trial_tab(strategies, alerts, okx_live, okx_executions):
     cards = ''.join(strategy_card(strategy, okx_live, alerts) for strategy in strategies)
     strategy_rows = []
@@ -1709,6 +1908,7 @@ def strategy_trial_tab(strategies, alerts, okx_live, okx_executions):
         </div>
         <div class="table-wrap unified-log">{strategy_alert_table(alerts)}</div>
       </section>
+      {order_state_section()}
     </section>
     """
 
