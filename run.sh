@@ -187,6 +187,7 @@ ensure_secret
 export SHADOW_ROOT="$ROOT"
 export SHADOW_PORT
 export CLEAN_DASHBOARD_PORT
+SUMMARY_SHOWN=false
 
 if [[ "$HONOR_SUBMIT" != true ]]; then
   export HERMX_LIVE_TRADING="false"
@@ -242,6 +243,128 @@ if [[ "$CHECK_ONLY" == true ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Discover / publish public URLs via Tailscale Funnel
+# ---------------------------------------------------------------------------
+# The webhook is published on :443; the dashboard gets its OWN Funnel on :8443.
+# Funnel only permits 443/8443/10000 as public ports, so the dashboard (loopback
+# $CLEAN_DASHBOARD_PORT) cannot share the webhook's :443 — it gets :8443.
+discover_urls() {
+  WEBHOOK_URL=""
+  DASHBOARD_URL=""
+  if [[ -f "$ROOT/WEBHOOK_URL.txt" ]]; then
+    WEBHOOK_URL="$(cat "$ROOT/WEBHOOK_URL.txt")"
+    ok "Loaded public webhook URL from WEBHOOK_URL.txt"
+  fi
+  if [[ -f "$ROOT/DASHBOARD_URL.txt" ]]; then
+    DASHBOARD_URL="$(cat "$ROOT/DASHBOARD_URL.txt")"
+    ok "Loaded public dashboard URL from DASHBOARD_URL.txt"
+  fi
+
+  if have tailscale && tailscale status >/dev/null 2>&1; then
+    # Publish the dashboard on its own Funnel (:8443 -> loopback dashboard).
+    if [[ -z "$DASHBOARD_URL" ]]; then
+      info "Enabling Tailscale Funnel for the dashboard (:8443 -> ${CLEAN_DASHBOARD_PORT})..."
+      if tailscale funnel --bg --https=8443 "$CLEAN_DASHBOARD_PORT" >/dev/null 2>&1 \
+         || sudo tailscale funnel --bg --https=8443 "$CLEAN_DASHBOARD_PORT" >/dev/null 2>&1; then
+        ok "Dashboard Funnel enabled (:8443)"
+      else
+        warn "Could not enable the dashboard Funnel (enable Funnel for your tailnet first, then re-run)."
+      fi
+    fi
+
+    # Derive the tailnet hostname from any active funnel entry.
+    TS_HOST="$(tailscale funnel status 2>/dev/null | grep -oE 'https://[a-zA-Z0-9._-]+\.ts\.net' | head -1 || true)"
+    if [[ -n "$TS_HOST" ]]; then
+      if [[ -z "$WEBHOOK_URL" ]]; then
+        WEBHOOK_URL="${TS_HOST}/webhook"
+        ok "Discovered Tailscale Funnel URL: $WEBHOOK_URL"
+      fi
+      if [[ -z "$DASHBOARD_URL" ]]; then
+        DASHBOARD_URL="${TS_HOST}:8443/dashboard/"
+        ok "Dashboard Tailscale URL: $DASHBOARD_URL"
+      fi
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Phase 4: summary
+# ---------------------------------------------------------------------------
+print_summary() {
+  [[ "$SUMMARY_SHOWN" == true ]] && return
+phase "4/4 — HermX is running"
+
+cat <<SUMMARY
+${BOLD}Local services:${RESET}
+  Receiver health:  http://127.0.0.1:${SHADOW_PORT}/health
+  Dashboard health: http://127.0.0.1:${CLEAN_DASHBOARD_PORT}/health
+  Dashboard UI:     http://127.0.0.1:${CLEAN_DASHBOARD_PORT}/dashboard/
+
+${BOLD}Dashboard auth:${RESET}
+  Secret: ${HERMX_SECRET:-<not set>}
+  Pass as X-Dashboard-Token header, or as Bearer/Basic password.
+  (Same HERMX_SECRET is the webhook X-Webhook-Secret. Run --new-secret to rotate.)
+
+${BOLD}Dashboard public URL:${RESET}
+SUMMARY
+
+if [[ -n "$DASHBOARD_URL" ]]; then
+  echo "  $DASHBOARD_URL"
+  echo "  Requires the dashboard auth token above (X-Dashboard-Token header,"
+  echo "  or as the Bearer/Basic password)."
+else
+  echo "  (local only) http://127.0.0.1:${CLEAN_DASHBOARD_PORT}/dashboard/"
+  echo "  For a public HTTPS URL (its own Funnel, separate from the webhook):"
+  echo "    1. Install Tailscale:    https://tailscale.com/download"
+  echo "    2. Connect:              sudo tailscale up --hostname=hermx"
+  echo "    3. Funnel the dashboard: sudo tailscale funnel --bg --https=8443 ${CLEAN_DASHBOARD_PORT}"
+  echo "    4. Open:                 https://hermx.<tailnet>.ts.net:8443/dashboard/"
+  echo "    (The public dashboard URL still requires the auth token above.)"
+fi
+
+cat <<SUMMARY
+
+${BOLD}TradingView webhook URL:${RESET}
+SUMMARY
+
+if [[ -n "$WEBHOOK_URL" ]]; then
+  echo "  $WEBHOOK_URL"
+  echo "  Header: X-Webhook-Secret: ${HERMX_SECRET:-<not set>}"
+else
+  echo "  (local only) http://127.0.0.1:${SHADOW_PORT}/webhook"
+  echo "  For a public HTTPS URL:"
+  echo "    1. Install Tailscale:   https://tailscale.com/download"
+  echo "    2. Connect:             sudo tailscale up --hostname=hermx"
+  echo "    3. Enable funnel:       sudo tailscale funnel --bg ${SHADOW_PORT}"
+  echo "    4. Save the URL:         echo https://hermx.<tailnet>.ts.net/webhook > WEBHOOK_URL.txt"
+fi
+
+cat <<SUMMARY
+
+${BOLD}Test alert (run in another terminal):${RESET}
+  curl -s -X POST http://127.0.0.1:${SHADOW_PORT}/webhook \\
+    -H "Content-Type: application/json" \\
+    -H "X-Webhook-Secret: ${HERMX_SECRET:-<secret>}" \\
+    -d '{"strategy_id":"btcusdt_duo_base_dev_2h","symbol":"BTCUSDT","timeframe":"2h","side":"buy","tv_signal_price":"65000","tv_time":"2026-06-28T00:00:00Z","exchange":"okx","source":"tradingview"}'
+
+${BOLD}Submit gate:${RESET}
+  HERMX_LIVE_TRADING=${HERMX_LIVE_TRADING:-<unset>}
+SUMMARY
+
+if [[ "$HONOR_SUBMIT" != true ]]; then
+  cat <<SUMMARY
+  ${YELLOW}Live submission is BLOCKED (HERMX_LIVE_TRADING=false); demo/paper orders${RESET}
+  ${YELLOW}may still submit if a strategy has submit_orders=true.${RESET}
+  Pass --honor-submit to let .env / shadow-config.json control submission.
+SUMMARY
+fi
+
+echo
+info "Press Ctrl-C to stop both services."
+  SUMMARY_SHOWN=true
+}
+
+# ---------------------------------------------------------------------------
 # Phase 3: start services
 # ---------------------------------------------------------------------------
 phase "3/4 — Start services"
@@ -250,6 +373,11 @@ if ! have curl; then
   err "curl is required for health probes. Install it and re-run."
   exit 1
 fi
+
+# Always surface the secret + known URLs before the port check, even if
+# startup later fails. print_summary is idempotent (SUMMARY_SHOWN guard).
+discover_urls
+print_summary
 
 # Port availability check (best-effort)
 if have lsof; then
@@ -330,119 +458,5 @@ else
   warn "No HERMX_SECRET set — skipping synthetic webhook test"
 fi
 
-# ---------------------------------------------------------------------------
-# Discover / publish public URLs via Tailscale Funnel
-# ---------------------------------------------------------------------------
-# The webhook is published on :443; the dashboard gets its OWN Funnel on :8443.
-# Funnel only permits 443/8443/10000 as public ports, so the dashboard (loopback
-# $CLEAN_DASHBOARD_PORT) cannot share the webhook's :443 — it gets :8443.
-WEBHOOK_URL=""
-DASHBOARD_URL=""
-if [[ -f "$ROOT/WEBHOOK_URL.txt" ]]; then
-  WEBHOOK_URL="$(cat "$ROOT/WEBHOOK_URL.txt")"
-  ok "Loaded public webhook URL from WEBHOOK_URL.txt"
-fi
-if [[ -f "$ROOT/DASHBOARD_URL.txt" ]]; then
-  DASHBOARD_URL="$(cat "$ROOT/DASHBOARD_URL.txt")"
-  ok "Loaded public dashboard URL from DASHBOARD_URL.txt"
-fi
-
-if have tailscale && tailscale status >/dev/null 2>&1; then
-  # Publish the dashboard on its own Funnel (:8443 -> loopback dashboard).
-  if [[ -z "$DASHBOARD_URL" ]]; then
-    info "Enabling Tailscale Funnel for the dashboard (:8443 -> ${CLEAN_DASHBOARD_PORT})..."
-    if tailscale funnel --bg --https=8443 "$CLEAN_DASHBOARD_PORT" >/dev/null 2>&1 \
-       || sudo tailscale funnel --bg --https=8443 "$CLEAN_DASHBOARD_PORT" >/dev/null 2>&1; then
-      ok "Dashboard Funnel enabled (:8443)"
-    else
-      warn "Could not enable the dashboard Funnel (enable Funnel for your tailnet first, then re-run)."
-    fi
-  fi
-
-  # Derive the tailnet hostname from any active funnel entry.
-  TS_HOST="$(tailscale funnel status 2>/dev/null | grep -oE 'https://[a-zA-Z0-9._-]+\.ts\.net' | head -1 || true)"
-  if [[ -n "$TS_HOST" ]]; then
-    if [[ -z "$WEBHOOK_URL" ]]; then
-      WEBHOOK_URL="${TS_HOST}/webhook"
-      ok "Discovered Tailscale Funnel URL: $WEBHOOK_URL"
-    fi
-    if [[ -z "$DASHBOARD_URL" ]]; then
-      DASHBOARD_URL="${TS_HOST}:8443/dashboard/"
-      ok "Dashboard Tailscale URL: $DASHBOARD_URL"
-    fi
-  fi
-fi
-
-# ---------------------------------------------------------------------------
-# Phase 4: summary
-# ---------------------------------------------------------------------------
-phase "4/4 — HermX is running"
-
-cat <<SUMMARY
-${BOLD}Local services:${RESET}
-  Receiver health:  http://127.0.0.1:${SHADOW_PORT}/health
-  Dashboard health: http://127.0.0.1:${CLEAN_DASHBOARD_PORT}/health
-  Dashboard UI:     http://127.0.0.1:${CLEAN_DASHBOARD_PORT}/dashboard/
-
-${BOLD}Dashboard auth:${RESET}
-  Secret: ${HERMX_SECRET:-<not set>}
-  Pass as X-Dashboard-Token header, or as Bearer/Basic password.
-  (Same HERMX_SECRET is the webhook X-Webhook-Secret. Run --new-secret to rotate.)
-
-${BOLD}Dashboard public URL:${RESET}
-SUMMARY
-
-if [[ -n "$DASHBOARD_URL" ]]; then
-  echo "  $DASHBOARD_URL"
-  echo "  Requires the dashboard auth token above (X-Dashboard-Token header,"
-  echo "  or as the Bearer/Basic password)."
-else
-  echo "  (local only) http://127.0.0.1:${CLEAN_DASHBOARD_PORT}/dashboard/"
-  echo "  For a public HTTPS URL (its own Funnel, separate from the webhook):"
-  echo "    1. Install Tailscale:    https://tailscale.com/download"
-  echo "    2. Connect:              sudo tailscale up --hostname=hermx"
-  echo "    3. Funnel the dashboard: sudo tailscale funnel --bg --https=8443 ${CLEAN_DASHBOARD_PORT}"
-  echo "    4. Open:                 https://hermx.<tailnet>.ts.net:8443/dashboard/"
-  echo "    (The public dashboard URL still requires the auth token above.)"
-fi
-
-cat <<SUMMARY
-
-${BOLD}TradingView webhook URL:${RESET}
-SUMMARY
-
-if [[ -n "$WEBHOOK_URL" ]]; then
-  echo "  $WEBHOOK_URL"
-  echo "  Header: X-Webhook-Secret: ${HERMX_SECRET:-<not set>}"
-else
-  echo "  (local only) http://127.0.0.1:${SHADOW_PORT}/webhook"
-  echo "  For a public HTTPS URL:"
-  echo "    1. Install Tailscale:   https://tailscale.com/download"
-  echo "    2. Connect:             sudo tailscale up --hostname=hermx"
-  echo "    3. Enable funnel:       sudo tailscale funnel --bg ${SHADOW_PORT}"
-  echo "    4. Save the URL:         echo https://hermx.<tailnet>.ts.net/webhook > WEBHOOK_URL.txt"
-fi
-
-cat <<SUMMARY
-
-${BOLD}Test alert (run in another terminal):${RESET}
-  curl -s -X POST http://127.0.0.1:${SHADOW_PORT}/webhook \\
-    -H "Content-Type: application/json" \\
-    -H "X-Webhook-Secret: ${HERMX_SECRET:-<secret>}" \\
-    -d '{"strategy_id":"btcusdt_duo_base_dev_2h","symbol":"BTCUSDT","timeframe":"2h","side":"buy","tv_signal_price":"65000","tv_time":"2026-06-28T00:00:00Z","exchange":"okx","source":"tradingview"}'
-
-${BOLD}Submit gate:${RESET}
-  HERMX_LIVE_TRADING=${HERMX_LIVE_TRADING:-<unset>}
-SUMMARY
-
-if [[ "$HONOR_SUBMIT" != true ]]; then
-  cat <<SUMMARY
-  ${YELLOW}Live submission is BLOCKED (HERMX_LIVE_TRADING=false); demo/paper orders${RESET}
-  ${YELLOW}may still submit if a strategy has submit_orders=true.${RESET}
-  Pass --honor-submit to let .env / shadow-config.json control submission.
-SUMMARY
-fi
-
-echo
-info "Press Ctrl-C to stop both services."
+print_summary
 wait
