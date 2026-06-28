@@ -28,6 +28,17 @@ from urllib import request as urllib_request
 from urllib.parse import urlparse
 
 from security.credentials import redact_secrets
+from security.webhook_auth import (  # noqa: E402  pure security helpers (Phase 1 step 3)
+    webhook_auth_config_healthy as _webhook_auth_config_healthy,
+    env_file_permissions_healthy as _env_file_permissions_healthy,
+    client_ip as _client_ip_impl,
+    rate_limit_key as _rate_limit_key_impl,
+    rate_limit_allow as _rate_limit_allow_impl,
+    parse_replay_timestamp as _parse_replay_timestamp_impl,
+    compute_webhook_hmac as _compute_webhook_hmac_impl,
+    verify_webhook_hmac as _verify_webhook_hmac_impl,
+    authenticate_webhook_request as _authenticate_webhook_request_impl,
+)
 from strategy.decision_math import (  # noqa: E402  pure decision math (re-exported)
     POLICY_LABELS,
     as_float,
@@ -473,34 +484,15 @@ def parse_tv_time(value) -> datetime | None:
 
 
 def webhook_auth_config_healthy() -> bool:
-    if not SECRET:
-        return False
-    if HERMX_REQUIRE_HMAC and not HERMX_WEBHOOK_HMAC_KEY:
-        return False
-    return True
+    return _webhook_auth_config_healthy(SECRET, HERMX_REQUIRE_HMAC, HERMX_WEBHOOK_HMAC_KEY)
 
 
 def env_file_permissions_healthy(path: Path | None = None) -> bool:
-    target = path or (ROOT / ".env")
-    if not target.exists():
-        return True
-    try:
-        mode = stat.S_IMODE(target.stat().st_mode)
-    except OSError:
-        return False
-    return (mode & 0o077) == 0
+    return _env_file_permissions_healthy(ROOT, path)
 
 
 def _client_ip(handler: BaseHTTPRequestHandler) -> str:
-    forwarded = (handler.headers.get("CF-Connecting-IP") or "").strip()
-    if forwarded:
-        return forwarded
-    xff = (handler.headers.get("X-Forwarded-For") or "").strip()
-    if xff:
-        return xff.split(",", 1)[0].strip()
-    if getattr(handler, "client_address", None):
-        return str(handler.client_address[0])
-    return "unknown"
+    return _client_ip_impl(handler)
 
 
 def _symbol_lock(symbol: str | None) -> threading.Lock:
@@ -631,85 +623,50 @@ def liveness_watchdog_loop(stop_event: "threading.Event | None" = None, sleep=ti
 
 
 def _rate_limit_key(handler: BaseHTTPRequestHandler) -> str:
-    key_id = (handler.headers.get("X-Webhook-Key-Id") or "").strip()
-    if key_id:
-        return f"key:{key_id}"
-    return f"ip:{_client_ip(handler)}"
+    return _rate_limit_key_impl(handler)
 
 
 def rate_limit_allow(source_key: str, now_seconds: float | None = None) -> tuple[bool, dict]:
-    now = time.time() if now_seconds is None else float(now_seconds)
-    window = max(1.0, HERMX_RATE_LIMIT_WINDOW_SECONDS)
-    limit = max(1, HERMX_RATE_LIMIT_MAX_REQUESTS)
-    with _RATE_LIMIT_LOCK:
-        events = _RATE_LIMIT_BUCKETS.get(source_key, [])
-        events = [ts for ts in events if now - ts <= window]
-        allowed = len(events) < limit
-        if allowed:
-            events.append(now)
-        _RATE_LIMIT_BUCKETS[source_key] = events
-        return allowed, {
-            "source_key": source_key,
-            "window_seconds": window,
-            "limit": limit,
-            "count": len(events),
-        }
+    return _rate_limit_allow_impl(
+        source_key,
+        _RATE_LIMIT_BUCKETS,
+        _RATE_LIMIT_LOCK,
+        HERMX_RATE_LIMIT_WINDOW_SECONDS,
+        HERMX_RATE_LIMIT_MAX_REQUESTS,
+        now_seconds=now_seconds,
+    )
 
 
 def _parse_replay_timestamp(value: str) -> float | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        return float(text)
-    except (TypeError, ValueError):
-        dt = parse_tv_time(text)
-        if dt is None:
-            return None
-        return dt.timestamp()
+    return _parse_replay_timestamp_impl(value, parse_tv_time)
 
 
 def compute_webhook_hmac(timestamp: str, body: bytes, key: str) -> str:
-    return hmac.new(key.encode("utf-8"), timestamp.encode("utf-8") + body, hashlib.sha256).hexdigest()
+    return _compute_webhook_hmac_impl(timestamp, body, key)
 
 
 def verify_webhook_hmac(headers, body: bytes, now_seconds: float | None = None) -> tuple[bool, str]:
-    if not HERMX_REQUIRE_HMAC:
-        return True, "hmac_not_required"
-    if not HERMX_WEBHOOK_HMAC_KEY:
-        return False, "hmac_key_missing"
-    timestamp = (headers.get("X-Webhook-Timestamp") or "").strip()
-    signature = (headers.get("X-Webhook-Signature") or "").strip()
-    if not timestamp or not signature:
-        return False, "hmac_header_missing"
-    ts_value = _parse_replay_timestamp(timestamp)
-    if ts_value is None:
-        return False, "hmac_timestamp_invalid"
-    now = time.time() if now_seconds is None else float(now_seconds)
-    if abs(now - ts_value) > max(1.0, HERMX_REPLAY_WINDOW_SECONDS):
-        return False, "hmac_replay_window"
-    provided = signature.split("=", 1)[1] if signature.lower().startswith("sha256=") else signature
-    expected = compute_webhook_hmac(timestamp, body, HERMX_WEBHOOK_HMAC_KEY)
-    if not hmac.compare_digest(provided, expected):
-        return False, "hmac_mismatch"
-    return True, "ok"
+    return _verify_webhook_hmac_impl(
+        headers,
+        body,
+        HERMX_REQUIRE_HMAC,
+        HERMX_WEBHOOK_HMAC_KEY,
+        HERMX_REPLAY_WINDOW_SECONDS,
+        _parse_replay_timestamp,
+        compute_webhook_hmac,
+        now_seconds=now_seconds,
+    )
 
 
 def authenticate_webhook_request(handler: BaseHTTPRequestHandler, body: bytes) -> tuple[bool, int, str]:
-    client_ip = _client_ip(handler)
-    path = urlparse(handler.path).path
-    if not SECRET:
-        emit_auth_failure_alert(path, client_ip)
-        return False, 401, "missing_webhook_secret"
-    provided = (handler.headers.get("X-Webhook-Secret") or "").strip()
-    if not hmac.compare_digest(provided, SECRET):
-        emit_auth_failure_alert(path, client_ip)
-        return False, 401, "forbidden"
-    ok, reason = verify_webhook_hmac(handler.headers, body)
-    if not ok:
-        emit_auth_failure_alert(path, client_ip)
-        return False, 401, reason
-    return True, 200, "ok"
+    return _authenticate_webhook_request_impl(
+        handler,
+        body,
+        SECRET,
+        _client_ip,
+        lambda headers, request_body: verify_webhook_hmac(headers, request_body),
+        emit_auth_failure_alert,
+    )
 
 
 def latency_info(tv_time, received_at: str) -> dict:
