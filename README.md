@@ -41,22 +41,23 @@ signals over Telegram. All risk policy stays in Python — the LLM is advisory a
 
 ```bash
 curl -fsSL https://hermes-agent.nousresearch.com/install.sh | sh
-# Then configure your LLM provider:
-hermes provider setup
-# (Supports xAI/Grok, OpenAI, Anthropic, Ollama and others)
+hermes provider setup   # choose your LLM provider (xAI, OpenAI, Anthropic, Ollama, etc.)
 ```
 
-### Step 2 — Let Hermes set up HermX for you
+### Step 2 — Register the HermX skill and start the install
 
 ```bash
-# Clone this repo, then:
+# From inside this repo:
+ln -sfn "$(pwd)/skills/hermx-control" ~/.hermes/skills/hermx-control
 cat INSTALL.md | hermes -z --skills hermx-control
-# Or paste INSTALL.md directly into your AI assistant (Claude, Windsurf, etc.)
 ```
 
-The agent walks you through the entire install interactively — asking for credentials, reviewing
-strategies, setting up Tailscale, deploying services, and configuring TradingView alerts. See
-[INSTALL.md](INSTALL.md) for the full guide and a manual path.
+Hermes walks you through all 8 install phases interactively — asking for exchange API keys,
+reviewing strategies, setting up Tailscale (outputs your stable webhook URL), deploying services,
+and configuring the Telegram gateway. You answer questions; it runs the commands.
+
+**No Hermes?** Paste `INSTALL.md` into any AI assistant (Claude, Windsurf, Cursor, etc.) and follow along manually.
+See [INSTALL.md](INSTALL.md) for the full guide.
 
 ## What you'll have after install
 
