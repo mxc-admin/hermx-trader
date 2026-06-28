@@ -16,19 +16,21 @@ HermX is a money-safety-critical crypto execution system. A TradingView Pine str
 ### 1.2 Component map
 
 ```text
-                          ┌──────────────────────────┐
-                          │   TradingView (external)  │  [BUILT/EXTERNAL]
-                          │   Pine strategy alert     │
-                          └─────────────┬────────────┘
-                                        │ HTTPS POST (alert JSON)
-                                        ▼
-                          ┌──────────────────────────┐
-                          │  Tailscale Funnel         │  [BUILT]
-                          │  https://hermx.<tailnet>  │
-                          │       .ts.net/webhook     │
-                          └─────────────┬────────────┘
-                                        │ forwards to loopback
-                                        ▼
+   ┌──────────────────────────┐       ┌──────────────────────────┐
+   │  TradingView (external)   │       │  Operator (external)      │  [BUILT/EXTERNAL]
+   │  Pine strategy alert      │       │  Telegram / WhatsApp      │
+   └─────────────┬─────────────┘       └─────────────┬────────────┘
+                 │ HTTPS POST (alert JSON)             │ message / command
+                 ▼                                     ▼
+   ┌──────────────────────────┐       ┌──────────────────────────┐
+   │  Tailscale Funnel         │       │  Hermes Agent gateway    │  [PLANNED]
+   │  https://hermx.<tailnet>  │       │  hermx-control skill     │
+   │       .ts.net/webhook     │       │  reads /api /health      │
+   └─────────────┬─────────────┘       │  relays POST /webhook    │
+                 │ forwards to loopback └─────────────┬────────────┘
+                 │                                    │ POST /webhook (loopback)
+                 └──────────────────┬─────────────────┘
+                                    ▼
    ┌─────────────────────────────────────────────────────────────────────┐
    │  Webhook Receiver        127.0.0.1:8891   (src/webhook_receiver.py)   │ [BUILT]
    │  auth → rate-limit → body cap → normalize → schema → dedupe → queue   │
