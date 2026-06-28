@@ -330,7 +330,7 @@ PAPER_DEFAULT_FUNDING_RATE = float(CONFIG.get("funding", {}).get("default_rate",
 # canonical_timeframe lives in the shared module so the receiver and the
 # dashboard can never drift (Phase 4 / D8). Re-exported here so existing
 # references (`canonical_timeframe(...)`) and importers keep working unchanged.
-from hermx_shared import canonical_timeframe  # noqa: E402,F401
+from hermx_shared import canonical_timeframe, live_trading_enabled  # noqa: E402,F401
 
 
 def strategy_instrument(row: dict) -> dict:
@@ -2429,7 +2429,11 @@ def build_okx_execution_readiness(record: dict, paper_events: list[dict]) -> dic
     # arming flags (execution.enabled / risk.allow_live_execution) are gone.
     live_allowed = False
     signal_identity = _signal_identity(normalized)
-    client_order_id = stable_client_order_id(signal_identity, role="open")
+    # Distinct clOrdId per leg (close vs open) so a reversal's second leg is not
+    # rejected as a duplicate. ``client_order_id`` stays the OPEN-leg id.
+    client_order_id_close = stable_client_order_id(signal_identity, role="close")
+    client_order_id_open = stable_client_order_id(signal_identity, role="open")
+    client_order_id = client_order_id_open
     weight = float((execution_event or {}).get("risk_weight") or 0.0)
     base_notional = float((execution_event or {}).get("base_notional_usd") or realistic_base_notional_usd(normalized.get("symbol")))
     planned_notional = float(dec_notional(D(base_notional) * D(weight)))
@@ -2461,6 +2465,8 @@ def build_okx_execution_readiness(record: dict, paper_events: list[dict]) -> dic
             "paper_execution_price": (execution_event or {}).get("okx_execution_price"),
             "alert_execution_diff_pct": (execution_event or {}).get("alert_execution_diff_pct"),
             "client_order_id": client_order_id,
+            "client_order_id_open": client_order_id_open,
+            "client_order_id_close": client_order_id_close,
         },
         "shadow_comparison": {
             "policy": shadow_policy,
@@ -2491,9 +2497,11 @@ def build_strategy_execution_readiness(record: dict) -> dict:
     strategy = record.get("strategy_config") or {}
     execution_cfg = CONFIG.get("execution", {}) or {}
     risk_cfg = CONFIG.get("risk", {}) or {}
-    # Phase A: execution_mode is now operative. ``sandbox`` is always True here
-    # (paper/demo); Phase B will set it False for execution_mode=live. The single
-    # per-strategy ``submit_orders`` flag is what arms paper submission -- the old
+    # execution_mode is operative: ``sandbox`` is True for demo/paper/shadow and
+    # False ONLY for live. The resolved ``simulated_trading`` (= sandbox) and the
+    # ``execution_mode`` flow into readiness so the ExecutionService gate can require
+    # HERMX_LIVE_TRADING for live submissions and the adapter sandboxes accordingly.
+    # The single per-strategy ``submit_orders`` flag is what arms submission -- the old
     # config-flag arming chain (execution.enabled/submit_orders, strategy_engine.
     # submit_orders, risk.allow_live_execution) is gone.
     execution_mode = str((strategy or {}).get("execution_mode") or "demo").lower()
@@ -2502,7 +2510,13 @@ def build_strategy_execution_readiness(record: dict) -> dict:
     live_allowed = live_execution_enabled
     direction = "long" if normalized.get("side") == "buy" else "short"
     signal_identity = _signal_identity(normalized)
-    client_order_id = stable_client_order_id(signal_identity, role="open")
+    # Reversal signals submit two legs (close the opposite position, then open the new
+    # one). Each leg needs its OWN clOrdId or the venue rejects the second as a duplicate.
+    # ``client_order_id`` stays the OPEN-leg id (the leg that defines the final position
+    # and the journal dedupe key); the close-leg id is carried alongside it.
+    client_order_id_close = stable_client_order_id(signal_identity, role="close")
+    client_order_id_open = stable_client_order_id(signal_identity, role="open")
+    client_order_id = client_order_id_open
     base_notional = strategy_budget_usd(strategy) * float(strategy.get("leverage") or 1.0)
     planned_notional = float(dec_notional(base_notional))
     # Exchange-agnostic instruction contract (Phase 6 / M3, ARCHITECTURE.md). ``td_mode``
@@ -2549,6 +2563,8 @@ def build_strategy_execution_readiness(record: dict) -> dict:
             "base_notional_usd": strategy_budget_usd(strategy),
             "planned_notional_usd": planned_notional,
             "client_order_id": client_order_id,
+            "client_order_id_open": client_order_id_open,
+            "client_order_id_close": client_order_id_close,
         },
         "okx_fill": {
             "status": "not_sent_strategy_trial" if not live_allowed else "ready_to_send_when_strategy_promoted",
@@ -2566,26 +2582,10 @@ def build_strategy_execution_readiness(record: dict) -> dict:
     return plan
 
 
-def live_trading_enabled() -> tuple[bool, str]:
-    """Global live-trading kill switch (Phase A: scaffolded, NOT yet wired into the gate).
-
-    ``HERMX_LIVE_TRADING`` is the single global switch for real-money submission. It is
-    a positive enable flag, so live trading is permitted ONLY when it is explicitly set
-    to a truthy value ("true", "1", "yes"):
-      - unset      -> live trading DISABLED (safe default; fail-closed).
-      - falsey     -> live trading DISABLED ("false", "0", "no", "" / blank).
-      - truthy     -> live trading enabled.
-
-    Returns ``(enabled, raw_value)``. In Phase A every submission routes to the demo
-    sandbox, so this switch is informational only; Phase B wires it into the gate for
-    ``execution_mode == "live"`` strategies (``... and live_trading_enabled()``).
-    """
-    raw = os.environ.get("HERMX_LIVE_TRADING")
-    if raw is None:
-        return False, "<unset>"
-    if raw.strip().lower() in {"true", "1", "yes"}:
-        return True, raw
-    return False, raw
+# ``live_trading_enabled`` (the global HERMX_LIVE_TRADING kill switch) now lives in
+# ``hermx_shared`` -- a pure env read with no module state -- and is imported above so
+# existing references (`live_trading_enabled(...)`) keep working unchanged. It is wired
+# into the ExecutionService gate for ``execution_mode == "live"`` submissions.
 
 
 # ---------------------------------------------------------------------------
@@ -3328,6 +3328,7 @@ def _execute_okx_via_service(record: dict) -> dict:
             "execution_ledger": EXECUTION_LEDGER,
             "webhook_auth_config_healthy": webhook_auth_config_healthy,
             "watchdog_submission_state": _watchdog_submission_state,
+            "live_trading_enabled": live_trading_enabled,
             "symbol_pause_info": symbol_pause_info,
             "order_intent_from_readiness": _order_intent_from_readiness,
             "cl_ord_id_from_readiness": _cl_ord_id_from_readiness,

@@ -77,14 +77,10 @@ class ExecutionService:
         auth_healthy = bool(record.get("auth_healthy", True)) and webhook_auth_config_healthy()
         watchdog_ok, watchdog_reason = watchdog_submission_state()
 
-        # Phase A gate: paper/sandbox only. Arms on the single per-strategy submit flag
+        # Submission gate. Arms on the single per-strategy submit flag
         # (readiness.live_execution_enabled, derived from strategy.submit_orders) plus
         # auth + watchdog health. The dead config-flag arming chain (execution.enabled/
-        # submit_orders, risk.allow_live_execution) is gone. The global HERMX_LIVE_TRADING
-        # kill switch is intentionally NOT consulted here: in Phase A every order routes to
-        # the demo sandbox, so the live-trading switch is inert.
-        # Phase B: live mode gate goes here -- for execution_mode == "live", additionally
-        # require live_trading_enabled().
+        # submit_orders, risk.allow_live_execution) is gone.
         should_execute = (
             bool(readiness.get("live_execution_enabled"))
             and bool(auth_healthy)
@@ -103,6 +99,28 @@ class ExecutionService:
             }
             append_jsonl(execution_ledger, {"received_at": record.get("received_at"), "okx_execution": result})
             return result
+
+        # Live-mode kill switch. For an ``execution_mode == "live"`` strategy the global
+        # HERMX_LIVE_TRADING switch must be explicitly armed AND the readiness must agree
+        # that this is NOT a simulated/sandbox order. Either inconsistency fails closed.
+        if str(readiness.get("execution_mode") or "").lower() == "live":
+            live_trading_enabled = self._h("live_trading_enabled")
+            if not live_trading_enabled()[0]:
+                result = {
+                    "ok": True,
+                    "mode": "not_submitted",
+                    "reason": "live_trading_disabled",
+                }
+                append_jsonl(execution_ledger, {"received_at": record.get("received_at"), "okx_execution": result})
+                return result
+            if readiness.get("simulated_trading") is not False:
+                result = {
+                    "ok": True,
+                    "mode": "not_submitted",
+                    "reason": "live_mode_simulated_inconsistent",
+                }
+                append_jsonl(execution_ledger, {"received_at": record.get("received_at"), "okx_execution": result})
+                return result
 
         symbol_pause_info = self._h("symbol_pause_info")
         symbol_pause = symbol_pause_info(readiness.get("symbol"))
@@ -178,10 +196,21 @@ class ExecutionService:
                 "payload": adapter_result,
             }
 
+            fill_status = str(((adapter_result or {}).get("fill_summary") or {}).get("status") or "").lower()
             if ok:
-                outcome_state = order_state_filled
+                # An adapter ACK (mode "submit_enabled") is only SUBMITTED -- CCXT has
+                # merely acknowledged create_order, the order is not necessarily filled.
+                # Only a confirmed fill (mode "filled" or fill status "filled") is FILLED;
+                # reconciliation later transitions SUBMITTED -> FILLED.
+                if mode == "filled" or fill_status == "filled":
+                    outcome_state = order_state_filled
+                else:
+                    outcome_state = order_state_submitted
             else:
-                if mode in {"submit_timeout", "submit_exception"}:
+                # submit_partial: a leg reached the venue (e.g. the close) but a later leg
+                # failed -- venue state is uncertain, so UNKNOWN (needs reconciliation),
+                # never a flat REJECTED that would corrupt position math.
+                if mode in {"submit_timeout", "submit_exception", "submit_partial"}:
                     outcome_state = order_state_unknown
                 elif mode in {"not_submitted"}:
                     outcome_state = order_state_unknown
@@ -204,6 +233,11 @@ class ExecutionService:
             outcome_detail = {"error": redact_secrets(str(exc)), "exception_type": type(exc).__name__}
 
         def _record_tentative_outcome() -> None:
+            # An ACK leaves the order at SUBMITTED, already durably written by the
+            # write-ahead -- there is no new transition to record (and SUBMITTED ->
+            # SUBMITTED is illegal). Reconciliation later moves it to a terminal state.
+            if outcome_state == order_state_submitted:
+                return
             try:
                 record_order_state(
                     cl_ord_id,
@@ -225,6 +259,20 @@ class ExecutionService:
         order_state_can_transition = self._h("order_state_can_transition")
         emit_reconcile_alert = self._h("emit_reconcile_alert")
         reconcile_alert_mismatch = self._h("reconcile_alert_mismatch")
+
+        if reconcile_post_submit_enabled() and mode == "submit_partial":
+            # A partial multi-leg submit is an operator-actionable money-safety event:
+            # one leg reached the venue while another failed. Surface it explicitly so
+            # the open position (e.g. an executed close with a failed re-open) is noticed.
+            emit_reconcile_alert(
+                reconcile_alert_mismatch,
+                {
+                    "stage": "post_submit_partial",
+                    "cl_ord_id": cl_ord_id,
+                    "payload_mode": mode,
+                    "reason": "submit_partial",
+                },
+            )
 
         if reconcile_post_submit_enabled():
             executor = reconciliation_executor()
@@ -262,7 +310,13 @@ class ExecutionService:
                         )
                 else:
                     _record_tentative_outcome()
-                if recon_state != outcome_state:
+                # A SUBMITTED -> FILLED resolution is the expected forward progression of
+                # an acknowledged order, not a disagreement -- only alert on a genuine
+                # divergence (e.g. SUBMITTED/FILLED locally vs REJECTED on the venue).
+                expected_progression = (
+                    outcome_state == order_state_submitted and recon_state == order_state_filled
+                )
+                if recon_state != outcome_state and not expected_progression:
                     emit_reconcile_alert(
                         reconcile_alert_mismatch,
                         {

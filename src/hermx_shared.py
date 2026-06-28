@@ -9,6 +9,11 @@ imports/tests keep working.
 """
 from __future__ import annotations
 
+import os
+
+
+__all__ = ["canonical_timeframe", "live_trading_enabled"]
+
 
 # Superset of the alias tables that previously lived in both modules. The
 # receiver's table was the larger one; the dashboard's was a subset, so adopting
@@ -44,3 +49,24 @@ def canonical_timeframe(value) -> str:
     """
     text = str(value or "").strip().lower().replace(" ", "")
     return _TIMEFRAME_ALIASES.get(text, text)
+
+
+def live_trading_enabled() -> tuple[bool, str]:
+    """Global live-trading kill switch.
+
+    ``HERMX_LIVE_TRADING`` is the single global switch for real-money submission. It
+    is a positive enable flag, so live trading is permitted ONLY when it is explicitly
+    set to a truthy value ("true", "1", "yes"):
+      - unset      -> live trading DISABLED (safe default; fail-closed).
+      - falsey     -> live trading DISABLED ("false", "0", "no", "" / blank).
+      - truthy     -> live trading enabled.
+
+    Returns ``(enabled, raw_value)``. This is a pure env read (no module state) so it
+    lives here and is imported by both the receiver and the execution layer.
+    """
+    raw = os.environ.get("HERMX_LIVE_TRADING")
+    if raw is None:
+        return False, "<unset>"
+    if raw.strip().lower() in {"true", "1", "yes"}:
+        return True, raw
+    return False, raw

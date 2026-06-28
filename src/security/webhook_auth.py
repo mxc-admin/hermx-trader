@@ -58,10 +58,14 @@ def client_ip(handler: BaseHTTPRequestHandler) -> str:
 
 
 def rate_limit_key(handler: BaseHTTPRequestHandler) -> str:
-    """Rate-limit bucket key: the webhook key id when present, else the client IP."""
-    key_id = (handler.headers.get("X-Webhook-Key-Id") or "").strip()
-    if key_id:
-        return f"key:{key_id}"
+    """Rate-limit bucket key: always the client IP (via ``client_ip``).
+
+    The previous ``X-Webhook-Key-Id`` branch was attacker-controlled -- a caller could
+    rotate that header per request to mint a fresh bucket and bypass the sliding window.
+    The receiver binds 127.0.0.1, so only the reverse proxy reaches it and the true
+    client IP arrives in CF-Connecting-IP / X-Forwarded-For, which ``client_ip`` prefers.
+    Per-key limits would require a trusted/verified key id, which we do not have.
+    """
     return f"ip:{client_ip(handler)}"
 
 

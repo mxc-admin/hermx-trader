@@ -119,7 +119,12 @@ def build_execution_intent(*, signal: dict, strategy: dict, account_context: dic
     direction = _SIDE_TO_DIRECTION.get(side, "")
     symbol = _norm_symbol((signal or {}).get("symbol") or (strategy or {}).get("asset"))
     inst_id = _resolve_inst_id(signal, strategy, account_context)
-    client_order_id = _stable_client_order_id(signal, strategy)
+    # Distinct clOrdId per leg (close vs open) so a reversal's second leg is not rejected
+    # as a duplicate by the venue. ``client_order_id`` stays the OPEN-leg id (the leg that
+    # defines the final position and the journal dedupe key).
+    client_order_id_close = _stable_client_order_id(signal, strategy, role="close")
+    client_order_id_open = _stable_client_order_id(signal, strategy, role="open")
+    client_order_id = client_order_id_open
     notional = _planned_notional(strategy, account_context, symbol)
     actions = ["CLOSE_OPPOSITE_IF_ANY", f"OPEN_{direction.upper()}"] if direction else []
     return {
@@ -132,6 +137,8 @@ def build_execution_intent(*, signal: dict, strategy: dict, account_context: dic
         "leverage": (strategy or {}).get("leverage") or (account_context or {}).get("leverage"),
         "actions": actions,
         "client_order_id": client_order_id,
+        "client_order_id_open": client_order_id_open,
+        "client_order_id_close": client_order_id_close,
     }
 
 

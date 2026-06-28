@@ -159,22 +159,26 @@ def _run_forced_submit(wr, monkeypatch, adapter_fn):
     return events, result
 
 
-def test_write_ahead_planned_before_submit_success_fills(wr, monkeypatch):
+def test_write_ahead_planned_before_submit_success_is_submitted(wr, monkeypatch):
     events, result = _run_forced_submit(wr, monkeypatch, lambda: _adapter_result(ok=True, mode="submit_enabled"))
 
     # Write-ahead PROOF: PLANNED and SUBMITTED are both written BEFORE executor.execute().
+    # A bare ACK (mode submit_enabled, fill status "submitted") records SUBMITTED -- not a
+    # terminal FILLED -- so there is no extra journal write after the submit; reconciliation
+    # later transitions SUBMITTED -> FILLED.
     assert events == [
         ("write", wr.ORDER_STATE_PLANNED),
         ("write", wr.ORDER_STATE_SUBMITTED),
         ("executor_execute", None),
-        ("write", wr.ORDER_STATE_FILLED),
     ]
     planned_idx = events.index(("write", wr.ORDER_STATE_PLANNED))
     run_idx = events.index(("executor_execute", None))
     assert planned_idx < run_idx, "PLANNED must be durably written before submit"
 
-    # Tentative FILLED is terminal => no open order remains.
-    assert wr.load_open_orders() == []
+    # SUBMITTED is non-terminal: the order stays OPEN for reconciliation.
+    open_orders = wr.load_open_orders()
+    assert len(open_orders) == 1
+    assert open_orders[0]["state"] == wr.ORDER_STATE_SUBMITTED
     assert result["mode"] == "submit_enabled"
 
 

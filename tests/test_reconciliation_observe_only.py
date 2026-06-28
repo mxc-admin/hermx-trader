@@ -284,7 +284,9 @@ def test_post_submit_reconcile_mismatch_overrides_stdout_and_alerts(wr, monkeypa
     alerts = wr.read_jsonl_tolerant(wr.RECONCILE_ALERT_LEDGER)
     mism = [a for a in alerts if a["alert"] == "RECONCILE_MISMATCH" and a["detail"].get("stage") == "post_submit"]
     assert len(mism) == 1
-    assert mism[0]["detail"]["stdout_outcome"] == wr.ORDER_STATE_FILLED
+    # The local tentative outcome of a bare ACK is now SUBMITTED (not an optimistic
+    # FILLED); the exchange says REJECTED, which is still a genuine mismatch.
+    assert mism[0]["detail"]["stdout_outcome"] == wr.ORDER_STATE_SUBMITTED
     assert mism[0]["detail"]["reconciled_outcome"] == wr.ORDER_STATE_REJECTED
 
 
@@ -302,7 +304,9 @@ def test_reconcile_disabled_uses_stdout_outcome(wr, monkeypatch):
     assert "reconcile" not in result
     assert exec_calls == []  # no reconciliation executor constructed
     records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
-    assert records[-1]["state"] == wr.ORDER_STATE_FILLED  # adapter-derived tentative
+    # A bare ACK records SUBMITTED (from the write-ahead), not a terminal FILLED -- with
+    # reconciliation disabled it stays SUBMITTED until a later resolver confirms the fill.
+    assert records[-1]["state"] == wr.ORDER_STATE_SUBMITTED
 
 
 # ---------------------------------------------------------------------------

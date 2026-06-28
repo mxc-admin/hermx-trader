@@ -18,6 +18,7 @@ except Exception:  # pragma: no cover - optional dependency guard
 
 from .base import BaseExecutor, empty_fill_summary, empty_normalized_order
 from security.credentials import redact_secrets, resolve_exchange_credentials
+from hermx_shared import live_trading_enabled
 
 
 def _to_float(value, default: float | None = None) -> float | None:
@@ -201,6 +202,15 @@ class CcxtExecutor(BaseExecutor):
                 raise RuntimeError(
                     f"execution_mode=demo: failed to enable sandbox for {exchange_id}: {exc}"
                 ) from exc
+        else:
+            # Fail-closed defense in depth: even if the service-level live gate is
+            # somehow bypassed, the adapter refuses to connect to a real venue unless
+            # HERMX_LIVE_TRADING is explicitly armed.
+            if not live_trading_enabled()[0]:
+                raise RuntimeError(
+                    "live_trading_disabled: CcxtExecutor refuses to connect to live venue "
+                    "without HERMX_LIVE_TRADING=true"
+                )
 
         self._cached_client = client
         return client
@@ -395,10 +405,35 @@ class CcxtExecutor(BaseExecutor):
             "raw": order,
         }
 
+    def _partial_fill_summary(self, executed_orders: list, client_order_id, current_side, current_contracts) -> dict:
+        """Fill summary for a partial multi-leg submit (a later leg failed/timed out).
+
+        Carries the LAST successfully submitted order so reconciliation can find the
+        leg that did reach the venue (e.g. the executed close), plus the resulting
+        position, instead of returning an empty summary that discards that state.
+        """
+        last_order = None
+        for row in reversed(executed_orders or []):
+            if isinstance(row.get("order"), dict):
+                last_order = row.get("order")
+                break
+        fill = empty_fill_summary(client_order_id)
+        if isinstance(last_order, dict):
+            fill["status"] = "submit_partial"
+            fill["order_id"] = last_order.get("id")
+            fill["avg_fill_price"] = _to_float(last_order.get("average"), None)
+            fill["filled_size"] = _to_float(last_order.get("filled"), None)
+        fill["position_after_order"] = {"side": current_side, "contracts": current_contracts}
+        return fill
+
     def execute(self, readiness: dict) -> dict:
         started = time.time()
         intent = (readiness or {}).get("execution_intent") or {}
         client_order_id = intent.get("client_order_id")
+        # Distinct clOrdId per leg so a reversal's close + open are not rejected as a
+        # duplicate clOrdId. Fall back to the single id when the split fields are absent.
+        client_order_id_close = intent.get("client_order_id_close") or client_order_id
+        client_order_id_open = intent.get("client_order_id_open") or client_order_id
 
         symbol = (
             (readiness or {}).get("ccxt_symbol")
@@ -460,7 +495,7 @@ class CcxtExecutor(BaseExecutor):
                         readiness=readiness,
                         reduce_only=True,
                         position_side=expected_side,
-                        client_order_id=client_order_id,
+                        client_order_id=client_order_id_close,
                     )
                     try:
                         order = client.create_order(symbol, order_type, close_side, close_amount, price, params)
@@ -475,12 +510,14 @@ class CcxtExecutor(BaseExecutor):
                     except Exception as exc:
                         if _is_timeout_error(exc):
                             # Submit may have reached the venue -> UNKNOWN, not a reject.
+                            # Preserve any partial state (orders already placed) so
+                            # reconciliation can find them.
                             return self.normalized_result(
                                 ok=False,
                                 mode="submit_timeout",
                                 elapsed_ms=round((time.time() - started) * 1000),
-                                fill_summary=empty_fill_summary(client_order_id),
-                                payload={"error": redact_secrets(str(exc)), "action": action, "symbol": symbol},
+                                fill_summary=self._partial_fill_summary(executed_orders, client_order_id, current_side, current_contracts),
+                                payload={"error": redact_secrets(str(exc)), "action": action, "symbol": symbol, "executed_orders": executed_orders},
                             )
                         executed_orders.append({
                             "action": action,
@@ -523,7 +560,7 @@ class CcxtExecutor(BaseExecutor):
                         readiness=readiness,
                         reduce_only=False,
                         position_side=target_side,
-                        client_order_id=client_order_id,
+                        client_order_id=client_order_id_open,
                     )
                     try:
                         order = client.create_order(symbol, order_type, open_side, open_amount, price, params)
@@ -538,12 +575,14 @@ class CcxtExecutor(BaseExecutor):
                     except Exception as exc:
                         if _is_timeout_error(exc):
                             # Submit may have reached the venue -> UNKNOWN, not a reject.
+                            # Preserve the partial state (e.g. an executed close leg) so
+                            # reconciliation can find it.
                             return self.normalized_result(
                                 ok=False,
                                 mode="submit_timeout",
                                 elapsed_ms=round((time.time() - started) * 1000),
-                                fill_summary=empty_fill_summary(client_order_id),
-                                payload={"error": redact_secrets(str(exc)), "action": action, "symbol": symbol},
+                                fill_summary=self._partial_fill_summary(executed_orders, client_order_id, current_side, current_contracts),
+                                payload={"error": redact_secrets(str(exc)), "action": action, "symbol": symbol, "executed_orders": executed_orders},
                             )
                         executed_orders.append({
                             "action": action,
@@ -555,8 +594,12 @@ class CcxtExecutor(BaseExecutor):
                     continue
 
             submitted = [row for row in executed_orders if row.get("submitted")]
+            succeeded = [row for row in executed_orders if row.get("status") == "submitted"]
             bad = [row for row in executed_orders if row.get("status") in {"rejected", "blocked", "close_not_verified"}]
-            if bad:
+            partial = bool(succeeded) and bool(bad)
+            if partial:
+                status = "submit_partial"
+            elif bad:
                 status = str(bad[0].get("status") or "rejected")
             elif submitted:
                 status = "submitted"
@@ -578,8 +621,15 @@ class CcxtExecutor(BaseExecutor):
             fill["filled_size"] = _to_float((last_order or {}).get("filled"), None) if isinstance(last_order, dict) else None
             fill["position_after_order"] = {"side": current_side, "contracts": current_contracts}
 
-            ok = bool(submitted) and not bool(bad)
-            mode = "submit_enabled" if ok else "submit_failed"
+            # A leg reached the venue while another failed -> partial submit. Venue state
+            # is uncertain (the close may have executed), so this is NOT a flat reject:
+            # surface mode "submit_partial" so the service records UNKNOWN, not REJECTED.
+            if partial:
+                ok = False
+                mode = "submit_partial"
+            else:
+                ok = bool(submitted) and not bool(bad)
+                mode = "submit_enabled" if ok else "submit_failed"
 
             return self.normalized_result(
                 ok=ok,
