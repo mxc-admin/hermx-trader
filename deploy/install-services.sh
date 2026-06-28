@@ -7,7 +7,8 @@ INSTALL_DIR="/opt/hermx"
 SERVICE_USER="hermx"
 
 echo "==> Creating service user (if needed)"
-id -u "$SERVICE_USER" &>/dev/null || useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+# Same definition as INSTALL.md Phase 1: home is the install dir, not auto-populated.
+id -u "$SERVICE_USER" &>/dev/null || useradd --system --home-dir "$INSTALL_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
 
 echo "==> Setting ownership on $INSTALL_DIR"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"

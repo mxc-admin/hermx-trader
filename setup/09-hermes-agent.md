@@ -61,8 +61,8 @@ The agent uses only the local loopback API that already runs:
    stays in sync with the repo). From the repo root:
 
    ```bash
-   mkdir -p ~/.hermes/skills/trading
-   ln -sfn "$PWD/skills/hermx-control" ~/.hermes/skills/trading/hermx-control
+   mkdir -p ~/.hermes/skills
+   ln -sfn "$PWD/skills/hermx-control" ~/.hermes/skills/hermx-control
    ```
 
    Confirm discovery (look for a `hermx-control` row, category `trading`, `enabled`):
@@ -71,7 +71,7 @@ The agent uses only the local loopback API that already runs:
    hermes skills list | grep hermx-control
    ```
 
-   To unregister: `rm ~/.hermes/skills/trading/hermx-control` (removes only the symlink).
+   To unregister: `rm ~/.hermes/skills/hermx-control` (removes only the symlink).
 
 4. **Let the local agent reach the dashboard.** The agent runs on the same host. Choose one:
    - **No-auth loopback:** start the dashboard with `HERMX_DASH_AUTH=false` while it is bound
@@ -189,8 +189,8 @@ Concrete, copy-paste steps to talk to HermX from Telegram. This expands the
 4. **Register the `hermx-control` skill** (if not already done in step 3 above):
 
    ```bash
-   mkdir -p ~/.hermes/skills/trading
-   ln -sfn "$PWD/skills/hermx-control" ~/.hermes/skills/trading/hermx-control
+   mkdir -p ~/.hermes/skills
+   ln -sfn "$PWD/skills/hermx-control" ~/.hermes/skills/hermx-control
    hermes skills list | grep hermx-control   # confirm: enabled, category trading
    ```
 
@@ -234,7 +234,6 @@ applies — restrict to your own number only.
 
 ## Uninstall
 
-- Skill: `rm ~/.hermes/skills/trading/hermx-control` (and `rmdir ~/.hermes/skills/trading`
-  if empty).
+- Skill: `rm ~/.hermes/skills/hermx-control` (removes only the symlink).
 - Runtime: remove the `hermes` binary from `~/.local/bin` and the `~/.hermes` directory.
   (The installer ships no documented uninstall command; deleting those two is sufficient.)

@@ -144,11 +144,14 @@ sudo usermod -aG docker "$USER"   # log out/in for group to take effect
 docker --version && docker compose version
 ```
 
-Create the service user and install directory the systemd units expect:
+Create the `hermx` service user and the install directory the systemd units expect. The user's home
+is `/opt/hermx` (matching `WorkingDirectory=/opt/hermx` in the units and `install-services.sh`). Do
+not let `useradd` populate the directory — Phase 2 clones the repo straight into it:
 
 ```bash
-sudo useradd --system --create-home --home-dir /opt/hermx --shell /usr/sbin/nologin hermx || true
+sudo useradd --system --home-dir /opt/hermx --shell /usr/sbin/nologin hermx || true
 sudo mkdir -p /opt/hermx
+sudo chown "$(id -un)" /opt/hermx   # lets you clone without sudo; install-services.sh hands it to hermx later
 ```
 
 ### macOS (local install)
@@ -159,7 +162,8 @@ python3.11 --version
 ```
 
 On macOS you'll clone into a working directory of your choice instead of `/opt/hermx`, and use the
-Docker or foreground run mode in Phase 5 (systemd is Linux-only).
+foreground run mode in Phase 5 (Option C) — systemd is Linux-only and Docker Desktop for Mac does not
+support the `network_mode: host` this stack relies on.
 
 **✅ Verify Phase 1:** `python3.11 --version` prints `3.11.x`, and `git --version` / `curl --version`
 both succeed. Do not continue until they do.
@@ -171,13 +175,20 @@ both succeed. Do not continue until they do.
 ### 2.1 Clone the repo
 
 ```bash
-# On a VPS, place it where the systemd units expect it:
-cd /opt/hermx 2>/dev/null || cd ~
-git clone <HERMX_REPO_URL> hermx
-cd hermx
+# On a VPS, clone straight into the directory the systemd units expect (/opt/hermx):
+git clone https://github.com/mxc-admin/hermx-trader.git /opt/hermx
+cd /opt/hermx
 ```
 
-> Ask the user for `<HERMX_REPO_URL>` if you don't already have it.
+On **macOS / local dev**, clone wherever you like instead:
+
+```bash
+git clone https://github.com/mxc-admin/hermx-trader.git ~/hermx
+cd ~/hermx
+```
+
+> Cloning directly into `/opt/hermx` means `WorkingDirectory=/opt/hermx` in the systemd units and the
+> `.venv` you build next line up exactly — no copying the tree around later.
 
 ### 2.2 Create the environment and runtime config files
 
@@ -437,26 +448,33 @@ serving port 8891, and `WEBHOOK_URL.txt` contains the full `/webhook` URL.
 
 ---
 
-## PHASE 5 — Deploy
+## PHASE 5 — Deploy HermX Services
 
-Ask the user which deploy mode they want, then do **one** of the following.
+Choose your deployment mode:
 
-> **Option A — Systemd (direct Python):** best for a long-lived Ubuntu VPS; auto-restarts on failure.
-> **Option B — Docker:** best if they prefer containers or are on macOS.
+| Option | Best for | What you get |
+|--------|----------|--------------|
+| A — systemd | VPS, long-lived server | OS-supervised, minimal overhead |
+| B — Docker | VPS, prefer containers | Image-isolated, easy updates |
+| C — Foreground | Mac / local dev | No setup, ctrl+c to stop |
 
-### Option A — Systemd
+> Mac users: use Option C. `network_mode: host` in Docker Desktop for Mac does not
+> bridge loopback correctly, so Option B will not work as expected on macOS.
+
+Ask the user which mode they want, then do **one** of the following.
+
+### Option A — systemd (VPS)
+
+You already cloned to `/opt/hermx` and built `/opt/hermx/.venv` in Phase 2, which is exactly where the
+units expect them — so deployment is just running the installer:
 
 ```bash
-# Ensure the repo lives where the units expect it:
-sudo cp -a . /opt/hermx/ 2>/dev/null; cd /opt/hermx
-# Build the venv at the path the units use:
-python3.11 -m venv .venv && ./.venv/bin/pip install --upgrade pip && ./.venv/bin/pip install -r requirements.txt
-
+cd /opt/hermx
 sudo bash deploy/install-services.sh
 ```
 
-`install-services.sh` creates/uses the `hermx` service user, locks `.env` to 600, installs and
-enables both systemd units, and starts them. Verify:
+`install-services.sh` creates/uses the `hermx` service user (home `/opt/hermx`), takes ownership of the
+tree, locks `.env` to 600, installs and enables both systemd units, and starts them. Verify:
 
 ```bash
 systemctl status hermx-receiver  --no-pager
@@ -467,7 +485,7 @@ curl -sf http://127.0.0.1:8098/health && echo " dashboard OK"
 
 Follow logs if needed: `journalctl -u hermx-receiver -f` (Ctrl-C to stop).
 
-### Option B — Docker
+### Option B — Docker (VPS)
 
 The repo ships a `Dockerfile` and `docker-compose.yml` (one image, two services,
 `network_mode: host`, a named `hermx-data` volume for ledger persistence). With `.env` and
@@ -483,8 +501,40 @@ curl -sf http://127.0.0.1:8098/health && echo " dashboard OK"
 
 To stop later: `docker compose down` (the `hermx-data` volume and your ledgers survive).
 
+> **macOS note:** Docker Desktop for Mac does **not** implement `network_mode: host` the way Linux
+> does — the containers can't reach the host loopback, so the `/health` probes and Tailscale Funnel
+> forwarding won't work. On a Mac, use **Option C** instead.
+
+### Option C — Foreground (Mac / local dev)
+
+No supervisor — you run the two processes directly in two terminals and stop them with Ctrl-C. The
+processes read configuration from the environment (there is no auto-loaded `.env`), so source `.env`
+into each shell first. Paths are resolved from the repo root, so running from `src/` is correct.
+
+```bash
+# From the repo root you cloned in Phase 2:
+cd ~/hermx                                   # or wherever you cloned it
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# Terminal 1 — webhook receiver:
+cd src && set -a && source ../.env && set +a && ../.venv/bin/python webhook_receiver.py
+
+# Terminal 2 — dashboard:
+cd src && set -a && source ../.env && set +a && ../.venv/bin/python dashboard.py
+```
+
+Then probe both health endpoints from a third terminal:
+
+```bash
+curl -sf http://127.0.0.1:8891/health && echo " receiver OK"
+curl -sf http://127.0.0.1:8098/health && echo " dashboard OK"
+```
+
+Stop either service with Ctrl-C in its terminal.
+
 **✅ Verify Phase 5:** Both `/health` endpoints return success. If either fails, check logs
-(`journalctl` or `docker compose logs`) and resolve before continuing — see Troubleshooting.
+(`journalctl`, `docker compose logs`, or the terminal output) and resolve before continuing — see
+Troubleshooting.
 
 ---
 
@@ -526,8 +576,8 @@ To get the Telegram values: open **@BotFather** → `/newbot` → choose a name 
 
 ```bash
 cd /opt/hermx     # or your repo root, so $PWD is correct
-mkdir -p ~/.hermes/skills/trading
-ln -sfn "$PWD/skills/hermx-control" ~/.hermes/skills/trading/hermx-control
+mkdir -p ~/.hermes/skills
+ln -sfn "$PWD/skills/hermx-control" ~/.hermes/skills/hermx-control
 hermes skills list | grep hermx-control      # expect: enabled, category trading
 ```
 
