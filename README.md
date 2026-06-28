@@ -8,8 +8,8 @@ demo/sandbox orders only when every safety gate is open. On top of that sits the
 Agent**: a natural-language operator that *reads* state and *relays* sanctioned signals over Telegram.
 It can never size a trade, override a gate, or call an exchange directly.
 
-Execution runs through CCXT, with **OKX** as the live-verified venue (KuCoin, Bybit, and Hyperliquid
-are wired in the resolver and planned). Public TradingView alerts reach a loopback-only receiver
+Execution runs through CCXT across eight venues — **OKX** (recommended, fully tested), Binance, Bybit,
+KuCoin, Bitget, Gate.io, Coinbase Advanced, and Hyperliquid — all implemented. Public TradingView alerts reach a loopback-only receiver
 through a **Tailscale Funnel** — a stable HTTPS URL with no domain to buy and no firewall ports to open.
 
 ## How it works
@@ -18,7 +18,7 @@ through a **Tailscale Funnel** — a stable HTTPS URL with no domain to buy and 
 TradingView alert
   -> Tailscale Funnel (stable public HTTPS URL)
   -> Webhook receiver  (loopback 127.0.0.1:8891; validates strategy_id + schema)
-  -> Gate chain        (kill switch + 3 safety gates; idempotency, journal, reconcile)
+  -> Gate chain        (execution_mode + submit_orders; idempotency, journal, reconcile)
   -> CCXT adapter      (venue translation)
   -> Exchange          (OKX demo — live-verified)
   -> Execution ledger -> Dashboard (loopback 127.0.0.1:8098, read-only)
@@ -29,7 +29,7 @@ signals over Telegram. All risk policy stays in Python — the LLM is advisory a
 
 ## Key properties
 
-- **Fail-closed safety** — orders submit only when all three gates are open; anything missing disarms.
+- **Fail-closed safety** — an order submits only when its strategy sets `submit_orders: true`; `execution_mode` selects demo vs. live, and live also requires the global `HERMX_LIVE_TRADING` kill switch. Anything missing disarms.
 - **Loopback-only servers** — receiver and dashboard bind `127.0.0.1`; nothing is exposed directly.
 - **Stable URL, no domain** — Tailscale Funnel gives a free, reboot-surviving HTTPS endpoint.
 - **Supervised services** — runs under systemd (VPS) or Docker, auto-restarting on failure.
@@ -55,6 +55,9 @@ cat INSTALL.md | hermes -z --skills hermx-control
 Hermes walks you through all 8 install phases interactively — asking for exchange API keys,
 reviewing strategies, setting up Tailscale (outputs your stable webhook URL), deploying services,
 and configuring the Telegram gateway. You answer questions; it runs the commands.
+
+**Prefer a scripted wizard?** Run `./install.sh` — it walks the same install phases as the Hermes flow
+(exchange keys, strategy review, Tailscale, services, Telegram gateway) as a guided shell script, no LLM required.
 
 **No Hermes?** Paste `INSTALL.md` into any AI assistant (Claude, Windsurf, Cursor, etc.) and follow along manually.
 See [INSTALL.md](INSTALL.md) for the full guide.
@@ -82,17 +85,18 @@ full design, runtime flow, and built-vs-planned status.
 
 ## Safety
 
-Every demo order must pass a **three-gate** model — a master `.env` switch (`OKX_SUBMIT_ORDERS`),
-a runtime-profile gate (`execution.submit_orders`), and a per-strategy gate (`submit_orders`). All
-three must be `true` to submit; any one `false` blocks submission by design, and fresh installs ship
-with the master switch off. Sizing, idempotency, journaling, and reconciliation all live in
-first-party Python — **the LLM never touches sizing or money-safety**.
+Every order is governed by **two per-strategy controls** — `submit_orders` (must be `true` to place
+anything) and `execution_mode` (`demo` → OKX sandbox/paper, always allowed; `live` → real account).
+Live orders additionally require the one global kill switch, `HERMX_LIVE_TRADING=true`; fresh installs
+leave it `false`, so nothing reaches a real account by accident (demo trading is unaffected). Sizing,
+idempotency, journaling, and reconciliation all live in first-party Python — **the LLM never touches
+sizing or money-safety**.
 
 ## Requirements
 
 - A VPS (fresh Ubuntu 22.04) **or** a local Mac
 - Python 3.11+
-- OKX **demo** API keys (or KuCoin/Bybit/Hyperliquid testnet keys)
+- OKX **demo** API keys (or testnet/sandbox keys for Binance, Bybit, KuCoin, Bitget, Gate.io, Coinbase Advanced, or Hyperliquid)
 - TradingView Pro+ (needed to send webhook request headers)
 - A free Tailscale account
 - An LLM provider API key (xAI, OpenAI, Anthropic, etc.) — only for the optional Hermes Agent

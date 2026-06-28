@@ -6,14 +6,12 @@ Each strategy is one JSON file in `strategies/`.
 
 The strategy file tells the system:
 
-- which asset to trade
+- which instrument to trade (exchange + `inst_id`), from which the asset is derived
 - which timeframe to use
-- which indicator/version generated the signal
-- which optimized parameters belong to that strategy
-- which OKX instrument to route to
-- how much budget is assigned
+- which indicator generated the signal
+- how much budget is assigned (`capital.budget_usd`)
 - which leverage and margin mode to use
-- whether the strategy is demo, paper, shadow, disabled, or live-ready
+- which `execution_mode` (`demo` or `live`) and whether `submit_orders` is on
 
 ## Active Demo Strategies
 
@@ -26,45 +24,53 @@ Current total assigned demo budget: `$6,500`.
 | `xrpusdt_duo_base_dev_4h.json` | XRPUSDT 4H Duo Base Dev candidate |
 | `btcusdt_duo_base_dev_2h.json` | BTCUSDT 2H Duo Base Dev candidate |
 
-## Required Strategy Fields
+## Required Strategy Fields (schema v2)
 
 ```json
 {
+  "schema_version": 2,
   "strategy_id": "solusdt_duo_base_dev_3h",
   "name": "SOLUSDT Duo Base Dev 3H",
-  "asset": "SOLUSDT",
-  "okx_inst_id": "SOL-USDT-SWAP",
+  "indicator": "mxc duo-base v2.5",
   "timeframe": "3h",
-  "chart_type": "heikin_ashi",
-  "indicator": "mxc duo-base",
-  "indicator_version": "duo-base-2.5",
-  "upper_band_mult": 1.05,
-  "lower_band_mult": 0.95,
-  "auto_alpha": false,
-  "budget_usd": 1500,
+  "instrument": {
+    "exchange": "okx",
+    "inst_id": "SOL-USDT-SWAP",
+    "type": "swap"
+  },
+  "capital": {
+    "budget_usd": 1500,
+    "reinvest": true
+  },
+  "execution_mode": "demo",
+  "submit_orders": true,
   "leverage": 2,
   "margin_mode": "isolated",
-  "execution_mode": "demo",
-  "okx_submit_orders": true,
-  "status": "active_demo"
+  "notes": "Active OKX sandbox/demo candidate."
 }
 ```
+
+The **asset is derived** from `instrument.inst_id` — `SOL-USDT-SWAP` → `SOLUSDT`. There is no
+separate `asset` field. Fields removed in v2: `asset`, `status`, `validation_source`, `auto_alpha`,
+`chart_type`, `upper_band_mult`, `lower_band_mult`, `indicator_version`, `okx_inst_id`,
+`okx_submit_orders`, and the top-level `budget_usd` (now `capital.budget_usd`).
 
 ## Strategy Rules
 
 - `strategy_id` must be unique.
-- `asset` must match the TradingView alert.
+- The asset derived from `instrument.inst_id` must match the TradingView alert.
 - `timeframe` must match the TradingView alert.
-- `okx_inst_id` must be the actual OKX swap instrument.
-- `budget_usd` is the margin budget, not the leveraged notional.
+- `instrument.inst_id` must be the actual exchange swap instrument; `instrument.exchange` selects the venue.
+- `capital.budget_usd` is the margin budget, not the leveraged notional.
 - `leverage` determines target notional.
-- `execution_mode = demo` means OKX sandbox/demo only.
+- `submit_orders` must be `true` for the strategy to place any order.
+- `execution_mode = demo` routes to the exchange sandbox/demo account; `execution_mode = live`
+  routes to the real account and additionally requires `HERMX_LIVE_TRADING=true`.
 
 ## Future Strategy Extensions
 
 Possible later fields:
 
-- `exchange`: `okx`
 - `primary_execution`: true/false
 - `paper_only`: true/false
 - `max_daily_loss_usd`

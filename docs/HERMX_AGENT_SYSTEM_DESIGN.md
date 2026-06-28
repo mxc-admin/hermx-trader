@@ -68,7 +68,7 @@ blessing.
 - The agent is **not** a high-frequency system. Signals arrive **1–2 per day** on
   **2h–4h** strategy timeframes (canonical set: `30m, 1h, 2h, 3h, 4h`). There is no
   latency budget that requires the agent to be fast — a 30s LLM round-trip is fine.
-- The agent does **not** compute position size. Ever. Sizing is `budget_usd * leverage`
+- The agent does **not** compute position size. Ever. Sizing is `capital.budget_usd * leverage`
   from the strategy file, computed in the receiver.
 - The agent does **not** hold exchange credentials, shell, or filesystem access for
   order purposes. Its only act path is `POST /webhook` on loopback.
@@ -201,7 +201,7 @@ the agent*.
       a. match strategy_id → strategies/*.json
       b. build_strategy_execution_readiness()
             - resolves instrument (e.g. SOL-USDT-SWAP)
-            - computes notional = budget_usd * leverage
+            - computes notional = capital.budget_usd * leverage
             - resolves td_mode / margin_mode / pos_mode
             - attaches health-gate context (MXC pp_acc / pp_vel if required)
         ▼
@@ -251,8 +251,8 @@ agent decided**. Order is fixed; all must pass to submit.
 
 | # | Gate | Check | Block outcome (`mode` / `reason`) |
 |---|------|-------|-----------------------------------|
-| 1 | **Kill switch** | `HERMX_SUBMIT_ENABLED`: unset = armed; falsey (`false/0/no/""`) = engaged | `not_submitted` / `"HERMX_SUBMIT_ENABLED kill switch engaged"` |
-| 2 | **Gate precedence** | AND of: `readiness.live_execution_enabled`, `execution.enabled`, `execution.submit_orders`, `risk.allow_live_execution`, `auth_healthy`, `watchdog_ok` | `not_submitted` / first failing gate |
+| 1 | **Kill switch (live only)** | `HERMX_LIVE_TRADING`: `execution_mode=live` orders require `=true`; `false`/unset blocks every live submit. `execution_mode=demo` is unaffected. | `not_submitted` / `"HERMX_LIVE_TRADING kill switch engaged"` |
+| 2 | **Submit + mode** | `strategy.submit_orders` true AND a resolved `execution_mode` (`demo` → OKX sandbox/paper, always allowed; `live` → real account, subject to gate 1), AND health: `auth_healthy`, `watchdog_ok` | `not_submitted` / first failing control |
 | 3 | **Symbol pause** | `symbol_pause_info(symbol)` empty | `not_submitted` / `"symbol_paused"` |
 | 4 | **Idempotency** | no existing order for derived `client_order_id` | `not_submitted` / `"duplicate_cl_ord_id"` |
 | 5 | **Write-ahead journal** | record `PLANNED` then `SUBMITTED`; fail-closed on `OSError` | `not_submitted` / state-write error |
@@ -412,7 +412,7 @@ HermX HTTP API on loopback. Never touches an exchange; never invents a size.
 
 **Endpoints.**
 - `GET http://127.0.0.1:8098/api` — positions, PnL, executor health, ledger health, freshness
-- `GET http://127.0.0.1:8098/health` — `arm` block (`kill_switch_engaged`, `submit_orders`, `execution_enabled`, `allow_live_execution`, `armed_summary`)
+- `GET http://127.0.0.1:8098/health` — `arm` block (`live_trading_enabled`, per-strategy `submit_orders`, `execution_mode`, `armed_summary` — the summary now reflects `execution_mode` + `submit_orders`)
 - `GET http://127.0.0.1:8891/health`, `GET http://127.0.0.1:8891/latest`
 - `POST http://127.0.0.1:8891/webhook`
 
@@ -431,7 +431,7 @@ HermX HTTP API on loopback. Never touches an exchange; never invents a size.
 }
 ```
 > **No `size`/`notional`/`leverage` field exists.** The receiver computes notional from
-> the strategy file (`budget_usd * leverage`). Adding one is a boundary violation.
+> the strategy file (`capital.budget_usd * leverage`). Adding one is a boundary violation.
 
 **Fail behavior.** A 4xx/5xx or stale/degraded `executor` ⇒ report **UNKNOWN**, never
 "flat / no positions." Close/flatten is **not supported** via this API; the agent must
@@ -440,8 +440,8 @@ say so rather than improvise a close via `/webhook`.
 **Example.**
 
 > **Prompt:** "Are we armed and what's open?"
-> **Agent:** *(GET /health → `armed_summary:false, kill_switch_engaged:true`; GET /api → SOL-USDT-SWAP LONG)*
-> "Not armed — the kill switch is engaged (`HERMX_SUBMIT_ENABLED` off), so nothing will
+> **Agent:** *(GET /health → `armed_summary:false, live_trading_enabled:false`; GET /api → SOL-USDT-SWAP LONG)*
+> "Not armed for live — `HERMX_LIVE_TRADING` is off, so no `execution_mode=live` order will
 > submit. One position is open: **SOL-USDT-SWAP LONG**, ~$420 notional, uPnL **+$11.30**,
 > 3× isolated. I can't change the kill switch from here."
 
@@ -820,11 +820,12 @@ services:
 | Group | Keys |
 |-------|------|
 | Webhook/auth | `SHADOW_WEBHOOK_SECRET`, `HERMX_REQUIRE_HMAC`, `HERMX_WEBHOOK_HMAC_KEY`, `HERMX_REPLAY_WINDOW_SECONDS`, `HERMX_MAX_BODY_BYTES`, `HERMX_RATE_LIMIT_WINDOW_SECONDS`, `HERMX_RATE_LIMIT_MAX_REQUESTS` |
-| Receiver/exec | `SHADOW_PORT`, `HERMX_QUEUE_MAXSIZE`, `HERMX_SUBMIT_TIMEOUT_SECONDS`, `HERMX_WORKER_POOL_SIZE`, `HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS`, `HERMX_WATCHDOG_ENABLED`, `HERMX_WATCHDOG_STALE_SECONDS`, `HERMX_QUEUE_LAG_SLO_SECONDS`, `OKX_SUBMIT_ORDERS`, `HERMX_EXEC_API`, `HERMX_EXEC_BACKEND`, `HERMX_EXEC_WRITE_BACKEND`, `HERMX_EXEC_SHADOW` |
-| Kill switch | `HERMX_SUBMIT_ENABLED` *(unset = armed; falsey = engaged)* |
+| Receiver/exec | `SHADOW_PORT`, `HERMX_QUEUE_MAXSIZE`, `HERMX_SUBMIT_TIMEOUT_SECONDS`, `HERMX_WORKER_POOL_SIZE`, `HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS`, `HERMX_WATCHDOG_ENABLED`, `HERMX_WATCHDOG_STALE_SECONDS`, `HERMX_QUEUE_LAG_SLO_SECONDS` |
+| Kill switch | `HERMX_LIVE_TRADING` *(`false`/unset = live trading disabled; `execution_mode=demo` is unaffected)* |
 | Dashboard | `CLEAN_DASHBOARD_PORT`, `HERMX_DASH_AUTH`, `HERMX_DASH_AUTH_TOKEN` |
-| Exchange (OKX) | `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE`, `OKX_DEMO_API_KEY`, `OKX_DEMO_SECRET_KEY`, `OKX_DEMO_PASSPHRASE`, `OKX_SIMULATED_TRADING` |
-| Exchange (others) | `KUCOIN_PAPER_API_KEY/SECRET/PASSPHRASE`, `BYBIT_TESTNET_API_KEY/SECRET_KEY` |
+| Exchange (OKX) | `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE`, `OKX_DEMO_API_KEY`, `OKX_DEMO_SECRET_KEY`, `OKX_DEMO_PASSPHRASE` |
+| Exchange (others) | `BINANCE_TESTNET_API_KEY/SECRET_KEY`, `BYBIT_TESTNET_API_KEY/SECRET_KEY`, `KUCOIN_PAPER_API_KEY/SECRET/PASSPHRASE`, `BITGET_DEMO_API_KEY/SECRET_KEY/PASSPHRASE`, `GATE_TESTNET_API_KEY/SECRET_KEY`, `COINBASE_SANDBOX_API_KEY/SECRET_KEY`, `HYPERLIQUID_WALLET_ADDRESS/PRIVATE_KEY` |
+| **Removed** | ~~`HERMX_SUBMIT_ENABLED`~~, ~~`OKX_SUBMIT_ORDERS`~~, ~~`OKX_SIMULATED_TRADING`~~, ~~`HERMX_EXEC_API`~~, ~~`HERMX_EXEC_BACKEND`~~, ~~`HERMX_EXEC_WRITE_BACKEND`~~, ~~`HERMX_EXEC_SHADOW`~~ — superseded by `execution_mode` + `submit_orders` + `HERMX_LIVE_TRADING` |
 | Ingress | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_TUNNEL_NAME` *(legacy/alt ingress)*; Tailscale via `TS_AUTHKEY` |
 | Advisor [BUILT, OFF] | `HERMX_ADVISOR_ENABLED`, `HERMX_ADVISOR_COMMAND`, `HERMX_ADVISOR_SKILLS`, `HERMX_ADVISOR_MODEL`, `HERMX_ADVISOR_TIMEOUT_SECONDS` |
 | Intelligence [PLANNED] | `KRONOS_API_URL`, `MXC_DASHBOARD_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USERS`, `WHATSAPP_*`, `HERMX_ADVISOR_MIN_SCORE`, `HERMX_PROACTIVE_ENABLED` |
@@ -837,8 +838,8 @@ This is the `skills/vps-deploy.md` flow, condensed:
 2. Copy the package to `/opt/hermx`.
 3. Create the venv and `pip install -r requirements.txt`.
 4. Copy `setup/env.example` → `/opt/hermx/.env`, fill secrets, `chmod 600`.
-5. Choose the runtime profile (paper/demo vs. live) in `shadow-config.json`; keep
-   `HERMX_SUBMIT_ENABLED` unset (armed-safe) until verified.
+5. Set each strategy's `execution_mode` (`demo` vs. `live`) and `submit_orders`; keep
+   `HERMX_LIVE_TRADING` off (live trading disabled) until verified.
 6. Install Tailscale; `tailscale up` to authenticate to **your own** tailnet.
 7. `tailscale funnel --bg 8891` → note your URL `https://hermx.<tailnet>.ts.net/webhook`.
 8. `sudo deploy/install-services.sh` (creates `hermx` user, installs + enables both units).
@@ -847,7 +848,7 @@ This is the `skills/vps-deploy.md` flow, condensed:
 11. Send a synthetic **valid** alert → confirm it processes; send an **invalid** one →
     confirm it's rejected.
 12. Confirm the dashboard reflects the test.
-13. Confirm OKX demo behavior (`OKX_SIMULATED_TRADING=1`) before going live.
+13. Confirm OKX demo behavior (`execution_mode: demo` in the strategy) before going live.
 14. Point your TradingView alert webhook at your Tailscale URL with your `X-Webhook-Secret`.
 
 Because each user runs their **own tailnet**, every instance gets a unique, stable
@@ -879,7 +880,7 @@ ledgers reconstructs authoritative position state.
 | **Agent crash recovery** | Agent is stateless; on restart it reloads skills and reconstructs context from reads (§4.6). Nothing is lost because the agent owns no money state. |
 | **Exchange connectivity** | CCXT calls bounded by `HERMX_SUBMIT_TIMEOUT_SECONDS` (45). A timeout/exception ⇒ order state `UNKNOWN` (not assumed filled, not assumed rejected). The unknown-resolver loop (`resolve_unknown_orders_once`, every `HERMX_UNKNOWN_RESOLVER_INTERVAL_SECONDS`) reconciles `UNKNOWN` → `FILLED`/`REJECTED` against the exchange. |
 | **Crash-torn ledgers** | Appends are fsync'd; `read_jsonl_tolerant()` quarantines a crash-truncated trailing line and fails loud on mid-file corruption — no silent data loss. |
-| **Kill switch** | `HERMX_SUBMIT_ENABLED=false` blocks **all** submission before any gate, in under a second, with no restart needed (read per-execution). Unset = armed-safe default. |
+| **Kill switch** | `HERMX_LIVE_TRADING=false` blocks **all** `execution_mode=live` submission before any gate, in under a second, with no restart needed (read per-execution). `false`/unset is the live-safe default; demo trading is unaffected. |
 
 The reliability philosophy mirrors the safety one: **unknown is a first-class state.**
 The system never *guesses* a fill; it records `UNKNOWN` and reconciles.

@@ -23,8 +23,8 @@ over-engineered for a loopback single-operator deployment and are demoted to
 Signals reach HermX from **TradingView webhooks** *or* from **a human chatting
 with the agent** — those are the only two sources, and the agent can act on
 **nothing else** (§2). Strategy files in `strategies/*.json` are defined **in
-advance** and hold every constraint (asset, `budget_usd`, `leverage`,
-`margin_mode`, timeframe). The agent **never** sets size: existing code computes
+advance** and hold every constraint (instrument, `capital.budget_usd`, `leverage`,
+`margin_mode`, timeframe; the asset is derived from `instrument.inst_id`). The agent **never** sets size: existing code computes
 notional from the strategy file. All exchange steps run through the deterministic
 Python stack via CCXT. The agent is advisory/relay only; the gate chain is
 authoritative and can veto anything.
@@ -42,8 +42,8 @@ authoritative and can veto anything.
   the local HTTP API doesn't offer. There is no raw CCXT, filesystem, shell, or
   credential access for order purposes. **That is the safety model.**
 - **Sizing is never the LLM's.** `build_strategy_execution_readiness`
-  (`src/webhook_receiver.py:3340`) computes
-  `base_notional = budget_usd * leverage` and emits it as `target_notional_usd` /
+  (`src/webhook_receiver.py`) computes
+  `base_notional = capital.budget_usd * leverage` and emits it as `target_notional_usd` /
   `planned_notional_usd`. The `/webhook` body has **no** size/notional/leverage
   field; any number the model produces is ignored.
 - **Money-safety lives in Python, not in `SKILL.md`.** The skill text is treated
@@ -60,28 +60,29 @@ servers that already run.
 
 **Read path — dashboard (`src/dashboard.py`, `127.0.0.1:8098`):**
 `GET /api` → positions / PnL / balances / ledger / executor health;
-`GET /health` → `allow_live_execution` config gate (served by `do_GET`,
-`src/dashboard.py:2015`).
+`GET /health` → live-trading / arm state (`live_trading_enabled`, per-strategy
+`execution_mode` + `submit_orders`, `armed_summary`).
 
 **Act path — receiver (`src/webhook_receiver.py`, `127.0.0.1:8891`):**
 `POST /webhook` with a TradingView alert JSON (schema
 `schemas/tradingview-alert.schema.json`); `GET /health` and `GET /latest` for
 liveness and the last processed alert. The receiver normalizes the alert,
 `build_strategy_execution_readiness` computes the plan, and
-`_execute_okx_via_service` (`src/webhook_receiver.py:4164`) hands it to
+`_execute_okx_via_service` (`src/webhook_receiver.py`) hands it to
 `ExecutionService.execute`.
 
 ## 4. The deterministic gate chain (authoritative, built + tested)
 
-`ExecutionService.execute` (`src/execution/service.py:60`) is the **single
+`ExecutionService.execute` (`src/execution/service.py`) is the **single
 chokepoint**. In order:
 
-1. **Kill switch** — `submit_kill_switch_armed()` / `HERMX_SUBMIT_ENABLED`;
-   engaged ⇒ `not_submitted`, before anything else.
-2. **Gate precedence** — `should_execute` requires **all** of
-   `readiness.live_execution_enabled` **and** `execution.enabled` **and**
-   `execution.submit_orders` **and** `risk.allow_live_execution` **and**
-   `auth_healthy` **and** `watchdog_ok`.
+1. **Kill switch (live only)** — `HERMX_LIVE_TRADING`; an `execution_mode=live`
+   order requires `=true`, and `false`/unset ⇒ `not_submitted` before anything
+   else. `execution_mode=demo` is unaffected.
+2. **Submit + mode** — `should_execute` requires `strategy.submit_orders` true
+   **and** a resolved `execution_mode` (`demo` → OKX sandbox/paper, always
+   allowed; `live` → real account, subject to step 1) **and** `auth_healthy`
+   **and** `watchdog_ok`.
 3. **Symbol pause** — `symbol_pause_info(symbol)` ⇒ `not_submitted` when paused.
 4. **Idempotency** — a duplicate `cl_ord_id` (`latest_order_record`) ⇒
    `not_submitted` (`duplicate_cl_ord_id`).
@@ -173,7 +174,7 @@ TradingView webhook ─┐                         ┌─ Human chat (Hermes Age
             │  act:   webhook_receiver.py  POST /webhook      (:8891)               │
             └───────────────────────────────┬──────────────────────────────────────┘
                                              ▼
-        build_strategy_execution_readiness  (notional = budget_usd * leverage)
+        build_strategy_execution_readiness  (notional = capital.budget_usd * leverage)
                                              ▼
         [optional] pre-exec advisor  — proceed | skip(+veto)  · FAILS OPEN · default OFF
                                              ▼

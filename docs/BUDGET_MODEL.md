@@ -1,8 +1,9 @@
 # Budget Model
 
-Budget means assigned margin capital per strategy.
+Budget means assigned margin capital per strategy. It is the `capital.budget_usd` field in the
+strategy file (schema v2) — the old top-level `budget_usd` no longer exists.
 
-Target notional is budget multiplied by leverage.
+Target notional is budget multiplied by leverage: `capital.budget_usd * leverage`.
 
 ## Current Budgets
 
@@ -31,10 +32,10 @@ The current four-asset Duo Base Dev trial uses `$6,500` because each asset has i
 
 ## Important Rule
 
-Paper/shadow budget and OKX account budget must not be mixed.
+Paper/shadow budget and real account budget must not be mixed.
 
 The dashboard should clearly label whether numbers come from:
 
 - historical paper replay
-- OKX demo live execution
-- OKX real live execution
+- demo execution (`execution_mode: demo` — sandbox/paper account)
+- live execution (`execution_mode: live` — real account, requires `HERMX_LIVE_TRADING=true`)

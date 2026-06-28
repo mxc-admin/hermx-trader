@@ -21,6 +21,23 @@ Every active execution alert must include `strategy_id`.
 }
 ```
 
+## Venue, Execution Mode, and Sizing Come From the Strategy
+
+The alert carries only the **signal** — never venue routing, sizing, or execution mode. Those
+are supplied by the strategy file matched on `strategy_id`:
+
+- **Venue** is `strategy.instrument.exchange` (e.g. `okx`, `binance`, `bybit`, `kucoin`, `bitget`,
+  `gate`, `coinbase`, `hyperliquid`). The alert's `exchange` field is advisory only and must agree
+  with the strategy; the strategy's `instrument.exchange` is authoritative for routing.
+- **Execution mode** is `strategy.execution_mode` — `demo` routes to the venue's sandbox/paper
+  account (always allowed); `live` routes to the real account and additionally requires the global
+  kill switch `HERMX_LIVE_TRADING=true`.
+- **Sizing** is computed in the receiver as `capital.budget_usd * leverage`. The alert has **no**
+  size, notional, budget, or leverage field; any such value would be ignored.
+
+This keeps the contract **exchange-agnostic**: the same alert shape works for every supported
+venue, and the strategy file selects where and how it executes.
+
 ## Required TradingView Settings
 
 - Condition: correct Duo Base Dev BUY or SELL signal.

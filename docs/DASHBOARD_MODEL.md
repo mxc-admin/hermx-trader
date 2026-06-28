@@ -21,14 +21,14 @@ Each active strategy gets one card.
 
 Card fields:
 
-- asset
+- asset (derived from `instrument.inst_id`)
 - timeframe
-- upper/lower parameters
-- budget start
+- execution mode (`demo` / `live`)
+- budget start (`capital.budget_usd`)
 - budget now
 - PnL now
 - live price
-- current OKX position
+- current exchange position
 - alert count
 - health state
 

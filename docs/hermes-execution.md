@@ -40,14 +40,15 @@ This skill is the only agent-facing execution surface.
 
 ## Gate Precedence
 
-Live submit requires all true:
+Submission requires:
 
-1. `HERMX_SUBMIT_ENABLED=true`
-2. Execution config submit gate true
-3. Risk config allow-live gate true
-4. Auth health affirmative
-5. Watchdog health affirmative
-6. Symbol not paused
+1. `strategy.submit_orders = true`
+2. `strategy.execution_mode` resolved — `demo` routes to the exchange sandbox/paper
+   account (always allowed); `live` routes to the real account and additionally
+   requires `HERMX_LIVE_TRADING=true` (the global kill switch)
+3. Auth health affirmative
+4. Watchdog health affirmative
+5. Symbol not paused
 
 If any gate is false/unknown, return `not_submitted` with reason.
 

@@ -14,12 +14,24 @@ Real-money execution is not approved until this checklist is complete.
 - Emergency pause exists and is tested.
 - Health checks are visible.
 - API keys are stored outside the repo.
-- Runtime profile clearly says live.
 - User explicitly approves real-money execution.
+
+## Go-Live Gate Settings
+
+Going live is exactly three controls — all must be set, in this order:
+
+1. The strategy has `submit_orders: true` (it is permitted to place orders at all).
+2. The strategy has `execution_mode: "live"` (route to the real account instead of demo/sandbox).
+3. The global kill switch is on: `HERMX_LIVE_TRADING=true` in the environment.
+
+If any one is missing, no real-account order can submit. With `HERMX_LIVE_TRADING=false` (or unset),
+every `execution_mode: live` order is blocked while demo trading continues unaffected — making the
+kill switch the single lever to instantly disarm all live trading.
 
 ## Live Promotion Rule
 
 Do not change demo credentials into live credentials casually.
 
-Live mode must be a separate deployment step.
+Flipping a strategy from `execution_mode: demo` to `live` (and turning on `HERMX_LIVE_TRADING`)
+must be a separate, deliberate deployment step — never an accidental side effect.
 
