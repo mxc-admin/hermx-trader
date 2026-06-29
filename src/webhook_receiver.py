@@ -22,7 +22,7 @@ import threading
 import time
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib import request as urllib_request
 from urllib.parse import urlparse
@@ -94,6 +94,7 @@ HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS = float(os.environ.get("HERMX_SIGNAL_DEDUPE_W
 HERMX_WATCHDOG_ENABLED = (os.environ.get("HERMX_WATCHDOG_ENABLED") or "true").strip().lower() not in {"0", "false", "no", ""}
 HERMX_WATCHDOG_STALE_SECONDS = float(os.environ.get("HERMX_WATCHDOG_STALE_SECONDS", "120") or "120")
 HERMX_QUEUE_LAG_SLO_SECONDS = float(os.environ.get("HERMX_QUEUE_LAG_SLO_SECONDS", "30") or "30")
+HERMX_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("HERMX_REQUEST_TIMEOUT_SECONDS", "30") or "30")
 ROOT = Path(os.environ.get("SHADOW_ROOT", Path(__file__).resolve().parents[1]))
 LOG_DIR = ROOT / "logs"
 # Mutable per-process state snapshots live under DATA_DIR so they can be mapped
@@ -1621,6 +1622,7 @@ def default_control_state() -> dict:
         "manual_pause": False,
         "pause_reason": "",
         "symbol_pauses": {},
+        "strategy_overrides": {},
         "allowed_assets": list(ALLOWED_SYMBOLS),
         "allowed_policies": list(POLICY_KEYS),
         "risk_limits": {
@@ -1660,6 +1662,7 @@ def load_control_state() -> dict:
         merged = default | state
         merged["risk_limits"] = default.get("risk_limits", {}) | state.get("risk_limits", {})
         merged["symbol_pauses"] = state.get("symbol_pauses") if isinstance(state.get("symbol_pauses"), dict) else {}
+        merged["strategy_overrides"] = state.get("strategy_overrides") if isinstance(state.get("strategy_overrides"), dict) else {}
         return merged
     except Exception:
         return default_control_state()
@@ -1694,6 +1697,49 @@ def pause_symbol(symbol: "str | None", reason: str) -> bool:
         "reason": next_reason,
     }
     state["symbol_pauses"] = pauses
+    state["updated_at"] = now_iso()
+    save_control_state(state)
+    return True
+
+
+_VALID_STRATEGY_MODES = frozenset({"shadow", "demo", "live"})
+
+
+def set_strategy_override(strategy_id: str, mode: str) -> bool:
+    """Set a per-strategy execution mode override in control-state.json.
+
+    mode must be one of: 'shadow' (no orders), 'demo' (sandbox), 'live' (real venue).
+    The global HERMX_LIVE_TRADING kill switch still gates live submissions independently.
+    """
+    sid = str(strategy_id or "").strip()
+    mode = str(mode or "").strip().lower()
+    if not sid or mode not in _VALID_STRATEGY_MODES:
+        return False
+    flags = {
+        "shadow": {"execution_mode": "demo", "submit_orders": False},
+        "demo":   {"execution_mode": "demo", "submit_orders": True},
+        "live":   {"execution_mode": "live", "submit_orders": True},
+    }[mode]
+    state = load_control_state()
+    overrides = state.get("strategy_overrides") if isinstance(state.get("strategy_overrides"), dict) else {}
+    overrides[sid] = {"mode": mode, **flags, "set_at": now_iso()}
+    state["strategy_overrides"] = overrides
+    state["updated_at"] = now_iso()
+    save_control_state(state)
+    return True
+
+
+def clear_strategy_override(strategy_id: str) -> bool:
+    """Remove a strategy override, reverting to the strategy file's execution_mode/submit_orders."""
+    sid = str(strategy_id or "").strip()
+    if not sid:
+        return False
+    state = load_control_state()
+    overrides = state.get("strategy_overrides") if isinstance(state.get("strategy_overrides"), dict) else {}
+    if sid not in overrides:
+        return False
+    overrides.pop(sid)
+    state["strategy_overrides"] = overrides
     state["updated_at"] = now_iso()
     save_control_state(state)
     return True
@@ -2700,8 +2746,20 @@ def build_strategy_execution_readiness(record: dict) -> dict:
     # config-flag arming chain (execution.enabled/submit_orders, strategy_engine.
     # submit_orders, risk.allow_live_execution) is gone.
     execution_mode = str((strategy or {}).get("execution_mode") or "demo").lower()
+    # Runtime override from control-state.json (set_strategy_override / dashboard UI).
+    # Checked live per-signal so no restart is needed when the operator changes mode.
+    _cs_overrides = (load_control_state().get("strategy_overrides") or {})
+    _cs_ov = _cs_overrides.get(record.get("strategy_id") or (strategy or {}).get("strategy_id") or "")
+    if isinstance(_cs_ov, dict) and _cs_ov.get("execution_mode"):
+        execution_mode = str(_cs_ov["execution_mode"]).lower()
+    if isinstance(_cs_ov, dict) and "submit_orders" in _cs_ov:
+        live_execution_enabled_override = bool(_cs_ov["submit_orders"])
+    else:
+        live_execution_enabled_override = None
     sandbox = (execution_mode != "live")  # demo/paper/shadow -> True; live -> False
     live_execution_enabled = bool((strategy or {}).get("submit_orders", False))
+    if live_execution_enabled_override is not None:
+        live_execution_enabled = live_execution_enabled_override
     live_allowed = live_execution_enabled
     direction = "long" if normalized.get("side") == "buy" else "short"
     signal_identity = _signal_identity(normalized)
@@ -4298,7 +4356,7 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
         record_raw_webhook("webhook", {"received_at": record["received_at"], "payload": payload, "normalized": normalized, "strategy_id": normalized.get("strategy_id")})
         record_pipeline_event("strategy_match", normalized.get("signal_id"), record)
         record_pipeline_event("decision", normalized.get("signal_id"), record)
-        LATEST_FILE.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+        _atomic_json_dump(LATEST_FILE, record)
         return 200, record
 
     health = latest_tab_health()
@@ -4354,7 +4412,7 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
     record["okx_execution"] = execute_okx_if_enabled(record)
     record_raw_webhook("webhook", {"received_at": record["received_at"], "payload": payload, "normalized": normalized})
     record_pipeline_event("decision", normalized.get("signal_id"), record)
-    LATEST_FILE.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_json_dump(LATEST_FILE, record)
     return 200, record
 
 
@@ -4417,6 +4475,8 @@ def worker_loop(worker_name: str = "shadow-policy-worker-1") -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
+    timeout = max(1.0, HERMX_REQUEST_TIMEOUT_SECONDS)  # kills stalled body reads
+
     def _send(self, status: int, body: dict):
         raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -4430,10 +4490,13 @@ class Handler(BaseHTTPRequestHandler):
         if path in {"/health", "/shadow/health"}:
             self._send(200, {"ok": True, "service": "mxc-vps-shadow-receiver", "port": PORT, "mode": "shadow_only", "latest": str(LATEST_FILE)})
         elif path in {"/latest", "/shadow/latest"}:
-            if LATEST_FILE.exists():
-                self._send(200, json.loads(LATEST_FILE.read_text(encoding="utf-8")))
-            else:
+            if not LATEST_FILE.exists():
                 self._send(404, {"ok": False, "error": "no_latest_yet"})
+            else:
+                try:
+                    self._send(200, json.loads(LATEST_FILE.read_text(encoding="utf-8")))
+                except (OSError, ValueError):
+                    self._send(503, {"ok": False, "error": "latest_unreadable"})
         else:
             self._send(404, {"ok": False, "error": "not_found"})
 
@@ -4585,7 +4648,7 @@ def main():
         threading.Thread(target=worker_loop, args=(worker_name,), daemon=True, name=worker_name).start()
     if HERMX_WATCHDOG_ENABLED:
         threading.Thread(target=liveness_watchdog_loop, daemon=True, name="watchdog").start()
-    server = HTTPServer((HERMX_BIND_HOST, PORT), Handler)
+    server = ThreadingHTTPServer((HERMX_BIND_HOST, PORT), Handler)
     logging.info("MXC VPS shadow receiver listening on %s:%s", HERMX_BIND_HOST, PORT)
     server.serve_forever()
 
