@@ -300,8 +300,8 @@ def test_post_submit_reconcile_mismatch_overrides_stdout_and_alerts(wr, monkeypa
     records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
     assert records[-1]["state"] == wr.ORDER_STATE_REJECTED
     # A RECONCILE_MISMATCH alert was emitted (stdout FILLED vs reconciled REJECTED).
-    alerts = wr.read_jsonl_tolerant(wr.RECONCILE_ALERT_LEDGER)
-    mism = [a for a in alerts if a["alert"] == "RECONCILE_MISMATCH" and a["detail"].get("stage") == "post_submit"]
+    alerts = wr.read_jsonl_tolerant(wr.ALERTS_LEDGER)
+    mism = [a for a in alerts if a.get("kind") == "reconcile" and a["alert"] == "RECONCILE_MISMATCH" and a["detail"].get("stage") == "post_submit"]
     assert len(mism) == 1
     # The local tentative outcome of a bare ACK is now SUBMITTED (not an optimistic
     # FILLED); the exchange says REJECTED, which is still a genuine mismatch.
@@ -364,8 +364,8 @@ def test_startup_reconcile_open_orders_and_position_mismatch(wr, monkeypatch):
     # Position divergence emitted a RECONCILE_MISMATCH alert (does NOT auto-trade).
     assert len(summary["position_mismatches"]) == 1
     assert summary["position_mismatches"][0]["symbol"] == "XRPUSDT"
-    alerts = wr.read_jsonl_tolerant(wr.RECONCILE_ALERT_LEDGER)
-    pos_mism = [a for a in alerts if a["alert"] == "RECONCILE_MISMATCH" and a["detail"].get("symbol") == "XRPUSDT"]
+    alerts = wr.read_jsonl_tolerant(wr.ALERTS_LEDGER)
+    pos_mism = [a for a in alerts if a.get("kind") == "reconcile" and a["alert"] == "RECONCILE_MISMATCH" and a["detail"].get("symbol") == "XRPUSDT"]
     assert pos_mism and pos_mism[0]["detail"]["local_direction"] == "long"
     assert pos_mism[0]["detail"]["exchange_direction"] == "flat"
 
@@ -378,7 +378,7 @@ def test_startup_reconcile_clean_match_no_alert(wr, monkeypatch):
     assert wr.RECONCILE_STARTUP_COMPLETE is True
     assert summary["open_orders"] == []
     assert summary["position_mismatches"] == []
-    assert not wr.RECONCILE_ALERT_LEDGER.exists()
+    assert not wr.ALERTS_LEDGER.exists()
 
 
 def test_expected_positions_pure_helper(wr):

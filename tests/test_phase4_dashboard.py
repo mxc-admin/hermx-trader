@@ -325,6 +325,8 @@ def test_stale_cache_renders_badge(dash):
     # Seed a strategy-alert ledger row with an OLD received_at so data is stale.
     old_iso = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
     alert = {
+        "stage": "strategy_match",
+        "signal_id": "sig-1",
         "received_at": old_iso,
         "normalized": {
             "strategy_id": "btc_strat",
@@ -336,7 +338,8 @@ def test_stale_cache_renders_badge(dash):
         },
         "strategy_config": {"name": "Test"},
     }
-    (root / "logs" / "strategy-alerts.jsonl").write_text(json.dumps(alert) + "\n", encoding="utf-8")
+    # strategy-alerts were consolidated into pipeline.jsonl (stage="strategy_match").
+    (root / "logs" / "pipeline.jsonl").write_text(json.dumps(alert) + "\n", encoding="utf-8")
 
     # Executor read is also old -> stale.
     dash_mod.okx_live_snapshot = lambda cfg: {"ok": True, "positions": {}, "error": None, "generated_at": old_iso}
@@ -537,12 +540,11 @@ def test_open_orders_panel_without_checkpoint_reads_live_only(dash):
 
 def test_reconcile_and_operator_panels_render_in_html(dash):
     dash_mod, _core, root = dash
-    _write_jsonl(root / "logs" / "reconcile-alerts.jsonl", [
-        {"ts": "2026-06-28T00:00:03Z", "alert": "RECONCILE_MISMATCH",
+    # reconcile + operator alerts were consolidated into alerts.jsonl, tagged by kind.
+    _write_jsonl(root / "logs" / "alerts.jsonl", [
+        {"ts": "2026-06-28T00:00:03Z", "kind": "reconcile", "alert": "RECONCILE_MISMATCH",
          "detail": {"stage": "startup_open_order", "cl_ord_id": "mxc-a", "symbol": "BTCUSDT", "reason": "not_found"}},
-    ])
-    _write_jsonl(root / "logs" / "operator-alerts.jsonl", [
-        {"ts": "2026-06-28T00:00:04Z", "alert": "PLANNED_ORDER_ABANDONED", "severity": "warning",
+        {"ts": "2026-06-28T00:00:04Z", "kind": "operator", "alert": "PLANNED_ORDER_ABANDONED", "severity": "warning",
          "detail": {"cl_ord_id": "mxc-x", "reason": "never_submitted", "age_s": 400}},
     ])
 

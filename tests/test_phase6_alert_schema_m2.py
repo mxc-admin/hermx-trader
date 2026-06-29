@@ -203,10 +203,15 @@ def test_flag_on_invalid_alert_quarantined_via_existing_path(wr, monkeypatch):
     assert "execution_readiness" not in record
     assert "okx_execution" not in record
 
-    # Durably appended to the SAME quarantine ledger the strategy path uses.
-    quarantine_lines = wr.STRATEGY_QUARANTINE_LEDGER.read_text(encoding="utf-8").strip().splitlines()
-    assert quarantine_lines, "expected a quarantine ledger record"
-    last = json.loads(quarantine_lines[-1])
+    # Durably appended to pipeline.jsonl under the SAME quarantine stage the strategy
+    # path uses (strategy-alert-quarantine was consolidated into the pipeline ledger).
+    quarantine_rows = [
+        json.loads(line)
+        for line in wr.PIPELINE_LEDGER.read_text(encoding="utf-8").strip().splitlines()
+        if line.strip() and json.loads(line).get("stage") == "quarantine"
+    ]
+    assert quarantine_rows, "expected a quarantine pipeline record"
+    last = quarantine_rows[-1]
     assert last["mode"] == "strategy_alert_quarantine"
     assert last["reason"].startswith("alert_schema_invalid:")
 

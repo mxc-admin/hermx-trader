@@ -1,3 +1,9 @@
+# NOTE: The React UI must be pre-built BEFORE this service starts. The dashboard
+# serves the static build from dashboard-ui/out/; it does not build at runtime.
+# Build it during deploy with:
+#   React UI must be pre-built: cd dashboard-ui && NEXT_PUBLIC_API_BASE='' npm run build
+# ExecStartPre is intentionally NOT used: building at startup is too slow and would
+# put Node on the hot restart path (Restart=always), which we deliberately avoid.
 [Unit]
 Description=HermX Dashboard
 After=network-online.target

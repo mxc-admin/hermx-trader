@@ -50,7 +50,12 @@ DASH_AUTH_ENABLED = (os.environ.get("HERMX_DASH_AUTH") or "true").strip().lower(
 DASH_AUTH_TOKEN = (os.environ.get("HERMX_SECRET") or "").strip()
 BACKFILL_FILE = ROOT / "research" / "mxc-backfill-jun11-jun16.json"
 STRATEGIES_DIR = ROOT / "strategies"
-STRATEGY_ALERTS_FILE = LOGS / "strategy-alerts.jsonl"
+# Unified consolidated ledgers (JSONL ledger consolidation). pipeline.jsonl holds
+# every signal-processing event tagged with a ``stage`` field; alerts.jsonl holds
+# operator/reconcile/state alerts tagged with a ``kind`` field. The dashboard reads
+# them through stage/kind filters (see _pipeline_rows / _alerts_rows).
+PIPELINE_FILE = LOGS / "pipeline.jsonl"
+ALERTS_FILE = LOGS / "alerts.jsonl"
 # Read-only observability sources for the order / reconcile / operator panels.
 ORDER_JOURNAL_FILE = LOGS / "order-journal.jsonl"
 # Verified checkpoint written by the receiver before it seals+rotates the live segment.
@@ -58,8 +63,6 @@ ORDER_JOURNAL_FILE = LOGS / "order-journal.jsonl"
 # of the now-sealed segments, so the open-orders panel must merge it with the live tail
 # or it would miss any order whose latest record rotated into a sealed file.
 ORDER_JOURNAL_CHECKPOINT_FILE = LOGS / "order-journal.checkpoint.json"
-RECONCILE_ALERTS_FILE = LOGS / "reconcile-alerts.jsonl"
-OPERATOR_ALERTS_FILE = LOGS / "operator-alerts.jsonl"
 # Order states the open-orders panel filters out (terminal); mirrors the receiver's set.
 ORDER_TERMINAL_STATES_DASH = {"FILLED", "REJECTED"}
 TRIAL_TAB_ID = "duo_base_dev_trial"
@@ -202,8 +205,32 @@ def strategy_inst_id(config, sym):
     return ""
 
 
+def _pipeline_rows(stage, limit, scan=None):
+    """Read up to ``limit`` rows of one pipeline ``stage`` from the unified
+    pipeline.jsonl. Because the file interleaves stages, we tail a larger ``scan``
+    window (bounded by the same OOM-safe reverse-tail reader) and keep the last
+    ``limit`` rows matching the stage. Returns ``(rows, stats)``."""
+    scan = scan if scan is not None else max(int(limit) * 6, 1000)
+    rows, stats = read_jsonl_stats(LOGS / "pipeline.jsonl", scan)
+    rows = [r for r in rows if r.get("stage") == stage]
+    if limit and len(rows) > limit:
+        rows = rows[-limit:]
+    return rows, stats
+
+
+def _alerts_rows(kind, limit, scan=None):
+    """Read up to ``limit`` rows of one alert ``kind`` from the unified alerts.jsonl
+    (kind in {operator, reconcile, state}). Returns ``(rows, stats)``."""
+    scan = scan if scan is not None else max(int(limit) * 6, 500)
+    rows, stats = read_jsonl_stats(LOGS / "alerts.jsonl", scan)
+    rows = [r for r in rows if r.get("kind") == kind]
+    if limit and len(rows) > limit:
+        rows = rows[-limit:]
+    return rows, stats
+
+
 def strategy_alert_rows(limit=500):
-    rows = read_jsonl(STRATEGY_ALERTS_FILE, limit)
+    rows, _stats = _pipeline_rows("strategy_match", limit)
     out = []
     for row in rows:
         norm = row.get("normalized") or {}
@@ -412,7 +439,7 @@ def load_json(path: Path, default):
 
 
 def real_decisions(limit=10000):
-    rows = read_jsonl(LOGS / "shadow-decisions.jsonl", limit)
+    rows, _stats = _pipeline_rows("decision", limit)
     out = []
     seen = set()
     symbol_set = set(trial_symbols())
@@ -741,9 +768,10 @@ def enrich_close_rows_with_okx_history(records, history_rows):
 
 
 def okx_execution_records(config, limit=500):
-    # Canonical, venue-neutral execution ledger. The legacy okx-executions.jsonl mirror
-    # was removed (nothing writes it post-CCXT-cutover); no fallback read.
-    rows = read_jsonl(LOGS / "executions.jsonl", limit)
+    # Execution outcomes now live in the unified pipeline.jsonl under stage="execution"
+    # (consolidated from the former executions.jsonl). Each row is {received_at,
+    # okx_execution, ...} exactly as before, plus the stage/signal_id stamp.
+    rows, _stats = _pipeline_rows("execution", limit)
     out = []
     for row in rows:
         received_at = row.get("received_at")
@@ -1602,6 +1630,19 @@ def okx_comparison_only_section(policy, okx_live):
     """
 
 
+def metric_cards_colored(items):
+    """Like metric_cards but each item is (value_str, color_kind_or_None)."""
+    cells = []
+    for label, (val, kind) in items.items():
+        color_style = ""
+        if kind == "good":
+            color_style = " style=\"color:var(--positive)\""
+        elif kind == "bad":
+            color_style = " style=\"color:var(--negative)\""
+        cells.append(f'<div class="metric"><span>{esc(label)}</span><b{color_style}>{esc(val)}</b></div>')
+    return f'<div class="metrics">{"".join(cells)}</div>'
+
+
 def strategy_card(strategy, okx_live, alerts):
     sym = strategy.get("asset")
     meta = ASSET_META.get(sym, {"name": sym, "logo": ""})
@@ -1632,21 +1673,27 @@ def strategy_card(strategy, okx_live, alerts):
       </div>
       <div class="card-status">
         <div>
-          <span class="label">Duo Base Dev params</span>
-          <div class="position-line">{badge("Upper " + num(strategy.get("upper_band_mult"), 2), "neutral")} {badge("Lower " + num(strategy.get("lower_band_mult"), 2), "neutral")} {badge("Heikin Ashi", "neutral")}</div>
+          <span class="metric-label">Strategy config</span>
+          <div class="position-line">
+            {badge(strategy.get("indicator") or "-", "neutral")}
+            {badge(str(strategy.get("leverage") or "-") + "x", "neutral")}
+            {badge(strategy.get("margin_mode") or "-", "neutral")}
+            {badge((strategy.get("instrument") or {}).get("type") or "-", "neutral")}
+            {badge((strategy.get("instrument") or {}).get("exchange") or "-", "good")}
+          </div>
         </div>
         <div class="live-price">
-          <span class="label">OKX demo position</span>
+          <span class="metric-label">Position</span>
           <b>{badge(position, "muted" if position == "FLAT" else side_kind(position))}</b>
-          <span class="subtle">entry {num(live.get("avg_px"), 4)}</span>
+          <span class="metric-sub">entry {num(live.get("avg_px"), 4)}</span>
         </div>
       </div>
-      {metric_cards({
-        "Budget start": money(budget, 0),
-        "Budget now": money(budget_now, 2),
-        "PnL now": money(pnl_now, 2),
-        "Live price": num(live.get("last"), 4),
-        "Alerts": str(len(rows)),
+      {metric_cards_colored({
+        "Budget": (money(budget, 0), None),
+        "Equity now": (money(budget_now, 2), "good" if pnl_now > 0 else ("bad" if pnl_now < 0 else None)),
+        "UPnL": (money(pnl_now, 2), "good" if pnl_now > 0 else ("bad" if pnl_now < 0 else None)),
+        "Mark price": (num(live.get("last"), 4), None),
+        "Alerts": (str(len(rows)), None),
       })}
     </section>
     """
@@ -1765,12 +1812,12 @@ def order_journal_open_orders(limit=300):
 
 
 def reconcile_alert_records(limit=60):
-    rows, stats = read_jsonl_stats(RECONCILE_ALERTS_FILE, limit)
+    rows, stats = _alerts_rows("reconcile", limit)
     return list(reversed(rows)), stats
 
 
 def operator_alert_records(limit=60):
-    rows, stats = read_jsonl_stats(OPERATOR_ALERTS_FILE, limit)
+    rows, stats = _alerts_rows("operator", limit)
     return list(reversed(rows)), stats
 
 
@@ -1896,14 +1943,14 @@ def order_state_section():
       <section class="trade-log-card nested">
         <div class="log-head">
           <h3>Reconcile Alerts <span class="sub">{_ledger_stat_note(rc_stats)}</span></h3>
-          <p>Latest entries from reconcile-alerts.jsonl (mismatches, resolver timeouts).</p>
+          <p>Latest entries from alerts.jsonl (kind=reconcile: mismatches, resolver timeouts).</p>
         </div>
         <div class="table-wrap unified-log">{reconcile_alert_table(recon)}</div>
       </section>
       <section class="trade-log-card nested">
         <div class="log-head">
           <h3>Operator Alerts <span class="sub">{_ledger_stat_note(op_stats)}</span></h3>
-          <p>Latest entries from operator-alerts.jsonl (auth, queue, resolver, never_submitted).</p>
+          <p>Latest entries from alerts.jsonl (kind=operator: auth, queue, resolver, never_submitted).</p>
         </div>
         <div class="table-wrap unified-log">{operator_alert_table(ops)}</div>
       </section>
@@ -2029,6 +2076,78 @@ def status_banners(model):
     return "".join(out)
 
 
+def strategy_indicator_label(strategies):
+    indicators = {(s.get("indicator") or "").strip() for s in (strategies or []) if s.get("indicator")}
+    if len(indicators) == 1:
+        return indicators.pop()
+    return f"{len(indicators)} indicators" if indicators else "—"
+
+
+def summary_cards(model):
+    okx_live = model.get("okx_live") or {}
+    strategies = model.get("active_strategies") or []
+    executor = model.get("executor") or {}
+    fresh = model.get("freshness") or {}
+    cfg = model.get("config") or {}
+
+    # Card 1: System status
+    live_enabled, _ = live_trading_enabled()
+    demo_count = sum(1 for s in strategies if (s.get("execution_mode") or "demo") != "live")
+    live_count_s = sum(1 for s in strategies if (s.get("execution_mode") or "demo") == "live")
+    if live_enabled and live_count_s > 0:
+        sys_label, sys_kind = "ARMED", "good"
+    elif strategies:
+        sys_label, sys_kind = "DEMO", "warn"
+    else:
+        sys_label, sys_kind = "DISARMED", "bad"
+
+    # Card 2: Active strategies
+    strat_label = str(len(strategies))
+    strat_sub = f"{demo_count} demo / {live_count_s} live"
+    strat_kind = "good" if strategies else "muted"
+
+    # Card 3: Open positions
+    positions = (okx_live.get("positions") or {})
+    open_pos = {sym: p for sym, p in positions.items() if (p.get("side") or "FLAT") != "FLAT"}
+    longs = sum(1 for p in open_pos.values() if p.get("side") == "LONG")
+    shorts = sum(1 for p in open_pos.values() if p.get("side") == "SHORT")
+    if open_pos:
+        pos_label = f"{len(open_pos)} OPEN"
+        pos_sub = f"{longs}L / {shorts}S"
+        pos_kind = "good"
+    else:
+        pos_label = "ALL FLAT"
+        pos_sub = "no open positions"
+        pos_kind = "muted"
+
+    # Card 4: Executor health
+    exec_ok = executor.get("ok", False)
+    exec_err = executor.get("error")
+    stale = fresh.get("stale", False)
+    if stale:
+        exec_label, exec_kind = "STALE", "bad"
+    elif not exec_ok:
+        exec_label, exec_kind = "ERROR", "bad"
+    else:
+        exec_label, exec_kind = "OK", "good"
+    exec_sub = esc(str(exec_err)[:40]) if exec_err else "executor healthy"
+
+    def card(icon_label, value, sub, kind):
+        bar_color = "var(--positive)" if kind == "good" else ("var(--negative)" if kind == "bad" else ("var(--warning)" if kind == "warn" else "var(--text-muted)"))
+        return f"""<div class="metric-card" style="border-top:3px solid {bar_color}">
+  <span class="metric-label">{esc(icon_label)}</span>
+  <b class="metric-value" style="color:{bar_color}">{esc(value)}</b>
+  <span class="metric-sub">{sub}</span>
+</div>"""
+
+    return f"""<div class="summary-metrics">
+  {card("SYSTEM STATUS", sys_label, f"{len(strategies)} strategies active", sys_kind)}
+  {card("ACTIVE STRATEGIES", strat_label, strat_sub, strat_kind)}
+  {card("OPEN POSITIONS", pos_label, pos_sub, pos_kind)}
+  {card("EXECUTOR", exec_label, exec_sub, exec_kind)}
+</div>"""
+
+
 def render():
     model = dashboard_model()
     cfg = model["config"]
@@ -2044,7 +2163,7 @@ def render():
     execution_cfg = cfg.get("execution") or {}
     risk_cfg = cfg.get("risk") or {}
     okx_enabled = bool(execution_cfg.get("enabled")) and bool(execution_cfg.get("submit_orders")) and bool(risk_cfg.get("allow_live_execution"))
-    okx_badge = badge("OKX demo enabled", "good") if okx_enabled else badge("No OKX orders", "warn")
+    okx_badge = badge("Execution enabled", "good") if okx_enabled else badge("Orders disabled", "warn")
     fresh = model.get("freshness") or {}
     updated_text = "Updated " + (display_time(model["generated_at"]) or model["generated_at"])
     if fresh.get("age_seconds") is not None:
@@ -2071,13 +2190,14 @@ def render():
       </div>
       <div class="header-metrics">
         <span>{badge("Strategy files", "good")}</span>
-        <span>{badge("Heikin Ashi", "neutral")}</span>
+        <span>{badge(strategy_indicator_label(strategies), "neutral")}</span>
         <span>{okx_badge}</span>
         <span>{updated_badge}</span>
         {("<span>" + stale_badge + "</span>") if stale_badge else ""}
       </div>
     </header>
     {warn}
+    {summary_cards(model)}
     <nav class="tabs">{tabs}</nav>
     {panels}
   </main>
@@ -2148,9 +2268,16 @@ def render():
 
 CSS = """
 :root {
-  --bg:#070b10; --panel:#101720; --panel2:#151e29; --line:#263241;
-  --text:#eef5ff; --muted:#8ea0b5; --blue:#78b7ff; --green:#40d97b;
-  --red:#ff5c69; --yellow:#f2c94c;
+  /* Kinetic palette */
+  --bg-base:#0a0f14; --bg-panel:#0f1519; --bg-panel-raised:#151c22;
+  --border-dim:#1e293b; --border-focus:#05AD98;
+  --text-primary:#e2e8f0; --text-secondary:#94a3b8; --text-muted:#475569;
+  --positive:#05AD98; --negative:#E85D6C; --warning:#F5A623; --info:#8B5CF6;
+  /* aliases for legacy selectors */
+  --bg:var(--bg-base); --panel:var(--bg-panel); --panel2:var(--bg-panel-raised);
+  --line:var(--border-dim); --text:var(--text-primary); --muted:var(--text-secondary);
+  --green:var(--positive); --red:var(--negative); --yellow:var(--warning);
+  --blue:#78b7ff;
 }
 * { box-sizing:border-box; }
 body { margin:0; background:var(--bg); color:var(--text); font-family:Inter, Segoe UI, Arial, sans-serif; font-size:13px; }
@@ -2258,7 +2385,116 @@ tr:target td { background:rgba(242,201,76,.08); }
   .asset-grid, #duo_base_dev_trial > .asset-grid { grid-template-columns:1fr; }
   .metrics, .asset-card .metrics, .strategy-card .metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
 }
+/* ── Kinetic component classes ─────────────────────────── */
+.metric-card {
+  display:flex; flex-direction:column; gap:4px;
+  padding:12px 16px;
+  background:var(--bg-panel-raised);
+  border:1px solid var(--border-dim);
+  border-radius:4px; min-width:0;
+}
+.metric-label {
+  font-size:10px; font-weight:600;
+  font-family:var(--font-mono,monospace);
+  letter-spacing:.1em; color:var(--text-muted);
+  text-transform:uppercase;
+}
+.metric-value {
+  font-size:20px; font-weight:600;
+  font-family:var(--font-mono,monospace);
+  color:var(--text-primary); line-height:1.2;
+}
+.metric-sub {
+  font-size:11px;
+  font-family:var(--font-mono,monospace);
+  color:var(--text-secondary);
+}
+.section-header {
+  font-size:11px; font-weight:600;
+  font-family:var(--font-mono,monospace);
+  letter-spacing:.12em; color:var(--text-muted);
+  text-transform:uppercase;
+  padding-bottom:8px;
+  border-bottom:1px solid var(--border-dim);
+  margin-bottom:16px;
+}
+.level-badge {
+  display:inline-flex; align-items:center;
+  padding:2px 10px; border-radius:3px;
+  font-size:11px; font-weight:600;
+  font-family:var(--font-mono,monospace);
+  letter-spacing:.08em; text-transform:uppercase;
+}
+.signal-badge {
+  display:inline-flex; align-items:center; gap:4px;
+  padding:2px 8px; border-radius:3px;
+  font-size:10px; font-weight:700;
+  font-family:var(--font-mono,monospace);
+  letter-spacing:.1em; text-transform:uppercase;
+  border:1px solid;
+}
+.bar-track {
+  height:8px; background:var(--border-dim);
+  border-radius:4px; overflow:hidden;
+}
+.bar-fill {
+  height:100%; border-radius:4px;
+  transition:width .6s cubic-bezier(.25,1,.5,1);
+}
+.status-indicator {
+  display:inline-flex; align-items:center; gap:6px;
+  font-size:11px;
+  font-family:var(--font-mono,monospace);
+  letter-spacing:.06em;
+}
+.status-dot { width:8px; height:8px; border-radius:50%; }
+.live-dot.active {
+  background:var(--positive);
+  box-shadow:0 0 6px var(--positive);
+  animation:pulse-glow 2s ease-in-out infinite;
+}
+.live-dot.inactive { background:var(--text-muted); }
+@keyframes pulse-glow {
+  0%,100% { opacity:1; }
+  50% { opacity:.4; }
+}
+/* Summary cards row */
+.summary-metrics {
+  display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:12px; margin:16px 0;
+}
+@media(max-width:900px) {
+  .summary-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+@media(max-width:500px) {
+  .summary-metrics { grid-template-columns:1fr; }
+}
 """
+
+
+# --- Built Next.js SPA (dashboard-ui/out) + dev CORS --------------------------
+# When dashboard-ui/out/ exists (after `npm run build`), the static export takes
+# over "/" and all asset paths; until then the legacy server-rendered HTML is the
+# fallback. HERMX_DEV_CORS lets the Next dev server (localhost:3001) call /api and
+# /health cross-origin during development.
+STATIC_DIR = REPO_ROOT / "dashboard-ui" / "out"
+DEV_CORS_ENABLED = bool((os.environ.get("HERMX_DEV_CORS") or "").strip())
+DEV_CORS_ORIGIN = "http://localhost:3001"
+STATIC_MIME_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".map": "application/json; charset=utf-8",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+    ".woff2": "font/woff2",
+    ".woff": "font/woff",
+    ".txt": "text/plain; charset=utf-8",
+}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2283,10 +2519,19 @@ class Handler(BaseHTTPRequestHandler):
             return bool(pwd) and hmac.compare_digest(pwd, DASH_AUTH_TOKEN)
         return False
 
+    def _maybe_cors(self):
+        # Dev-only: allow the Next dev server (localhost:3001) to read /api,/health.
+        if not DEV_CORS_ENABLED:
+            return
+        self.send_header("Access-Control-Allow-Origin", DEV_CORS_ORIGIN)
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+
     def _auth_challenge(self):
         body = {"ok": False, "error": "unauthorized"}
         raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.send_response(401)
+        self._maybe_cors()
         # Offer both Basic (browser native prompt) and Bearer (tools/APIs).
         self.send_header("WWW-Authenticate", 'Basic realm="hermx-dashboard"')
         self.send_header("WWW-Authenticate", 'Bearer realm="hermx-dashboard"')
@@ -2297,23 +2542,64 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_bytes(self, status, body, content_type):
         self.send_response(status)
+        self._maybe_cors()
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        # CORS preflight (dev only). 204 No Content with the allow-* headers.
+        self.send_response(204)
+        self._maybe_cors()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _serve_static(self, path):
+        # Serve the built Next.js export from dashboard-ui/out, never escaping it.
+        # Strip the /dashboard basePath prefix (Next builds with basePath=/dashboard).
+        if path.startswith("/dashboard"):
+            path = path[len("/dashboard"):] or "/"
+        out_root = STATIC_DIR.resolve()
+        rel = path.lstrip("/") or "index.html"
+        candidate = (out_root / rel).resolve()
+        # trailingSlash export emits dir/index.html (e.g. /health/ -> health/index.html).
+        if candidate.is_dir():
+            candidate = (candidate / "index.html").resolve()
+        if candidate != out_root and out_root not in candidate.parents:
+            self.send_bytes(404, b"not found", "text/plain")
+            return
+        if not candidate.is_file():
+            self.send_bytes(404, b"not found", "text/plain")
+            return
+        ctype = STATIC_MIME_TYPES.get(candidate.suffix.lower(), "application/octet-stream")
+        body = candidate.read_bytes()
+        # Inject the auth token into index.html so the SPA can read it from a meta
+        # tag instead of baking the secret into the JS bundle at build time.
+        if candidate.name == "index.html" and DASH_AUTH_TOKEN:
+            meta = f'<meta name="hermx-token" content="{DASH_AUTH_TOKEN}">'
+            body = body.replace(b"</head>", meta.encode("utf-8") + b"</head>", 1)
+        self.send_bytes(200, body, ctype)
 
     def do_GET(self):
         path = urlparse(self.path).path
         if path in {"/dashboard", "/dashboard/", "/dashboard/api", "/dashboard/api/", "/", "/shadow/dashboard", "/api", "/shadow/dashboard/api"} and not self._dashboard_auth_ok():
             self._auth_challenge()
             return
-        if path in {"/dashboard", "/dashboard/", "/", "/shadow/dashboard"}:
-            self.send_bytes(200, render().encode("utf-8"), "text/html; charset=utf-8")
-        elif path in {"/dashboard/api", "/dashboard/api/", "/api", "/shadow/dashboard/api"}:
+        static_ready = STATIC_DIR.is_dir()
+        if path in {"/dashboard/api", "/dashboard/api/", "/api", "/shadow/dashboard/api"}:
             payload = api_payload()
             self.send_bytes(200, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
         elif path in {"/health", "/shadow/health"}:
             self.send_bytes(200, json.dumps(health_payload(), ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+        elif static_ready and (path.startswith("/dashboard") or path == "/"):
+            # React SPA (built with basePath=/dashboard) handles /dashboard/* and /.
+            self._serve_static(path)
+        elif path in {"/dashboard", "/dashboard/", "/shadow/dashboard"}:
+            # Fallback: legacy Python HTML when React build not present.
+            self.send_bytes(200, render().encode("utf-8"), "text/html; charset=utf-8")
+        elif path == "/":
+            self.send_bytes(200, render().encode("utf-8"), "text/html; charset=utf-8")
         else:
             self.send_bytes(404, b"not found", "text/plain")
 

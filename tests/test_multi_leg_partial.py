@@ -96,8 +96,8 @@ def test_submit_partial_emits_operator_alert_when_reconcile_enabled(wr, monkeypa
 
     wr.execute_okx_if_enabled(_armed_record(cl))
 
-    alerts = wr.read_jsonl_tolerant(wr.RECONCILE_ALERT_LEDGER)
-    partial = [a for a in alerts if a["detail"].get("stage") == "post_submit_partial"]
+    alerts = wr.read_jsonl_tolerant(wr.ALERTS_LEDGER)
+    partial = [a for a in alerts if a.get("kind") == "reconcile" and a["detail"].get("stage") == "post_submit_partial"]
     assert len(partial) == 1
     assert partial[0]["detail"]["cl_ord_id"] == cl
     assert partial[0]["detail"]["reason"] == "submit_partial"

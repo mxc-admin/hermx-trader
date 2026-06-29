@@ -65,8 +65,16 @@ def test_buy_sell_paper_round_trip(wr, wr_root, seed_paper_state, assert_snapsho
     assert any(a.startswith("OPEN_SHORT") for a in sell_duo["actions"])
     assert sell_duo["realized_pnl_usd"] > 0
 
-    # paper-trades.jsonl recorded exactly the closed long (one per paper account).
-    trades = _read_jsonl(wr_root / "logs" / "paper-trades.jsonl")
+    # pipeline.jsonl (stage="paper_trade") recorded exactly the closed long (one per
+    # paper account). Paper trades were consolidated into the unified pipeline ledger;
+    # strip the transport envelope (ts/stage/signal_id) so the snapshot oracle still
+    # captures the trade math verbatim (golden paper_roundtrip.json stays unchanged).
+    _ENVELOPE = {"ts", "stage", "signal_id"}
+    pipeline = _read_jsonl(wr_root / "logs" / "pipeline.jsonl")
+    trades = [
+        {k: v for k, v in r.items() if k not in _ENVELOPE}
+        for r in pipeline if r.get("stage") == "paper_trade"
+    ]
     duo_trades = [t for t in trades if t["policy"] == "duo_raw"]
     assert len(duo_trades) == 3  # policies / realistic_policies / compound_policies
     for t in duo_trades:

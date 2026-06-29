@@ -210,7 +210,7 @@ def test_unknown_resolver_timeout_pauses_symbol_and_alerts(wr, monkeypatch):
     control = wr.load_control_state()
     assert control["symbol_pauses"]["XRPUSDT"]["paused"] is True
 
-    op_alerts = wr.read_jsonl_tolerant(wr.OPERATOR_ALERT_LEDGER)
+    op_alerts = wr.read_jsonl_tolerant(wr.ALERTS_LEDGER)
     assert any(a["alert"] == wr.RECONCILE_ALERT_RESOLVER_TIMEOUT for a in op_alerts)
 
 
@@ -265,7 +265,7 @@ def test_unknown_backstop_dedupes_pause_and_alerts_across_ticks(wr, monkeypatch)
     assert first["expired"] == 1 and second["expired"] == 1  # still expired each tick
     assert first["paused_symbols"] == ["XRPUSDT"]            # paused on first tick only
     assert second["paused_symbols"] == []                    # deduped on second tick
-    op_alerts = wr.read_jsonl_tolerant(wr.OPERATOR_ALERT_LEDGER)
+    op_alerts = wr.read_jsonl_tolerant(wr.ALERTS_LEDGER)
     timeouts = [a for a in op_alerts if a["alert"] == wr.RECONCILE_ALERT_RESOLVER_TIMEOUT]
     assert len(timeouts) == 1  # exactly one timeout alert despite two expired ticks
 
@@ -315,7 +315,7 @@ def test_planned_orphan_rejected_never_submitted_when_venue_absent(wr, monkeypat
     assert records[-1]["detail"]["reason"] == "never_submitted"
     assert wr.load_open_orders() == []  # no longer an orphan
 
-    op_alerts = wr.read_jsonl_tolerant(wr.OPERATOR_ALERT_LEDGER)
+    op_alerts = wr.read_jsonl_tolerant(wr.ALERTS_LEDGER)
     assert any(a["alert"] == wr.RECONCILE_ALERT_PLANNED_ABANDONED for a in op_alerts)
 
 
@@ -362,7 +362,7 @@ def test_planned_orphan_found_on_venue_promoted_not_rejected(wr, monkeypatch):
     states = [r["state"] for r in records if r["cl_ord_id"] == cl]
     assert states == [wr.ORDER_STATE_PLANNED, wr.ORDER_STATE_SUBMITTED]
     assert wr.ORDER_STATE_REJECTED not in states
-    op_alerts = wr.read_jsonl_tolerant(wr.OPERATOR_ALERT_LEDGER)
+    op_alerts = wr.read_jsonl_tolerant(wr.ALERTS_LEDGER)
     assert any(a["alert"] == wr.RECONCILE_ALERT_PLANNED_ON_VENUE for a in op_alerts)
 
 
@@ -385,7 +385,7 @@ def test_queue_and_auth_alert_transport(wr, monkeypatch):
     assert wr.maybe_emit_queue_saturation_alert(3) is True
     wr.emit_auth_failure_alert("/webhook", "127.0.0.1")
 
-    alerts = wr.read_jsonl_tolerant(wr.OPERATOR_ALERT_LEDGER)
+    alerts = wr.read_jsonl_tolerant(wr.ALERTS_LEDGER)
     kinds = [a["alert"] for a in alerts]
     assert wr.ALERT_QUEUE_SATURATION in kinds
     assert wr.ALERT_AUTH_FAILURE in kinds

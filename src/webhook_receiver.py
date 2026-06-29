@@ -102,13 +102,19 @@ LOG_DIR = ROOT / "logs"
 # deploys keep writing the four JSON files alongside the repo (unchanged).
 DATA_DIR = Path(os.environ.get("HERMX_DATA_DIR", ROOT))
 LATEST_FILE = DATA_DIR / "latest.json"
-WEBHOOK_LEDGER = LOG_DIR / "shadow-webhooks.jsonl"
-RAW_INTAKE_LEDGER = LOG_DIR / "shadow-intake.jsonl"
-DECISION_LEDGER = LOG_DIR / "shadow-decisions.jsonl"
+# --- Consolidated JSONL ledgers ------------------------------------------------
+# raw-webhooks.jsonl  -- every inbound webhook, tagged with a ``phase`` field via
+#   record_raw_webhook(): "intake" = raw HTTP receipt, "webhook" = post-normalization
+#   outcome. Merges the former shadow-intake.jsonl + shadow-webhooks.jsonl.
+# pipeline.jsonl      -- every signal-processing event, tagged with a ``stage`` field
+#   via record_pipeline_event(). Merges shadow-decisions, strategy-alerts,
+#   strategy-alert-quarantine, shadow-duplicates, advisor-decisions, paper-trades,
+#   executions, and shadow-processing-errors.
+# Both are size-rotated (see _rotate_ledger_if_large / HERMX_LEDGER_ROTATE_MAX_BYTES).
+RAW_WEBHOOK_LEDGER = LOG_DIR / "raw-webhooks.jsonl"
+PIPELINE_LEDGER = LOG_DIR / "pipeline.jsonl"
 PAPER_STATE_FILE = DATA_DIR / "paper-state.json"
 CONTROL_STATE_FILE = DATA_DIR / "control-state.json"
-PAPER_TRADES_LEDGER = LOG_DIR / "paper-trades.jsonl"
-PROCESSING_ERROR_LEDGER = LOG_DIR / "shadow-processing-errors.jsonl"
 # Phase 1 task 1/2 (REFACTOR_PLAN.md:202-206): durable, append-only position
 # journal. Every paper-state transition is journaled (write-ahead, fsync'd) and,
 # under the "journal" backend, in-memory state is *derived* by replaying it so a
@@ -137,10 +143,13 @@ HERMX_STATE_BACKEND = (os.environ.get("HERMX_STATE_BACKEND") or "legacy").strip(
 # from a newer writer, otherwise it is discarded and we fall back to full replay.
 POSITION_JOURNAL_CHECKPOINT_FILE = LOG_DIR / "position-journal.checkpoint.json"
 POSITION_JOURNAL_CHECKPOINT_VERSION = 1
-# Operator-visible alert transport for fail-closed state-write errors (:221). A
-# journal append or checkpoint write that fails (e.g. ENOSPC) surfaces here AND
-# re-raises so the money path is blocked rather than proceeding on lost state.
-STATE_ALERT_LEDGER = LOG_DIR / "state-alerts.jsonl"
+# Unified operator/reconcile/state alert ledger. Every alert row carries a ``kind``
+# field ("operator", "reconcile", or "state") so the dashboard and operators can
+# filter; this merges the former operator-alerts.jsonl, reconcile-alerts.jsonl, and
+# state-alerts.jsonl. Fail-closed state-write errors (:221 -- a journal/checkpoint
+# write that fails, e.g. ENOSPC) surface here as kind="state" AND re-raise so the
+# money path is blocked rather than proceeding on lost state.
+ALERTS_LEDGER = LOG_DIR / "alerts.jsonl"
 # Rotate the live journal segment into a sealed file once it reaches this many
 # records, AFTER writing a verified checkpoint that subsumes them. Module constant
 # (env-overridable) so a test can force a checkpoint+rotation without writing
@@ -150,12 +159,21 @@ HERMX_JOURNAL_SEGMENT_MAX_RECORDS = int(os.environ.get("HERMX_JOURNAL_SEGMENT_MA
 # checkpoint already subsumes every sealed segment (older sealed files are
 # replay-unnecessary), so they are pruned beyond K. Set < 0 to keep all.
 HERMX_JOURNAL_SEGMENT_RETENTION = int(os.environ.get("HERMX_JOURNAL_SEGMENT_RETENTION", "5") or "5")
-# Generic, exchange-agnostic execution ledgers. The legacy OKX-named mirror files
-# (okx-execution-plan.jsonl / okx-executions.jsonl) are no longer written: nothing wrote
-# them post-CCXT-cutover and the fallback was removed. The dashboard now reads only the
-# canonical execution ledger below.
-EXECUTION_PLAN_LEDGER = LOG_DIR / "execution-plan.jsonl"
-EXECUTION_LEDGER = LOG_DIR / "executions.jsonl"
+# Size-based rotation for the high-volume consolidated ledgers (pipeline.jsonl,
+# raw-webhooks.jsonl). Unlike the position/order journals -- which rotate by record
+# count behind a verified checkpoint -- these are append-only forensic logs with no
+# checkpoint, so once the live file exceeds HERMX_LEDGER_ROTATE_MAX_BYTES it is sealed
+# to ``<name>.<n>.jsonl`` (monotonic n) and a fresh live file is started. The last
+# HERMX_LEDGER_ROTATE_RETENTION sealed segments are kept; older ones are pruned
+# (set < 0 to keep all). Default 64 MiB keeps the bounded reverse-tail dashboard
+# reads cheap while retaining ample history.
+HERMX_LEDGER_ROTATE_MAX_BYTES = int(os.environ.get("HERMX_LEDGER_ROTATE_MAX_BYTES", str(64 * 1024 * 1024)) or str(64 * 1024 * 1024))
+HERMX_LEDGER_ROTATE_RETENTION = int(os.environ.get("HERMX_LEDGER_ROTATE_RETENTION", "5") or "5")
+# Execution outcomes are now recorded to the unified PIPELINE_LEDGER under
+# stage="execution" (record_pipeline_event). The separate execution-plan.jsonl and
+# executions.jsonl ledgers were retired in the JSONL ledger consolidation: the dead
+# execution-plan write was already gone, and the executions outcome ledger folded
+# into pipeline.jsonl. The dashboard reads the "execution" stage of pipeline.jsonl.
 # Submission-outcome state machine + write-ahead order journal (REFACTOR_PLAN.md:204,
 # :216 -- Phase 1 task 5). Append-only, durable (fsync) log of the lifecycle
 # PLANNED -> SUBMITTED -> (FILLED | REJECTED | UNKNOWN). The PLANNED/SUBMITTED records
@@ -212,12 +230,11 @@ ORDER_NON_TERMINAL_STATES = frozenset({ORDER_STATE_PLANNED, ORDER_STATE_SUBMITTE
 # (UNKNOWN_RESOLVER_TIMEOUT, severity=error) and its symbol is PAUSED. It is NEVER
 # auto-closed -- ambiguity is not proof of any outcome. Alerts/pauses are deduped per
 # (symbol, cl_ord_id, state) so a single stuck order does not re-fire every tick.
-# RUNBOOK on a symbol pause: (1) inspect reconcile-alerts.jsonl + operator-alerts.jsonl
+# RUNBOOK on a symbol pause: (1) inspect alerts.jsonl (kind in {reconcile, operator})
 # for the cl_ord_id; (2) confirm the true order/position state on the venue UI/API;
 # (3) reconcile the order journal to that truth; (4) clear the pause via the control
 # state (symbol_pauses) once the symbol is safe to trade again. A paused symbol hard-
 # blocks submission (symbol_pause_info gate in ExecutionService.execute).
-RECONCILE_ALERT_LEDGER = LOG_DIR / "reconcile-alerts.jsonl"
 RECONCILE_ALERT_MISMATCH = "RECONCILE_MISMATCH"
 RECONCILE_ALERT_RESOLVER_TIMEOUT = "UNKNOWN_RESOLVER_TIMEOUT"
 # A PLANNED order that crashed before submission (never advanced to SUBMITTED) was, by
@@ -226,9 +243,9 @@ RECONCILE_ALERT_PLANNED_ABANDONED = "PLANNED_ORDER_ABANDONED"
 # Anomaly: a PLANNED orphan that the venue unexpectedly DOES know about (should not
 # happen given write-ahead) -- promoted to SUBMITTED for normal reconciliation, alerted.
 RECONCILE_ALERT_PLANNED_ON_VENUE = "PLANNED_ORDER_ON_VENUE"
-# Concrete operator transport (Task 6): alerts are mirrored to a dedicated ledger
-# and optionally POSTed to an external webhook (HERMX_ALERT_WEBHOOK_URL).
-OPERATOR_ALERT_LEDGER = LOG_DIR / "operator-alerts.jsonl"
+# Concrete operator transport (Task 6): alerts are mirrored to the unified
+# ALERTS_LEDGER (kind="operator") and optionally POSTed to an external webhook
+# (HERMX_ALERT_WEBHOOK_URL).
 ALERT_AUTH_FAILURE = "AUTH_FAILURE"
 ALERT_QUEUE_SATURATION = "QUEUE_SATURATION"
 # Bounded exponential backoff (:213): max 5 attempts, 500ms base, ~8s cap, <=~20s wall.
@@ -258,9 +275,14 @@ _PRESENT_ORDER_STATES = frozenset({"live", "partially_filled", "filled", "cancel
 # only set/logged -- it never hard-blocks the disabled/observe-only path.
 RECONCILE_STARTUP_COMPLETE = False
 RECONCILE_STARTUP_AT: "str | None" = None
-SIGNAL_STATE_FILE = DATA_DIR / "seen-signals.json"
-SIGNAL_DEDUPE_LEDGER = LOG_DIR / "seen-signals.jsonl"
-DUPLICATE_LEDGER = LOG_DIR / "shadow-duplicates.jsonl"
+# signals.jsonl is the SINGLE dedup authority (JSONL ledger consolidation): the
+# in-memory dedupe index (_SIGNAL_DEDUPE_INDEX) is rebuilt from it on first use and
+# every newly-seen signal is appended to it. The former seen-signals.json snapshot
+# (a redundant second authority) was removed.
+SIGNALS_LEDGER = LOG_DIR / "signals.jsonl"
+# tab-health.jsonl is written by the EXTERNAL mxc-tab-health service, not by this
+# process; it is read-only here (latest_tab_health). It is deliberately NOT folded
+# into pipeline.jsonl -- doing so would break that out-of-process producer contract.
 TAB_HEALTH_LEDGER = LOG_DIR / "tab-health.jsonl"
 CONFIG_FILE = ROOT / "shadow-config.json"
 
@@ -363,9 +385,8 @@ HERMX_ADVISOR_COMMAND = (os.environ.get("HERMX_ADVISOR_COMMAND") or str(_ADVISOR
 HERMX_ADVISOR_SKILLS = (os.environ.get("HERMX_ADVISOR_SKILLS") or str(_ADVISOR_CFG.get("skills") or "hermx-control")).strip()
 HERMX_ADVISOR_MODEL = (os.environ.get("HERMX_ADVISOR_MODEL") or str(_ADVISOR_CFG.get("model") or "")).strip()
 HERMX_ADVISOR_TIMEOUT_SECONDS = float(os.environ.get("HERMX_ADVISOR_TIMEOUT_SECONDS") or _ADVISOR_CFG.get("timeout_seconds") or 30.0)
-ADVISOR_LEDGER = LOG_DIR / "advisor-decisions.jsonl"
-STRATEGY_ALERT_LEDGER = LOG_DIR / "strategy-alerts.jsonl"
-STRATEGY_QUARANTINE_LEDGER = LOG_DIR / "strategy-alert-quarantine.jsonl"
+# advisor-decisions, strategy-alerts, and strategy-alert-quarantine were folded into
+# the unified PIPELINE_LEDGER (stages "advisor", "strategy_match", "quarantine").
 # Phase 6 / M2 (REFACTOR_PLAN.md): explicit alert-schema enforcement at intake.
 # The JSON schema lives in the source repo (NOT under SHADOW_ROOT, which tests
 # redirect to a temp dir), so resolve it relative to this file's repo root.
@@ -826,7 +847,7 @@ def _load_signal_dedupe_index(now_seconds: float | None = None) -> None:
     cutoff = now - _dedupe_window_seconds()
     signals: dict[str, dict] = {}
     keys: dict[str, dict] = {}
-    for rec in read_jsonl_tolerant(SIGNAL_DEDUPE_LEDGER):
+    for rec in read_jsonl_tolerant(SIGNALS_LEDGER):
         if not isinstance(rec, dict):
             continue
         first_seen_at = str(rec.get("first_seen_at") or rec.get("ts") or "")
@@ -852,36 +873,6 @@ def _load_signal_dedupe_index(now_seconds: float | None = None) -> None:
     _SIGNAL_DEDUPE_INDEX["signals"] = signals
     _SIGNAL_DEDUPE_INDEX["keys"] = keys
     _SIGNAL_DEDUPE_INDEX["loaded"] = True
-
-
-def load_signal_state() -> dict:
-    if not SIGNAL_STATE_FILE.exists():
-        return {"version": 1, "signals": {}, "keys": {}}
-    try:
-        state = json.loads(SIGNAL_STATE_FILE.read_text(encoding="utf-8"))
-        state.setdefault("signals", {})
-        state.setdefault("keys", {})
-        return state
-    except Exception:
-        return {"version": 1, "signals": {}, "keys": {}}
-
-
-def save_signal_state(state: dict) -> None:
-    with _SIGNAL_DEDUPE_LOCK:
-        fd, tmp_path = tempfile.mkstemp(prefix=f"{SIGNAL_STATE_FILE.name}.", suffix=".tmp", dir=str(SIGNAL_STATE_FILE.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps(state, indent=2, ensure_ascii=False))
-                f.flush()
-                os.fsync(f.fileno())
-            Path(tmp_path).replace(SIGNAL_STATE_FILE)
-            _fsync_dir(SIGNAL_STATE_FILE.parent)
-        finally:
-            if os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
 
 
 def check_and_mark_signal(normalized: dict, received_at: str) -> tuple[bool, dict]:
@@ -931,7 +922,7 @@ def check_and_mark_signal(normalized: dict, received_at: str) -> tuple[bool, dic
             signals[sid] = entry
         keys[key] = entry
         append_jsonl(
-            SIGNAL_DEDUPE_LEDGER,
+            SIGNALS_LEDGER,
             {
                 "ts": received_at,
                 "kind": "signal_dedupe",
@@ -967,6 +958,112 @@ def append_jsonl(path: Path, obj: dict) -> None:
 def append_jsonl_durable(path: Path, obj: dict) -> None:
     """Compatibility alias for durable JSONL appends."""
     append_jsonl(path, obj)
+
+
+# --- Consolidated-ledger writers + size rotation ------------------------------
+# Valid ``stage`` values for record_pipeline_event(). Every signal-processing event
+# is one row in pipeline.jsonl tagged with one of these stages; the dashboard filters
+# by stage. ("tab_health" is reserved -- tab-health.jsonl is produced out-of-process
+# and is NOT written here; see TAB_HEALTH_LEDGER. "intake" mirrors the raw-webhook
+# phase for callers that want a pipeline-side marker.)
+PIPELINE_STAGES = frozenset({
+    "intake", "dedup_reject", "strategy_match", "quarantine", "decision",
+    "advisor", "paper_trade", "execution", "error", "tab_health",
+})
+# Valid ``phase`` values for record_raw_webhook() (raw-webhooks.jsonl).
+RAW_WEBHOOK_PHASES = frozenset({"intake", "webhook"})
+
+
+def _next_sealed_ledger_index(path: Path) -> int:
+    """Next monotonic seal index for ``<stem>.<n>.jsonl`` sealed segments of *path*."""
+    stem, suffix = path.stem, path.suffix
+    max_n = -1
+    for p in path.parent.glob(f"{stem}.*{suffix}"):
+        mid = p.name[len(stem) + 1 : len(p.name) - len(suffix)]
+        if mid.isdigit():
+            max_n = max(max_n, int(mid))
+    return max_n + 1
+
+
+def _prune_sealed_ledgers(path: Path, retention: int) -> None:
+    """Keep the last ``retention`` sealed ``<stem>.<n>.jsonl`` segments (retention < 0
+    keeps all; retention == 0 prunes all)."""
+    if retention < 0:
+        return
+    stem, suffix = path.stem, path.suffix
+    sealed: list[tuple[int, Path]] = []
+    for p in path.parent.glob(f"{stem}.*{suffix}"):
+        mid = p.name[len(stem) + 1 : len(p.name) - len(suffix)]
+        if mid.isdigit():
+            sealed.append((int(mid), p))
+    sealed.sort()
+    doomed = sealed if retention == 0 else sealed[:-retention]
+    for _n, p in doomed:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+def _rotate_ledger_if_large(path: Path, max_bytes: int | None = None, retention: int | None = None) -> None:
+    """Size-based rotation for the append-only consolidated ledgers. Once *path* is at
+    or above ``max_bytes`` it is sealed to ``<stem>.<n>.jsonl`` and a fresh live file is
+    started by the next append. Best-effort: any failure leaves the live file in place
+    (never loses data) and only logs."""
+    max_bytes = HERMX_LEDGER_ROTATE_MAX_BYTES if max_bytes is None else max_bytes
+    retention = HERMX_LEDGER_ROTATE_RETENTION if retention is None else retention
+    if max_bytes <= 0:
+        return
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size < max_bytes:
+        return
+    sealed = path.parent / f"{path.stem}.{_next_sealed_ledger_index(path)}{path.suffix}"
+    try:
+        os.replace(path, sealed)
+    except OSError as exc:
+        logging.warning("ledger rotation failed for %s: %s", path, exc)
+        return
+    _prune_sealed_ledgers(path, retention)
+
+
+def _signal_id_of(record: dict | None) -> str | None:
+    """Best-effort signal-id correlation key from a processing record."""
+    norm = (record or {}).get("normalized") or {}
+    return norm.get("signal_id") or None
+
+
+def record_pipeline_event(stage: str, signal_id: str | None, payload: dict | None = None, *, durable: bool = False) -> None:
+    """Append one signal-processing event to the unified pipeline ledger.
+
+    Every event is ``{ts, stage, signal_id, **payload}``. ``stage`` identifies the
+    pipeline phase (see PIPELINE_STAGES); the dashboard filters by it. ``payload`` is
+    spread at top level so the existing row shapes (full decision/strategy records,
+    execution outcomes, trades, advisor decisions, errors) are preserved verbatim --
+    only ``stage``/``signal_id``/``ts`` are stamped on top. The rotation check runs
+    after the durable append so a write is never lost to rotation."""
+    if stage not in PIPELINE_STAGES:  # pragma: no cover - guard against typos
+        logging.warning("record_pipeline_event: unknown stage %r", stage)
+    record = {"ts": now_iso(), "stage": stage, "signal_id": signal_id or None}
+    if payload:
+        for key, value in payload.items():
+            if key not in ("ts", "stage", "signal_id"):
+                record[key] = value
+    (append_jsonl_durable if durable else append_jsonl)(PIPELINE_LEDGER, record)
+    _rotate_ledger_if_large(PIPELINE_LEDGER)
+
+
+def record_raw_webhook(phase: str, payload: dict) -> None:
+    """Append one inbound-webhook row to the unified raw-webhooks ledger, tagged with a
+    ``phase`` field ("intake" = raw HTTP receipt; "webhook" = post-normalization)."""
+    if phase not in RAW_WEBHOOK_PHASES:  # pragma: no cover - guard against typos
+        logging.warning("record_raw_webhook: unknown phase %r", phase)
+    record = {"phase": phase}
+    record.update(payload or {})
+    append_jsonl(RAW_WEBHOOK_LEDGER, record)
+    _rotate_ledger_if_large(RAW_WEBHOOK_LEDGER)
 
 
 def read_jsonl_tolerant(path: Path) -> list[dict]:
@@ -1012,22 +1109,13 @@ def startup_quarantine_partial_ledgers(paths: "list[Path] | tuple[Path, ...] | N
     quarantined into ``*.corrupt`` sidecars instead of blowing up readers.
     """
     scan_paths = list(paths) if paths is not None else [
-        RAW_INTAKE_LEDGER,
-        WEBHOOK_LEDGER,
-        DECISION_LEDGER,
-        PAPER_TRADES_LEDGER,
-        EXECUTION_PLAN_LEDGER,
-        EXECUTION_LEDGER,
+        RAW_WEBHOOK_LEDGER,
+        PIPELINE_LEDGER,
         POSITION_JOURNAL_LEDGER,
         ORDER_JOURNAL_LEDGER,
-        RECONCILE_ALERT_LEDGER,
-        STATE_ALERT_LEDGER,
-        DUPLICATE_LEDGER,
+        ALERTS_LEDGER,
+        SIGNALS_LEDGER,
         TAB_HEALTH_LEDGER,
-        STRATEGY_ALERT_LEDGER,
-        STRATEGY_QUARANTINE_LEDGER,
-        OPERATOR_ALERT_LEDGER,
-        PROCESSING_ERROR_LEDGER,
     ]
     summary = {"checked": 0, "quarantined": [], "errors": []}
     for path in scan_paths:
@@ -2096,7 +2184,7 @@ def _fail_closed_state_write(operation: str, exc: Exception, context: dict | Non
     not the alert — is the real fail-closed guarantee."""
     logging.error("STATE WRITE FAILED (%s) -- FAILING CLOSED, submission blocked: %s", operation, exc)
     try:
-        append_jsonl(STATE_ALERT_LEDGER, {"ts": now_iso(), "alert": "STATE_WRITE_FAILED", "operation": operation, "error": str(exc), "context": context or {}})
+        append_jsonl(ALERTS_LEDGER, {"ts": now_iso(), "kind": "state", "alert": "STATE_WRITE_FAILED", "operation": operation, "error": str(exc), "context": context or {}})
     except Exception:
         pass
 
@@ -2414,8 +2502,8 @@ def paper_apply_policy(state: dict, normalized: dict, payload: dict, policy_key:
             "liquidity": liquidity,
             "exit_signal_side": normalized["side"],
         }
-        append_jsonl(PAPER_TRADES_LEDGER, trade)
-        # The PAPER_TRADES_LEDGER append above is an OUTPUT ledger, not state, so it
+        record_pipeline_event("paper_trade", normalized.get("signal_id"), trade)
+        # The paper_trade pipeline append above is an OUTPUT ledger, not state, so it
         # stays in the live path and is NOT replayed. State changes below go through
         # the effect/apply_effect path. Compute the post-close equity here (reusing
         # the numbers above) so apply_effect just assigns it.
@@ -2593,10 +2681,9 @@ def build_okx_execution_readiness(record: dict, paper_events: list[dict]) -> dic
         },
         "block_reason": None if live_allowed else "OKX execution disabled: dry-run shadow only",
     }
-    # EXECUTION_PLAN_LEDGER (execution-plan.jsonl) write removed: the dashboard reads the
-    # authoritative executions.jsonl outcome ledger, nothing consumes the separate plan
-    # ledger. The constant is retained (quarantine sweep + the ledger-constant guard) but
-    # is no longer written.
+    # The separate execution-plan.jsonl ledger was removed entirely (constant + sweep
+    # entry): nothing consumed it. The authoritative submission outcome is recorded to
+    # pipeline.jsonl (stage="execution"), which the dashboard reads.
     return plan
 
 
@@ -2686,10 +2773,9 @@ def build_strategy_execution_readiness(record: dict) -> dict:
         },
         "block_reason": None if live_allowed else "Duo Base Dev strategy trial is not approved for OKX submission",
     }
-    # EXECUTION_PLAN_LEDGER (execution-plan.jsonl) write removed: the dashboard reads the
-    # authoritative executions.jsonl outcome ledger, nothing consumes the separate plan
-    # ledger. The constant is retained (quarantine sweep + the ledger-constant guard) but
-    # is no longer written.
+    # The separate execution-plan.jsonl ledger was removed entirely (constant + sweep
+    # entry): nothing consumed it. The authoritative submission outcome is recorded to
+    # pipeline.jsonl (stage="execution"), which the dashboard reads.
     return plan
 
 
@@ -3307,12 +3393,13 @@ def emit_operator_alert(kind: str, detail: "dict | None" = None, *, severity: st
     webhook POST configured by HERMX_ALERT_WEBHOOK_URL."""
     record = {
         "ts": now_iso(),
+        "kind": "operator",
         "alert": kind,
         "severity": severity,
         "detail": detail or {},
     }
     try:
-        append_jsonl(OPERATOR_ALERT_LEDGER, record)
+        append_jsonl(ALERTS_LEDGER, record)
     except OSError as exc:
         logging.error("failed to write operator alert %s: %s", kind, exc)
 
@@ -3357,10 +3444,11 @@ def maybe_emit_queue_saturation_alert(queue_depth: int) -> bool:
 
 
 def emit_reconcile_alert(kind: str, detail: dict) -> dict:
-    """Compatibility ledger for reconciliation alerts + Task 6 operator transport."""
-    record = {"ts": now_iso(), "alert": kind, "detail": detail or {}}
+    """Reconcile alert row in the unified ledger (kind="reconcile") + Task 6 operator
+    transport (emit_operator_alert writes a paired kind="operator" row)."""
+    record = {"ts": now_iso(), "kind": "reconcile", "alert": kind, "detail": detail or {}}
     try:
-        append_jsonl(RECONCILE_ALERT_LEDGER, record)
+        append_jsonl(ALERTS_LEDGER, record)
     except OSError as exc:
         logging.error("failed to write reconcile alert %s: %s", kind, exc)
     emit_operator_alert(kind, detail or {}, severity="warning")
@@ -3843,6 +3931,14 @@ def unknown_resolver_loop(stop_event: "threading.Event | None" = None, sleep=tim
             sleep(interval)
 
 
+def _record_execution_outcome(_ledger, row: dict) -> None:
+    """ExecutionService hook adapter. The service performs exactly one ledger write --
+    ``append_jsonl(execution_ledger, {received_at, okx_execution})`` -- which we route
+    into the unified pipeline ledger as stage="execution". The ``_ledger`` handle is
+    accepted for the legacy hook signature and ignored."""
+    record_pipeline_event("execution", None, row)
+
+
 def _execute_okx_via_service(record: dict) -> dict:
     service = ExecutionService(
         config=CONFIG,
@@ -3850,8 +3946,8 @@ def _execute_okx_via_service(record: dict) -> dict:
         executor_factory=ExecutorFactory,
         submit_timeout_seconds=HERMX_SUBMIT_TIMEOUT_SECONDS,
         hooks={
-            "append_jsonl": append_jsonl,
-            "execution_ledger": EXECUTION_LEDGER,
+            "append_jsonl": _record_execution_outcome,
+            "execution_ledger": PIPELINE_LEDGER,
             "webhook_auth_config_healthy": webhook_auth_config_healthy,
             "watchdog_submission_state": _watchdog_submission_state,
             "live_trading_enabled": live_trading_enabled,
@@ -3904,7 +4000,7 @@ def _execute_okx_authoritative(record: dict) -> dict:
             "mode": "not_submitted",
             "reason": "execution_unavailable",
         }
-        append_jsonl(EXECUTION_LEDGER, {"received_at": record.get("received_at"), "okx_execution": result})
+        record_pipeline_event("execution", _signal_id_of(record), {"received_at": record.get("received_at"), "okx_execution": result})
         return result
     return _execute_okx_via_service(record)
 
@@ -4040,7 +4136,7 @@ def run_execution_advisor(record: dict) -> "dict | None":
         logging.warning("execution advisor failed open (proceeding): %s", exc)
     decision["latency_ms"] = round((time.monotonic() - started) * 1000.0, 1)
     try:
-        append_jsonl(ADVISOR_LEDGER, {"received_at": record.get("received_at"), "advisor": decision, "snapshot": _advisor_state_snapshot(record)})
+        record_pipeline_event("advisor", _signal_id_of(record), {"received_at": record.get("received_at"), "advisor": decision, "snapshot": _advisor_state_snapshot(record)})
     except Exception as exc:  # advisory logging must never block execution
         logging.warning("advisor ledger append failed: %s", exc)
     return decision
@@ -4060,7 +4156,7 @@ def execute_okx_with_advisor(record: dict) -> dict:
                 "reason": "vetoed_by_advisor",
                 "advisor": {"risk_note": decision.get("risk_note"), "score": decision.get("score")},
             }
-            append_jsonl(EXECUTION_LEDGER, {"received_at": record.get("received_at"), "okx_execution": result})
+            record_pipeline_event("execution", _signal_id_of(record), {"received_at": record.get("received_at"), "okx_execution": result})
             return result
     return execute_okx_if_enabled(record)
 
@@ -4105,8 +4201,8 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
                 "normalized": normalized,
                 "strategy_config": None,
             }
-            append_jsonl(STRATEGY_QUARANTINE_LEDGER, record)
-            append_jsonl(WEBHOOK_LEDGER, {"received_at": received_at, "payload": payload, "normalized": normalized, "quarantined": True, "reason": reason})
+            record_pipeline_event("quarantine", normalized.get("signal_id"), record)
+            record_raw_webhook("webhook", {"received_at": received_at, "payload": payload, "normalized": normalized, "quarantined": True, "reason": reason})
             return 202, record
         logging.warning("alert schema invalid (observe-only, processing anyway): %s", schema_error)
 
@@ -4122,8 +4218,8 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
             "normalized": normalized,
             "strategy_config": strategy_config,
         }
-        append_jsonl(STRATEGY_QUARANTINE_LEDGER, record)
-        append_jsonl(WEBHOOK_LEDGER, {"received_at": received_at, "payload": payload, "normalized": normalized, "quarantined": True, "reason": strategy_error})
+        record_pipeline_event("quarantine", normalized.get("signal_id"), record)
+        record_raw_webhook("webhook", {"received_at": received_at, "payload": payload, "normalized": normalized, "quarantined": True, "reason": strategy_error})
         return 202, record
     if strategy_config is None and normalized["symbol"] not in ALLOWED_SYMBOLS:
         return 400, {"ok": False, "error": "symbol_not_allowed", "normalized": normalized}
@@ -4143,10 +4239,10 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
             "normalized": normalized,
             "strategy_config": strategy_config,
         }
-        append_jsonl(WEBHOOK_LEDGER, {"received_at": received_at, "payload": payload, "normalized": normalized, "duplicate": True})
-        append_jsonl(DUPLICATE_LEDGER, record)
+        record_raw_webhook("webhook", {"received_at": received_at, "payload": payload, "normalized": normalized, "duplicate": True})
+        record_pipeline_event("dedup_reject", normalized.get("signal_id"), record)
         if strategy_config:
-            append_jsonl(STRATEGY_ALERT_LEDGER, record)
+            record_pipeline_event("strategy_match", normalized.get("signal_id"), record)
         return 200, record
 
     if strategy_config is not None:
@@ -4199,9 +4295,9 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
         }
         record["execution_readiness"] = build_strategy_execution_readiness(record)
         record["okx_execution"] = execute_okx_with_advisor(record)
-        append_jsonl(WEBHOOK_LEDGER, {"received_at": record["received_at"], "payload": payload, "normalized": normalized, "strategy_id": normalized.get("strategy_id")})
-        append_jsonl(STRATEGY_ALERT_LEDGER, record)
-        append_jsonl(DECISION_LEDGER, record)
+        record_raw_webhook("webhook", {"received_at": record["received_at"], "payload": payload, "normalized": normalized, "strategy_id": normalized.get("strategy_id")})
+        record_pipeline_event("strategy_match", normalized.get("signal_id"), record)
+        record_pipeline_event("decision", normalized.get("signal_id"), record)
         LATEST_FILE.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
         return 200, record
 
@@ -4256,8 +4352,8 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
     record["paper_events"] = paper_events
     record["execution_readiness"] = build_okx_execution_readiness(record, paper_events)
     record["okx_execution"] = execute_okx_if_enabled(record)
-    append_jsonl(WEBHOOK_LEDGER, {"received_at": record["received_at"], "payload": payload, "normalized": normalized})
-    append_jsonl(DECISION_LEDGER, record)
+    record_raw_webhook("webhook", {"received_at": record["received_at"], "payload": payload, "normalized": normalized})
+    record_pipeline_event("decision", normalized.get("signal_id"), record)
     LATEST_FILE.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
     return 200, record
 
@@ -4266,7 +4362,7 @@ def process_payload_async(payload: dict, intake_received_at: str) -> None:
     try:
         status, record = build_record(payload, intake_received_at)
         if status >= 400:
-            append_jsonl(PROCESSING_ERROR_LEDGER, {"received_at": intake_received_at, "status": status, "record": record})
+            record_pipeline_event("error", _signal_id_of(record), {"received_at": intake_received_at, "status": status, "record": record})
             logging.warning("Shadow async processing rejected status=%s error=%s", status, record.get("error"))
         else:
             normalized = record.get("normalized") or {}
@@ -4278,7 +4374,7 @@ def process_payload_async(payload: dict, intake_received_at: str) -> None:
                 status,
             )
     except Exception as exc:
-        append_jsonl(PROCESSING_ERROR_LEDGER, {"received_at": intake_received_at, "error": str(exc), "payload": payload})
+        record_pipeline_event("error", None, {"received_at": intake_received_at, "error": str(exc), "payload": payload})
         logging.exception("Shadow async processing failed")
 
 
@@ -4372,7 +4468,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {"ok": False, "error": "invalid_json", "detail": str(exc)})
             return
         intake_received_at = now_iso()
-        append_jsonl(RAW_INTAKE_LEDGER, {"received_at": intake_received_at, "payload": payload, "path": parsed.path})
+        record_raw_webhook("intake", {"received_at": intake_received_at, "payload": payload, "path": parsed.path})
         try:
             PROCESS_QUEUE.put_nowait(_queue_work_item(payload, intake_received_at))
         except queue.Full:

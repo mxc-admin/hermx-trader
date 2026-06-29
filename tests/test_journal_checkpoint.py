@@ -193,7 +193,7 @@ def test_disk_full_journal_append_fails_closed(reload_wr, tmp_path, monkeypatch)
         wr.build_record(_payload("buy", 0), "2026-07-01T00:00:01Z")
 
     # Operator-visible alert emitted...
-    alerts = wr.read_jsonl_tolerant(wr.STATE_ALERT_LEDGER)
+    alerts = [a for a in wr.read_jsonl_tolerant(wr.ALERTS_LEDGER) if a.get("kind") == "state"]
     assert any(a.get("alert") == "STATE_WRITE_FAILED" and a.get("operation") == "journal-append" for a in alerts)
     # ...and submission never ran: build_record aborted before execute / LATEST_FILE.
     assert not (root / "latest.json").exists()
@@ -220,7 +220,7 @@ def test_disk_full_checkpoint_fails_closed(reload_wr, tmp_path, monkeypatch):
     assert not wr.POSITION_JOURNAL_CHECKPOINT_FILE.exists()
     assert wr._sealed_segment_paths() == []
     assert wr.replay_position_journal() == state
-    alerts = wr.read_jsonl_tolerant(wr.STATE_ALERT_LEDGER)
+    alerts = [a for a in wr.read_jsonl_tolerant(wr.ALERTS_LEDGER) if a.get("kind") == "state"]
     assert any(a.get("alert") == "STATE_WRITE_FAILED" and a.get("operation") == "checkpoint-rotate" for a in alerts)
 
 

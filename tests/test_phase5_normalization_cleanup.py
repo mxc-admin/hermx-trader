@@ -94,8 +94,12 @@ def test_legacy_okx_ledger_constants_removed(wr):
 def test_dashboard_reads_canonical_executions_ledger(monkeypatch, tmp_path):
     logs = tmp_path / "logs"
     logs.mkdir()
-    (logs / "executions.jsonl").write_text(
+    # Execution outcomes live in the unified pipeline ledger under stage="execution".
+    (logs / "pipeline.jsonl").write_text(
         json.dumps({
+            "ts": "2026-06-28T00:00:00Z",
+            "stage": "execution",
+            "signal_id": None,
             "received_at": "2026-06-28T00:00:00Z",
             "okx_execution": {"mode": "submit_enabled", "ok": True, "payload": {}},
         }) + "\n",

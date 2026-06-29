@@ -66,14 +66,14 @@ def test_armed_but_unavailable_alert_schema_emits_operator_alert(wr, monkeypatch
     armed, enforceable = wr._alert_schema_enforcement_status()
     assert armed is True and enforceable is False
 
-    alerts = wr.read_jsonl_tolerant(wr.OPERATOR_ALERT_LEDGER)
+    alerts = wr.read_jsonl_tolerant(wr.ALERTS_LEDGER)
     matching = [a for a in alerts if a["alert"] == "ALERT_SCHEMA_ENFORCEMENT_UNAVAILABLE"]
     assert len(matching) == 1
     assert matching[0]["severity"] == "error"
 
     # Deduped: a second check while still armed-but-unavailable does NOT re-alert.
     wr._alert_schema_enforcement_status()
-    alerts2 = wr.read_jsonl_tolerant(wr.OPERATOR_ALERT_LEDGER)
+    alerts2 = wr.read_jsonl_tolerant(wr.ALERTS_LEDGER)
     assert len([a for a in alerts2 if a["alert"] == "ALERT_SCHEMA_ENFORCEMENT_UNAVAILABLE"]) == 1
 
 
@@ -84,5 +84,5 @@ def test_armed_and_available_alert_schema_no_alert(wr, monkeypatch):
 
     armed, enforceable = wr._alert_schema_enforcement_status()
     assert armed is True and enforceable is True
-    alerts = wr.read_jsonl_tolerant(wr.OPERATOR_ALERT_LEDGER)
+    alerts = wr.read_jsonl_tolerant(wr.ALERTS_LEDGER)
     assert not [a for a in alerts if a["alert"] == "ALERT_SCHEMA_ENFORCEMENT_UNAVAILABLE"]

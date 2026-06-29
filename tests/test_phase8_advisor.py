@@ -10,6 +10,8 @@ out to ``hermes -z --skills hermx-control``) so no real agent is ever invoked, a
 flip the module-level advisor globals on the reloaded ``wr`` module per case.
 """
 
+import json
+
 import pytest
 
 from conftest import load_alert
@@ -71,10 +73,17 @@ def test_advisor_skip_writes_advisor_ledger(wr, wr_root, monkeypatch):
         lambda prompt: '{"action": "skip", "risk_note": "x", "score": 50}',
     )
     wr.build_record(load_alert(ALERT), RECEIVED_AT)
-    ledger = wr_root / "logs" / "advisor-decisions.jsonl"
+    # Advisor decisions were consolidated into pipeline.jsonl (stage="advisor").
+    ledger = wr_root / "logs" / "pipeline.jsonl"
     assert ledger.exists()
-    assert "vetoed" not in ledger.read_text(encoding="utf-8")  # ledger stores the decision, not the exec result
-    assert '"action": "skip"' in ledger.read_text(encoding="utf-8") or '"action":"skip"' in ledger.read_text(encoding="utf-8")
+    advisor_lines = [
+        line for line in ledger.read_text(encoding="utf-8").splitlines()
+        if line.strip() and json.loads(line).get("stage") == "advisor"
+    ]
+    assert advisor_lines, "expected an advisor pipeline row"
+    text = "\n".join(advisor_lines)
+    assert "vetoed" not in text  # ledger stores the decision, not the exec result
+    assert '"action":"skip"' in text or '"action": "skip"' in text
 
 
 # --- proceed path -----------------------------------------------------------

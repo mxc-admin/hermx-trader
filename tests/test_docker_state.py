@@ -4,9 +4,10 @@ These guard the two import-time knobs the Docker bridge compose relies on:
 
   * ``HERMX_BIND_HOST`` — defaults to loopback (unchanged for host/local deploys),
     overridable to ``0.0.0.0`` for bridge networking.
-  * ``HERMX_DATA_DIR`` — relocates ONLY the four mutable state snapshots
-    (paper-state, control-state, seen-signals, latest) onto a dedicated volume,
-    while logs / config / strategies stay under ROOT.
+  * ``HERMX_DATA_DIR`` — relocates ONLY the mutable state snapshots
+    (paper-state, control-state, latest) onto a dedicated volume, while
+    logs / config / strategies stay under ROOT. (Dedup state moved to the
+    consolidated signals.jsonl under LOG_DIR, so seen-signals.json is gone.)
 
 Both ``webhook_receiver`` and ``dashboard`` resolve these at *import* time, so each
 case is exercised in a fresh subprocess with a controlled environment. That keeps
@@ -26,8 +27,10 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
 
-# The four mutable state snapshots Phase B moves under HERMX_DATA_DIR.
-MUTABLE_ATTRS = ["PAPER_STATE_FILE", "CONTROL_STATE_FILE", "SIGNAL_STATE_FILE", "LATEST_FILE"]
+# The mutable state snapshots Phase B moves under HERMX_DATA_DIR. (seen-signals.json
+# was retired in the JSONL ledger consolidation -- dedup state now lives in the
+# LOG_DIR-anchored signals.jsonl, so SIGNAL_STATE_FILE no longer exists.)
+MUTABLE_ATTRS = ["PAPER_STATE_FILE", "CONTROL_STATE_FILE", "LATEST_FILE"]
 # Paths that must NEVER follow HERMX_DATA_DIR (they stay under ROOT).
 ROOT_ANCHORED_ATTRS = ["LOG_DIR", "CONFIG_FILE", "STRATEGIES_DIR"]
 

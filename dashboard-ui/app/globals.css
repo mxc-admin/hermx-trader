@@ -1,0 +1,345 @@
+@import "tailwindcss";
+
+/* ============================================================================
+   MXC Kinetic Dashboard — Theme
+   Dark terminal aesthetic matching pulse dashboard + crypto-specific tokens
+   ============================================================================ */
+
+:root {
+  --bg-base: #0a0f14;
+  --bg-panel: #0f1519;
+  --bg-panel-raised: #151c22;
+  --bg-hover: #1a2330;
+  --border-dim: #1e293b;
+  --border-focus: #05AD98;
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: #475569;
+  --positive: #05AD98;
+  --negative: #E85D6C;
+  --warning: #F5A623;
+  --info: #8B5CF6;
+
+  /* Crypto-specific colors */
+  --btc: #F7931A;
+  --eth: #8B5CF6;
+  --majors: #627EEA;
+  --alts: #6B7280;
+
+  /* Thermometer colors (CRI risk levels) */
+  --thermo-green: #22c55e;
+  --thermo-blue: #3b82f6;
+  --thermo-gold: #d4a012;
+  --thermo-orange: #f97316;
+  --thermo-red: #ef4444;
+
+  /* Chart tokens */
+  --chart-grid: rgba(148, 163, 184, 0.12);
+  --chart-axis: #1e293b;
+  --chart-axis-muted: #94a3b8;
+
+  /* Level colors */
+  --level-normal: #94a3b8;
+  --level-watch: #F5A623;
+  --level-elevated: #E85D6C;
+  --level-high: #D946A8;
+  --level-critical: #B71C1C;
+}
+
+@theme inline {
+  --color-background: var(--bg-base);
+  --color-foreground: var(--text-primary);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-base);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-dim);
+  border-radius: 0;
+}
+
+body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-sans), -apple-system, sans-serif;
+}
+
+/* ── Panel ──────────────────────────────────────────── */
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-dim);
+  border-radius: 6px;
+}
+.panel-raised {
+  background: var(--bg-panel-raised);
+}
+
+/* ── Hero Score ─────────────────────────────────────── */
+.hero-score {
+  font-size: 4rem;
+  font-weight: 700;
+  line-height: 1;
+  font-family: var(--font-mono), monospace;
+  letter-spacing: -0.02em;
+}
+.hero-max {
+  font-size: 1.25rem;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+/* ── Level Badge ────────────────────────────────────── */
+.level-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono), monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ── Bar Track ──────────────────────────────────────── */
+.bar-track {
+  height: 8px;
+  background: var(--border-dim);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.6s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+/* ── Component Bar ──────────────────────────────────── */
+.component-bar-label {
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono), monospace;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+.component-bar-score {
+  font-size: 11px;
+  font-family: var(--font-mono), monospace;
+  color: var(--text-muted);
+}
+
+/* ── Metric Card ────────────────────────────────────── */
+.metric-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 16px;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  min-width: 0;
+}
+.metric-label {
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font-mono), monospace;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+.metric-value {
+  font-size: 20px;
+  font-weight: 600;
+  font-family: var(--font-mono), monospace;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+.metric-sub {
+  font-size: 11px;
+  font-family: var(--font-mono), monospace;
+  color: var(--text-secondary);
+}
+
+/* SummaryCards: 4 columns by default (inline style), 2 columns on mobile. */
+@media (max-width: 640px) {
+  .summary-cards {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+}
+
+/* ── Section Header ─────────────────────────────────── */
+.section-header {
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono), monospace;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-dim);
+  margin-bottom: 16px;
+}
+
+/* ── Live Badge ─────────────────────────────────────── */
+.live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.live-dot.active {
+  background: var(--positive);
+  box-shadow: 0 0 6px var(--positive);
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+.live-dot.inactive {
+  background: var(--text-muted);
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+@keyframes hero-float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-14px); }
+}
+
+.kf-hero-float {
+  animation: hero-float 6s ease-in-out infinite;
+}
+
+/* ── Scale Markers ──────────────────────────────────── */
+.scale-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  font-family: var(--font-mono), monospace;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-top: 4px;
+}
+
+/* ── Regime Strip ───────────────────────────────────── */
+.regime-strip {
+  display: flex;
+  height: 24px;
+  border-radius: 3px;
+  overflow: hidden;
+  gap: 1px;
+}
+.regime-strip-cell {
+  flex: 1;
+  min-width: 2px;
+}
+
+/* ── Tooltip ────────────────────────────────────────── */
+.chart-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-size: 11px;
+  font-family: var(--font-mono), monospace;
+  color: var(--text-primary);
+  z-index: 50;
+  min-width: 140px;
+}
+.chart-tooltip-date {
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  font-size: 10px;
+}
+.chart-tooltip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 1px 0;
+}
+.chart-tooltip-label {
+  color: var(--text-secondary);
+}
+
+/* ── Gauge ──────────────────────────────────────────── */
+.gauge-track {
+  height: 10px;
+  background: var(--border-dim);
+  border-radius: 5px;
+  overflow: hidden;
+  position: relative;
+}
+.gauge-fill {
+  height: 100%;
+  border-radius: 5px;
+  transition: width 0.6s cubic-bezier(0.25, 1, 0.5, 1);
+}
+.gauge-marker {
+  position: absolute;
+  top: -2px;
+  width: 2px;
+  height: 14px;
+  background: var(--text-muted);
+  opacity: 0.5;
+}
+
+/* ── Signal Badge ───────────────────────────────────── */
+.signal-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--font-mono), monospace;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border: 1px solid;
+}
+
+/* ── Spike Dots ─────────────────────────────────────── */
+.spike-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.spike-dot.active {
+  background: var(--negative);
+  box-shadow: 0 0 4px var(--negative);
+}
+.spike-dot.inactive {
+  background: var(--border-dim);
+}
+
+/* ── Status Indicator ───────────────────────────────── */
+.status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-family: var(--font-mono), monospace;
+  letter-spacing: 0.06em;
+}
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}

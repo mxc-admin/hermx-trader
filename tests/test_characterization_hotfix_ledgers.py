@@ -39,6 +39,12 @@ def _read_jsonl(path):
     return rows
 
 
+def _pipeline_stage(wr_root, stage):
+    """Rows of one stage from the consolidated pipeline.jsonl."""
+    path = wr_root / "logs" / "pipeline.jsonl"
+    return [r for r in _read_jsonl(path) if r.get("stage") == stage]
+
+
 def _stub_executor(monkeypatch, wr):
     """Install a benign in-process executor for the single submit seam, so the ledger
     path runs end-to-end without reaching a real exchange. Post the CCXT cutover that
@@ -64,15 +70,15 @@ def test_strategy_alert_writes_both_ledgers(wr, wr_root, monkeypatch):
     status, record = wr.build_record(load_alert("strategy/btcusdt_buy.json"), RECEIVED_AT)
     assert status == 200
 
-    exec_rows = _read_jsonl(wr_root / "logs" / "executions.jsonl")
+    exec_rows = _pipeline_stage(wr_root, "execution")
     assert len(exec_rows) == 1
 
-    # The dead execution-plan.jsonl write was removed: the authoritative outcome ledger
-    # (executions.jsonl) is the single source the dashboard consumes, so the separate plan
-    # ledger is no longer produced.
+    # The dead execution-plan.jsonl write was removed entirely: the authoritative outcome
+    # is recorded to pipeline.jsonl (stage="execution"), the single source the dashboard
+    # consumes, so no separate plan ledger is produced.
     assert not (wr_root / "logs" / "execution-plan.jsonl").exists()
 
-    # executions.jsonl shows the (sandboxed) submission outcome.
+    # The execution pipeline stage shows the (sandboxed) submission outcome.
     assert exec_rows[0]["okx_execution"]["mode"] == "submit_enabled"
 
 
@@ -85,7 +91,7 @@ def test_shadow_alert_writes_both_ledgers_no_submit(wr, wr_root, monkeypatch):
     status, record = wr.build_record(load_alert("shadow/btcusdt_shadow_buy.json"), RECEIVED_AT)
     assert status == 200
 
-    exec_rows = _read_jsonl(wr_root / "logs" / "executions.jsonl")
+    exec_rows = _pipeline_stage(wr_root, "execution")
     assert exec_rows
     # The dead execution-plan.jsonl write was removed (see strategy-path test).
     assert not (wr_root / "logs" / "execution-plan.jsonl").exists()
@@ -99,7 +105,7 @@ def test_execute_okx_directly_appends_execution_ledger(wr, wr_root, monkeypatch)
     result = wr.execute_okx_if_enabled(record)  # would NameError pre-hotfix
 
     assert result["mode"] == "not_submitted"
-    rows = _read_jsonl(wr_root / "logs" / "executions.jsonl")
+    rows = _pipeline_stage(wr_root, "execution")
     assert rows[-1]["okx_execution"]["mode"] == "not_submitted"
 
 
@@ -110,11 +116,12 @@ def test_async_path_logs_no_nameerror(wr, wr_root, monkeypatch):
 
     wr.process_payload_async(load_alert("strategy/btcusdt_buy.json"), RECEIVED_AT)
 
-    err_ledger = wr_root / "logs" / "shadow-processing-errors.jsonl"
-    if err_ledger.exists():
-        text = err_ledger.read_text(encoding="utf-8")
+    # Processing errors are consolidated into pipeline.jsonl (stage="error").
+    err_rows = _pipeline_stage(wr_root, "error")
+    if err_rows:
+        text = json.dumps(err_rows)
         assert "NameError" not in text, text
         assert "_LEDGER" not in text, text
 
-    # And the authoritative outcome ledger was written by the async run.
-    assert (wr_root / "logs" / "executions.jsonl").exists()
+    # And the authoritative execution outcome was written by the async run.
+    assert _pipeline_stage(wr_root, "execution"), "expected an execution pipeline row"

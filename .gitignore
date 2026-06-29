@@ -20,9 +20,17 @@ data/
 # install-generated files (contain user-specific Tailscale URL / strategy selection)
 WEBHOOK_URL.txt
 ENABLED_STRATEGIES.txt
+HERMX_SECRET.txt
 
 .DS_Store
 Thumbs.db
+
+# Node / Next.js build artifacts
+node_modules/
+dashboard-ui/node_modules/
+dashboard-ui/.next/
+dashboard-ui/out/
+dashboard-ui/tsconfig.tsbuildinfo
 
 # IDE / editor
 .idea/

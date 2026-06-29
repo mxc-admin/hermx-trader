@@ -77,13 +77,15 @@ SKIP_TESTS=false
 HONOR_SUBMIT=false
 CHECK_ONLY=false
 NEW_SECRET=false
+SKIP_UI_BUILD=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --skip-tests)   SKIP_TESTS=true; shift ;;
-    --honor-submit) HONOR_SUBMIT=true; shift ;;
-    --check)        CHECK_ONLY=true; shift ;;
-    --new-secret)   NEW_SECRET=true; shift ;;
+    --skip-tests)    SKIP_TESTS=true; shift ;;
+    --honor-submit)  HONOR_SUBMIT=true; shift ;;
+    --check)         CHECK_ONLY=true; shift ;;
+    --new-secret)    NEW_SECRET=true; shift ;;
+    --skip-ui-build) SKIP_UI_BUILD=true; shift ;;
     -h|--help)
       sed -n '3,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
@@ -164,17 +166,21 @@ ensure_secret() {
     set_env "HERMX_SECRET" "$secret"
     export HERMX_SECRET="$secret"
     ok "Regenerated HERMX_SECRET (--new-secret)"
-    return
-  fi
-
-  if [[ -z "${HERMX_SECRET:-}" ]]; then
+  elif [[ -z "${HERMX_SECRET:-}" ]]; then
     secret="$(gen_secret)"
     set_env "HERMX_SECRET" "$secret"
     export HERMX_SECRET="$secret"
     ok "Generated HERMX_SECRET"
   else
+    secret="$HERMX_SECRET"
     export HERMX_SECRET
   fi
+  # Persist a readable copy so the secret is retrievable even when the script is
+  # backgrounded and its stdout is lost.
+  printf '%s\n' "$secret" > "$ROOT/HERMX_SECRET.txt"
+  chmod 600 "$ROOT/HERMX_SECRET.txt" 2>/dev/null || true
+  ok "HERMX_SECRET written to HERMX_SECRET.txt (mode 600)"
+  info "Secret: $secret"
 }
 
 ensure_secret
@@ -240,6 +246,27 @@ if [[ "$CHECK_ONLY" == true ]]; then
   phase "Check complete"
   info "Validation/tests passed. Services were not started."
   exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Build React dashboard UI (dashboard-ui/)
+# ---------------------------------------------------------------------------
+if [[ "$SKIP_UI_BUILD" != true ]] && [[ -d "$ROOT/dashboard-ui" ]]; then
+  phase "2b/4 — Build React dashboard UI"
+  UI_DIR="$ROOT/dashboard-ui"
+  # npm install is idempotent: fast if node_modules is current, only works when package.json changed.
+  if have npm; then
+    (cd "$UI_DIR" && npm install --prefer-offline --silent) \
+      && ok "npm install done" \
+      || { warn "npm install failed — skipping UI build"; SKIP_UI_BUILD=true; }
+    if [[ "$SKIP_UI_BUILD" != true ]]; then
+      (cd "$UI_DIR" && NEXT_PUBLIC_API_BASE="" npm run build) \
+        && ok "React dashboard built → dashboard-ui/out/" \
+        || { warn "React dashboard build failed — will use legacy Python HTML dashboard"; }
+    fi
+  else
+    warn "npm not found — skipping UI build (install Node.js to enable the React dashboard)"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -459,4 +486,6 @@ else
 fi
 
 print_summary
+info "HERMX_SECRET: ${HERMX_SECRET:-<not set>}"
+info "(also written to HERMX_SECRET.txt)"
 wait
