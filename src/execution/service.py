@@ -230,9 +230,10 @@ class ExecutionService:
                 "ok": ok,
             }
         except Exception as exc:
+            mode = "submit_exception"
             result = {
                 "ok": False,
-                "mode": "submit_exception",
+                "mode": mode,
                 "elapsed_ms": round((time.time() - started) * 1000),
                 "error": redact_secrets(str(exc)),
             }

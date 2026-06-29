@@ -101,3 +101,22 @@ def test_submit_partial_emits_operator_alert_when_reconcile_enabled(wr, monkeypa
     assert len(partial) == 1
     assert partial[0]["detail"]["cl_ord_id"] == cl
     assert partial[0]["detail"]["reason"] == "submit_partial"
+
+
+def test_adapter_exception_with_reconcile_enabled_does_not_raise_unbound(wr, monkeypatch):
+    cl = "mxc-xrpusdt-buy-exc000000000de"
+    monkeypatch.setattr(wr, "CONFIG", _armed_config())
+    monkeypatch.setenv("HERMX_RECONCILE_ENABLED", "1")
+    monkeypatch.setattr(wr, "_reconciliation_executor", lambda: None)
+
+    fake = mock.Mock()
+    fake.execute = mock.Mock(side_effect=RuntimeError("boom-create-order"))
+    monkeypatch.setattr(wr.ExecutorFactory, "create", lambda cfg, root: fake)
+
+    result = wr.execute_okx_if_enabled(_armed_record(cl))  # was: UnboundLocalError
+
+    assert result["ok"] is False
+    assert result["mode"] == "submit_exception"
+    records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+    states = [r["state"] for r in records if r["cl_ord_id"] == cl]
+    assert states == [wr.ORDER_STATE_PLANNED, wr.ORDER_STATE_SUBMITTED, wr.ORDER_STATE_UNKNOWN]
