@@ -226,16 +226,17 @@ def test_cards_appear_and_disappear_with_strategy_files(dash):
     html = dash_mod.render()
     assert "BTCUSDT" in html and "ETHUSDT" in html
 
-    # Disable one via submit_orders=false — its card must disappear.
-    _write_strategy(strategies_dir, "eth_strat", asset="ETHUSDT", submit_orders=False)
+    # Remove one strategy file — its card must disappear (D5: file presence is the
+    # only gate now; every strategy file is active).
+    (strategies_dir / "eth_strat.json").unlink()
     _bust_cache(dash_mod)
     model = dash_mod.dashboard_model()
     active = [s["strategy_id"] for s in model["active_strategies"]]
     assert active == ["btc_strat"]
     assert "ETHUSDT" not in dash_mod.render()
 
-    # Disabling the last active strategy clears the board.
-    _write_strategy(strategies_dir, "btc_strat", asset="BTCUSDT", submit_orders=False)
+    # Removing the last strategy file clears the board.
+    (strategies_dir / "btc_strat.json").unlink()
     _bust_cache(dash_mod)
     model = dash_mod.dashboard_model()
     assert model["active_strategies"] == []
@@ -243,10 +244,11 @@ def test_cards_appear_and_disappear_with_strategy_files(dash):
 
 def test_active_strategy_helpers(dash):
     dash_mod, _core, _root = dash
-    # A strategy renders a card iff it is permitted to submit orders.
-    assert dash_mod.is_strategy_active({"submit_orders": True}) is True
-    assert dash_mod.is_strategy_active({"submit_orders": False}) is False
-    assert dash_mod.is_strategy_active({}) is False
+    # 2-mode model: every strategy with a valid file is active, regardless of the
+    # (now-ignored) submit_orders field. execution_mode decides sandbox vs live.
+    assert dash_mod.is_strategy_active({"execution_mode": "live"}) is True
+    assert dash_mod.is_strategy_active({"execution_mode": "demo"}) is True
+    assert dash_mod.is_strategy_active({}) is True
 
 
 # ---------------------------------------------------------------------------

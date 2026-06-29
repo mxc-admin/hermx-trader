@@ -146,7 +146,7 @@ def test_non_sandbox_blocked_when_switch_unset(wr, monkeypatch):
 
     fake = _fake_executor()
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake) as create_mock:
-        out = wr.execute_if_enabled(_record(execution_mode="paper", simulated_trading=False))
+        out = wr.execute_if_enabled(_record(execution_mode="live", simulated_trading=False))
 
     create_mock.assert_not_called()
     fake.execute.assert_not_called()

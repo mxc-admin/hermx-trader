@@ -4,8 +4,9 @@ A close is a RISK-REDUCING flatten an operator triggers out-of-band. It routes
 through the SAME controlled ExecutionService as a normal submit, but the readiness
 ``close_only`` flag bypasses exactly two gates -- the global HERMX_LIVE_TRADING kill
 switch and the per-symbol pause -- because both exist to stop NEW risk and a close
-only reduces it. Every other gate (submit_orders arming, idempotency, auth, watchdog)
-still applies.
+only reduces it. Every other gate (idempotency, auth, watchdog) still applies.
+(2-mode model: there is no submit_orders arming gate anymore -- demo and live both
+submit; demo routes to the sandbox.)
 
 These tests are fully offline: the executor is mocked via ``ExecutorFactory.create``
 so the only way the submit call is reached is by passing the gate chain; no
@@ -94,19 +95,22 @@ def test_close_bypasses_kill_switch_when_live_trading_disabled(wr, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 2. submit_orders gate still applies.
+# 2. submit_orders flag is ignored (2-mode model) -- a demo close still submits.
 # ---------------------------------------------------------------------------
 
-def test_close_blocked_when_submit_orders_false(wr, monkeypatch):
+def test_close_submits_demo_ignoring_legacy_submit_orders(wr, monkeypatch):
+    # The legacy per-strategy submit_orders flag is gone; both demo and live submit.
+    # An operator close on a demo strategy routes to the sandbox regardless of the
+    # (now-ignored) flag.
     monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
 
     fake = _fake_executor()
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake) as create_mock:
         out = wr.execute_operator_close("BTCUSDT", _strategy(submit_orders=False, execution_mode="demo"))
 
-    create_mock.assert_not_called()
-    fake.execute.assert_not_called()
-    assert out["mode"] == "not_submitted"
+    create_mock.assert_called_once()
+    fake.execute.assert_called_once()
+    assert out["mode"] == "submit_enabled"
 
 
 # ---------------------------------------------------------------------------

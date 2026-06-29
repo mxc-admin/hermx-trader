@@ -18,11 +18,10 @@ Real-money execution is not approved until this checklist is complete.
 
 ## Go-Live Gate Settings
 
-Going live is exactly three controls — all must be set, in this order:
+Going live is exactly two controls — both must be set, in this order:
 
-1. The strategy has `submit_orders: true` (it is permitted to place orders at all).
-2. The strategy has `execution_mode: "live"` (route to the real account instead of demo/sandbox).
-3. The global kill switch is on: `HERMX_LIVE_TRADING=true` in the environment.
+1. The strategy has `execution_mode: "live"` (route to the real account instead of demo/sandbox).
+2. The global kill switch is on: `HERMX_LIVE_TRADING=true` in the environment.
 
 If any one is missing, no real-account order can submit. With `HERMX_LIVE_TRADING=false` (or unset),
 every `execution_mode: live` order is blocked while demo trading continues unaffected — making the

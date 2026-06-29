@@ -159,29 +159,30 @@ def load_strategy_files():
 def is_strategy_active(strategy) -> bool:
     """Whether a strategy file should render a card (D5).
 
-    A card appears for any strategy permitted to submit orders
-    (``submit_orders=true``). Flipping a file to ``submit_orders=false`` makes it
-    inert and removes its card, with no code change.
+    A card appears for any strategy with a valid file. All strategies are active;
+    the per-strategy execution_mode (demo/live) decides sandbox vs real venue.
     """
-    return bool(strategy.get("submit_orders", False))
+    return True
 
 
 _VALID_STRATEGY_MODES = frozenset({"pause", "demo", "live"})
-# Flag mapping must stay in sync with webhook_receiver.set_strategy_override.
+# Flag mapping must stay in sync with webhook_receiver._STRATEGY_MODE_FLAGS.
+# ``submit_orders`` gates submission (pause = off); ``execution_mode`` selects the
+# account (demo sandbox vs live real).
 _STRATEGY_MODE_FLAGS = {
     "pause": {"execution_mode": "demo", "submit_orders": False},
     "demo":  {"execution_mode": "demo", "submit_orders": True},
     "live":  {"execution_mode": "live", "submit_orders": True},
 }
-# Legacy UI-mode label remap: control-state.json written before the shadow->pause
-# rename may still carry "mode": "shadow". Normalize on read so the dashboard pill
-# resolves to "pause" (the underlying execution_mode/submit_orders flags are unchanged).
-_LEGACY_STRATEGY_MODE_ALIASES = {"shadow": "pause"}
+# Legacy UI-mode label remap: old control-state.json may carry "shadow" or "paper".
+# "shadow" was the old pause concept (validate+ledger, no orders) -> "pause";
+# "paper" was the sandbox-submit concept -> "demo".
+_LEGACY_STRATEGY_MODE_ALIASES = {"shadow": "pause", "paper": "demo"}
 
 
 def _normalize_override_modes(overrides: dict) -> dict:
-    """Remap legacy override 'mode' labels (e.g. shadow->pause) in-place. Only the
-    display label is touched; execution_mode/submit_orders flags are left as-is."""
+    """Remap legacy override 'mode' labels (shadow -> pause, paper -> demo) in-place.
+    Only the display label is touched; execution_mode/submit_orders flags are left as-is."""
     if not isinstance(overrides, dict):
         return overrides
     for entry in overrides.values():
@@ -1213,6 +1214,20 @@ def dashboard_model():
     return model
 
 
+def _effective_strategy_mode(strategy: dict, overrides: dict) -> str:
+    """Resolve a strategy's effective UI mode (pause/demo/live).
+
+    An override (control-state.json) wins; otherwise derive from the strategy file:
+    ``submit_orders`` explicitly False -> "pause", else ``execution_mode``."""
+    sid = (strategy or {}).get("strategy_id") or ""
+    ov = (overrides or {}).get(sid)
+    if isinstance(ov, dict) and ov.get("mode"):
+        return str(ov["mode"]).lower()
+    if (strategy or {}).get("submit_orders") is False:
+        return "pause"
+    return str((strategy or {}).get("execution_mode") or "demo").lower()
+
+
 def api_payload():
     """The structured model the ``/api`` route serializes.
 
@@ -1228,26 +1243,13 @@ def api_payload():
 
     # Merge strategy-mode overrides (control-state.json) into the payload. An override
     # takes precedence over the strategy file; otherwise effective_mode is derived from
-    # the file's submit_orders + execution_mode (pause = orders off).
+    # the file: submit_orders explicitly False -> "pause", else execution_mode (demo/live).
     _ctrl = _load_control_state()
     _overrides = _ctrl.get("strategy_overrides") if isinstance(_ctrl.get("strategy_overrides"), dict) else {}
     annotated_strategies = []
     for s in model.get("active_strategies") or []:
-        sid = s.get("strategy_id") or ""
-        ov = _overrides.get(sid)
-        if isinstance(ov, dict) and ov.get("mode"):
-            s = dict(s)
-            s["effective_mode"] = ov["mode"]
-        else:
-            em = (s.get("execution_mode") or "demo").lower()
-            so = bool(s.get("submit_orders") or s.get("okx_submit_orders"))
-            s = dict(s)
-            if not so:
-                s["effective_mode"] = "pause"
-            elif em == "live":
-                s["effective_mode"] = "live"
-            else:
-                s["effective_mode"] = "demo"
+        s = dict(s)
+        s["effective_mode"] = _effective_strategy_mode(s, _overrides)
         annotated_strategies.append(s)
 
     return {
@@ -1291,8 +1293,8 @@ def health_payload():
 
     return {
         "ok": True,
-        "service": "clean_shadow_dashboard",
-        "mode": "paper_shadow",
+        "service": "hermx_dashboard",
+        "mode": "demo_live",
         "policies": policies,
         "primary_policy": cfg.get("primary_policy"),
         "arm": {
@@ -1497,7 +1499,7 @@ def trade_log(rows, live_row_ids=None):
         """)
     return f"""
     <table>
-      <thead><tr><th>Fecha</th><th>Live</th><th>Asset</th><th>TF</th><th>Signal</th><th>Paper price</th><th>Position action</th><th>Trade effect</th><th>Why</th><th>Weight</th><th>Fees</th><th>PnL</th></tr></thead>
+      <thead><tr><th>Fecha</th><th>Live</th><th>Asset</th><th>TF</th><th>Signal</th><th>Mark price</th><th>Position action</th><th>Trade effect</th><th>Why</th><th>Weight</th><th>Fees</th><th>PnL</th></tr></thead>
       <tbody>{''.join(body)}</tbody>
     </table>
     """
@@ -1548,9 +1550,12 @@ def strategy_card(strategy, okx_live, alerts):
     meta = ASSET_META.get(sym, {"name": sym, "logo": ""})
     live = (okx_live.get("positions") or {}).get(sym) or {}
     rows = [row for row in alerts if row.get("strategy_id") == strategy.get("strategy_id")]
-    submit_enabled = bool(strategy.get("submit_orders", strategy.get("okx_submit_orders")))
-    engine_label = "orders disabled" if not submit_enabled else "submit enabled"
-    engine_kind = "warn" if not submit_enabled else "good"
+    # effective_mode (pause/demo/live) is annotated upstream in render(); fall back to
+    # the file's execution_mode if a caller passes an un-annotated strategy.
+    mode = (strategy.get("effective_mode") or strategy.get("execution_mode") or "demo").lower()
+    _mode_labels = {"pause": "Pause", "demo": "Demo", "live": "Live"}
+    mode_label = _mode_labels.get(mode, mode.title())
+    mode_kind = "good" if mode == "live" else "muted" if mode == "pause" else "neutral"
     position = live.get("side") or "FLAT"
     is_live = position != "FLAT"
     budget = as_float((strategy.get("capital") or {}).get("budget_usd") or strategy.get("budget_usd")) or 0.0
@@ -1569,7 +1574,7 @@ def strategy_card(strategy, okx_live, alerts):
             <p>{esc(strategy.get('name') or meta.get('name'))}</p>
           </div>
         </div>
-        <div>{badge(strategy.get("execution_mode") or "demo", "neutral")} {badge(engine_label, engine_kind)} {live_badge}</div>
+        <div>{badge(mode_label, mode_kind)} {live_badge}</div>
       </div>
       <div class="card-status">
         <div>
@@ -1994,7 +1999,15 @@ def render():
     cfg = model["config"]
     okx_live = model.get("okx_live") or {}
     okx_executions = model.get("okx_executions") or []
-    strategies = model.get("active_strategies") or []
+    # Annotate each strategy with its effective UI mode (pause/demo/live) so the card
+    # badge reflects overrides + the file's submit_orders, mirroring api_payload.
+    _ctrl = _load_control_state()
+    _overrides = _ctrl.get("strategy_overrides") if isinstance(_ctrl.get("strategy_overrides"), dict) else {}
+    strategies = []
+    for _s in model.get("active_strategies") or []:
+        _s = dict(_s)
+        _s["effective_mode"] = _effective_strategy_mode(_s, _overrides)
+        strategies.append(_s)
     strategy_alerts = model.get("strategy_alerts") or []
     source_line = (
         f"{len(strategies)} active strategies | "
@@ -2003,7 +2016,7 @@ def render():
     warn = status_banners(model)
     execution_cfg = cfg.get("execution") or {}
     risk_cfg = cfg.get("risk") or {}
-    okx_enabled = bool(execution_cfg.get("enabled")) and bool(execution_cfg.get("submit_orders")) and bool(risk_cfg.get("allow_live_execution"))
+    okx_enabled = bool(execution_cfg.get("enabled"))
     okx_badge = badge("Execution enabled", "good") if okx_enabled else badge("Orders disabled", "warn")
     fresh = model.get("freshness") or {}
     updated_text = "Updated " + (display_time(model["generated_at"]) or model["generated_at"])
@@ -2462,7 +2475,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_bytes(404, b"not found", "text/plain")
 
     # ---- Strategy-mode control (write) -------------------------------------
-    # POST   /api/control/strategy/{id}  body {"mode": "pause"|"demo"|"live"|"clear"}
+    # POST   /api/control/strategy/{id}  body {"mode": "demo"|"live"|"clear"}
     # DELETE /api/control/strategy/{id}  -> clear override (restore file default)
     _CONTROL_PREFIXES = (
         "/dashboard/api/control/strategy/",
@@ -2490,7 +2503,7 @@ class Handler(BaseHTTPRequestHandler):
         if sid not in known:
             self._send_control_error(404, f"unknown strategy_id: {sid}")
             return
-        mode = _LEGACY_STRATEGY_MODE_ALIASES.get(mode, mode)  # accept legacy "shadow" -> "pause"
+        mode = _LEGACY_STRATEGY_MODE_ALIASES.get(mode, mode)  # accept legacy shadow->pause, paper->demo
         if mode not in {"pause", "demo", "live", "clear"}:
             self._send_control_error(400, "mode must be one of: pause, demo, live, clear")
             return

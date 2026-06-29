@@ -88,8 +88,8 @@
         },
         "execution_mode": {
           "type": "string",
-          "description": "Operative execution control. Routes order submission: 'demo'/'paper'/'shadow' go to the exchange sandbox; 'live' targets the real exchange and additionally requires the global HERMX_LIVE_TRADING=true kill switch before any real-money order is sent.",
-          "enum": ["demo", "paper", "live", "shadow"]
+          "description": "Operative execution control. 'demo' routes to the exchange sandbox (paper/demo account via CCXT); 'live' targets the real exchange and additionally requires the global HERMX_LIVE_TRADING=true kill switch before any real-money order is sent.",
+          "enum": ["demo", "live"]
         },
         "okx_submit_orders": {
           "type": "boolean",
@@ -167,12 +167,13 @@
         },
         "execution_mode": {
           "type": "string",
-          "description": "Operative — controls sandbox routing. demo=OKX sandbox/paper account. live=real account, requires HERMX_LIVE_TRADING=true (Phase B).",
-          "enum": ["demo", "paper", "live", "shadow"]
+          "description": "Operative — controls account routing. 'demo' uses the exchange sandbox/paper account via CCXT; 'live' uses the real account and additionally requires HERMX_LIVE_TRADING=true.",
+          "enum": ["demo", "live"]
         },
         "submit_orders": {
           "type": "boolean",
-          "default": false
+          "default": true,
+          "description": "Whether orders are actually submitted. False = Pause: the strategy still validates, ledgers, and renders, but NO order is sent to either the sandbox or live account. True (default) = orders are submitted to the account selected by execution_mode."
         },
         "notes": { "type": "string" }
       }

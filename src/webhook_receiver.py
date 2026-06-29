@@ -1018,9 +1018,8 @@ def validate_strategy_alert(normalized: dict) -> tuple[bool, dict | None, str | 
         return False, strategy, "strategy_symbol_mismatch"
     if canonical_timeframe(strategy.get("timeframe")) != canonical_timeframe(normalized.get("timeframe")):
         return False, strategy, "strategy_timeframe_mismatch"
-    # A strategy is active when it is permitted to submit orders (submit_orders=true).
-    # The legacy `status` gate is gone; `submit_orders=false` simply makes a matched
-    # strategy inert (dry-run) rather than quarantining the alert.
+    # Every strategy file with a matching symbol+timeframe is active; the per-strategy
+    # execution_mode (demo/live) decides sandbox vs real venue, not whether it submits.
     return True, strategy, None
 
 
@@ -1158,11 +1157,14 @@ def load_control_state() -> dict:
         merged["risk_limits"] = default.get("risk_limits", {}) | state.get("risk_limits", {})
         merged["symbol_pauses"] = state.get("symbol_pauses") if isinstance(state.get("symbol_pauses"), dict) else {}
         merged["strategy_overrides"] = state.get("strategy_overrides") if isinstance(state.get("strategy_overrides"), dict) else {}
-        # Backward compat: remap legacy override mode label "shadow" -> "pause".
-        # Only the display label is rewritten; execution_mode/submit_orders are untouched.
+        # Backward compat: remap legacy override mode labels. "shadow" was the old
+        # pause concept (validate+ledger, no orders) -> "pause"; "paper" was the
+        # sandbox-submit concept -> "demo"; a stored "pause" stays "pause". Only the
+        # display label is rewritten; execution_mode/submit_orders are untouched.
+        _legacy = {"shadow": "pause", "paper": "demo", "pause": "pause"}
         for _ov in merged["strategy_overrides"].values():
-            if isinstance(_ov, dict) and _ov.get("mode") == "shadow":
-                _ov["mode"] = "pause"
+            if isinstance(_ov, dict) and _ov.get("mode") in _legacy:
+                _ov["mode"] = _legacy[_ov["mode"]]
         return merged
     except Exception:
         return default_control_state()
@@ -1203,28 +1205,29 @@ def pause_symbol(symbol: "str | None", reason: str) -> bool:
 
 
 _VALID_STRATEGY_MODES = frozenset({"pause", "demo", "live"})
-# Legacy UI-mode label remap: control-state.json written before the shadow->pause
-# rename may still carry "mode": "shadow". Normalize to "pause" on read/write.
-_LEGACY_STRATEGY_MODE_ALIASES = {"shadow": "pause"}
+# Legacy UI-mode label remap: old control-state.json may carry shadow/paper.
+# "shadow" was the old pause concept (validate+ledger, no orders) -> "pause";
+# "paper" was the sandbox-submit concept -> "demo".
+_LEGACY_STRATEGY_MODE_ALIASES = {"shadow": "pause", "paper": "demo"}
+# Per-mode flag mapping. ``submit_orders`` gates actual submission (pause = off);
+# ``execution_mode`` selects the account (demo sandbox vs live real). Must stay in
+# sync with dashboard._STRATEGY_MODE_FLAGS.
+_STRATEGY_MODE_FLAGS = {
+    "pause": {"execution_mode": "demo", "submit_orders": False},
+    "demo":  {"execution_mode": "demo", "submit_orders": True},
+    "live":  {"execution_mode": "live", "submit_orders": True},
+}
 
 
 def set_strategy_override(strategy_id: str, mode: str) -> bool:
     """Set a per-strategy execution mode override in control-state.json.
-
-    mode must be one of: 'pause' (no orders), 'demo' (sandbox), 'live' (real venue).
-    The legacy 'shadow' label is accepted and normalized to 'pause'.
-    The global HERMX_LIVE_TRADING kill switch still gates live submissions independently.
-    """
+    mode must be one of: 'pause' (no orders), 'demo' (sandbox) or 'live' (real venue)."""
     sid = str(strategy_id or "").strip()
     mode = str(mode or "").strip().lower()
     mode = _LEGACY_STRATEGY_MODE_ALIASES.get(mode, mode)
     if not sid or mode not in _VALID_STRATEGY_MODES:
         return False
-    flags = {
-        "pause": {"execution_mode": "demo", "submit_orders": False},
-        "demo":  {"execution_mode": "demo", "submit_orders": True},
-        "live":  {"execution_mode": "live", "submit_orders": True},
-    }[mode]
+    flags = _STRATEGY_MODE_FLAGS[mode]
     state = load_control_state()
     overrides = state.get("strategy_overrides") if isinstance(state.get("strategy_overrides"), dict) else {}
     overrides[sid] = {"mode": mode, **flags, "set_at": now_iso()}
@@ -1299,28 +1302,27 @@ def _fail_closed_state_write(operation: str, exc: Exception, context: dict | Non
 def build_strategy_execution_readiness(record: dict) -> dict:
     normalized = record.get("normalized") or {}
     strategy = record.get("strategy_config") or {}
-    # execution_mode is operative: ``sandbox`` is True for demo/paper/shadow and
-    # False ONLY for live. The resolved ``simulated_trading`` (= sandbox) and the
-    # ``execution_mode`` flow into readiness so the ExecutionService gate can require
-    # HERMX_LIVE_TRADING for live submissions and the adapter sandboxes accordingly.
-    # The single per-strategy ``submit_orders`` flag is what arms submission -- the old
-    # config-flag arming chain (execution.enabled/submit_orders, strategy_engine.
-    # submit_orders, risk.allow_live_execution) is gone.
+    # execution_mode is operative: ``sandbox`` is True for demo and False ONLY for live.
+    # The resolved ``simulated_trading`` (= sandbox) and the ``execution_mode`` flow into
+    # readiness so the ExecutionService gate can require HERMX_LIVE_TRADING for live
+    # submissions and the adapter sandboxes accordingly.
     execution_mode = str((strategy or {}).get("execution_mode") or "demo").lower()
+    # submit_orders gates actual submission. Absent in the file -> default True (the
+    # historical "submit" posture); Pause sets it False (validate+ledger, no order).
+    submit_orders = bool((strategy or {}).get("submit_orders", True))
     # Runtime override from control-state.json (set_strategy_override / dashboard UI).
     # Checked live per-signal so no restart is needed when the operator changes mode.
+    # An override carries BOTH execution_mode and submit_orders (see _STRATEGY_MODE_FLAGS).
     _cs_overrides = (load_control_state().get("strategy_overrides") or {})
     _cs_ov = _cs_overrides.get(record.get("strategy_id") or (strategy or {}).get("strategy_id") or "")
     if isinstance(_cs_ov, dict) and _cs_ov.get("execution_mode"):
         execution_mode = str(_cs_ov["execution_mode"]).lower()
     if isinstance(_cs_ov, dict) and "submit_orders" in _cs_ov:
-        live_execution_enabled_override = bool(_cs_ov["submit_orders"])
-    else:
-        live_execution_enabled_override = None
-    sandbox = (execution_mode != "live")  # demo/paper/shadow -> True; live -> False
-    live_execution_enabled = bool((strategy or {}).get("submit_orders", False))
-    if live_execution_enabled_override is not None:
-        live_execution_enabled = live_execution_enabled_override
+        submit_orders = bool(_cs_ov["submit_orders"])
+    sandbox = (execution_mode != "live")  # demo -> True; live -> False
+    # submit_orders is the submission gate: Pause -> False (no orders to either venue);
+    # Demo/Live -> True. execution_mode then decides sandbox vs real account.
+    live_execution_enabled = bool(submit_orders)
     live_allowed = live_execution_enabled
     direction = "long" if normalized.get("side") == "buy" else "short"
     signal_identity = _signal_identity(normalized)
@@ -2549,10 +2551,9 @@ def build_operator_close_readiness(symbol: str, strategy: dict, cl_ord_id: str) 
     _cs_ov = (load_control_state().get("strategy_overrides") or {}).get(strategy_id)
     if isinstance(_cs_ov, dict) and _cs_ov.get("execution_mode"):
         execution_mode = str(_cs_ov["execution_mode"]).lower()
-    submit_orders = bool(strategy.get("submit_orders", strategy.get("okx_submit_orders", False)))
-    if isinstance(_cs_ov, dict) and "submit_orders" in _cs_ov:
-        submit_orders = bool(_cs_ov["submit_orders"])
-    sandbox = execution_mode != "live"  # demo/paper/shadow -> True; live -> False
+    # Both demo and live submit orders; the difference is sandbox vs real account.
+    submit_orders = True
+    sandbox = execution_mode != "live"  # demo -> True; live -> False
     instrument = strategy_instrument(strategy)
     margin_mode = strategy.get("margin_mode", "isolated")
     return {
@@ -2914,7 +2915,6 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
                     "budget_usd": strategy_budget_usd(strategy_config),
                     "leverage": strategy_config.get("leverage"),
                     "margin_mode": strategy_config.get("margin_mode"),
-                    "submit_orders": strategy_config.get("submit_orders", strategy_config.get("okx_submit_orders")),
                     "execution_mode": strategy_config.get("execution_mode"),
                 },
             },

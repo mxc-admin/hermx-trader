@@ -252,7 +252,7 @@ agent decided**. Order is fixed; all must pass to submit.
 | # | Gate | Check | Block outcome (`mode` / `reason`) |
 |---|------|-------|-----------------------------------|
 | 1 | **Kill switch (live only)** | `HERMX_LIVE_TRADING`: `execution_mode=live` orders require `=true`; `false`/unset blocks every live submit. `execution_mode=demo` is unaffected. | `not_submitted` / `"HERMX_LIVE_TRADING kill switch engaged"` |
-| 2 | **Submit + mode** | `strategy.submit_orders` true AND a resolved `execution_mode` (`demo` → OKX sandbox/paper, always allowed; `live` → real account, subject to gate 1), AND health: `auth_healthy`, `watchdog_ok` | `not_submitted` / first failing control |
+| 2 | **Strategy active + mode** | Strategy has valid `execution_mode` (`demo` → OKX sandbox/paper, always allowed; `live` → real account, subject to gate 1), AND health: `auth_healthy`, `watchdog_ok` | `not_submitted` / first failing control |
 | 3 | **Symbol pause** | `symbol_pause_info(symbol)` empty | `not_submitted` / `"symbol_paused"` |
 | 4 | **Idempotency** | no existing order for derived `client_order_id` | `not_submitted` / `"duplicate_cl_ord_id"` |
 | 5 | **Write-ahead journal** | record `PLANNED` then `SUBMITTED`; fail-closed on `OSError` | `not_submitted` / state-write error |
@@ -415,7 +415,7 @@ HermX HTTP API on loopback. Never touches an exchange; never invents a size.
 
 **Endpoints.**
 - `GET http://127.0.0.1:8098/api` — positions, PnL, executor health, ledger health, freshness
-- `GET http://127.0.0.1:8098/health` — `arm` block (`live_trading_enabled`, per-strategy `submit_orders`, `execution_mode`, `armed_summary` — the summary now reflects `execution_mode` + `submit_orders`)
+- `GET http://127.0.0.1:8098/health` — `arm` block (`live_trading_enabled`, per-strategy `execution_mode`, `armed_summary` — the summary reflects `execution_mode`)
 - `GET http://127.0.0.1:8891/health`, `GET http://127.0.0.1:8891/latest`
 - `POST http://127.0.0.1:8891/webhook`
 
@@ -813,7 +813,7 @@ services:
 | Dashboard | `CLEAN_DASHBOARD_PORT`, `HERMX_DASH_AUTH`, `HERMX_SECRET` |
 | Exchange (OKX) | `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE`, `OKX_DEMO_API_KEY`, `OKX_DEMO_SECRET_KEY`, `OKX_DEMO_PASSPHRASE` |
 | Exchange (others) | `BINANCE_TESTNET_API_KEY/SECRET_KEY`, `BYBIT_TESTNET_API_KEY/SECRET_KEY`, `KUCOIN_PAPER_API_KEY/SECRET/PASSPHRASE`, `BITGET_DEMO_API_KEY/SECRET_KEY/PASSPHRASE`, `GATE_TESTNET_API_KEY/SECRET_KEY`, `COINBASE_SANDBOX_API_KEY/SECRET_KEY`, `HYPERLIQUID_WALLET_ADDRESS/PRIVATE_KEY` |
-| **Removed** | ~~`HERMX_SUBMIT_ENABLED`~~, ~~`OKX_SUBMIT_ORDERS`~~, ~~`OKX_SIMULATED_TRADING`~~, ~~`HERMX_EXEC_API`~~, ~~`HERMX_EXEC_WRITE_BACKEND`~~, ~~`HERMX_EXEC_SHADOW`~~ — superseded by `execution_mode` + `submit_orders` + `HERMX_LIVE_TRADING`. (`HERMX_EXEC_BACKEND` is **retained** as an optional CCXT override.) |
+| **Removed** | ~~`HERMX_SUBMIT_ENABLED`~~, ~~`OKX_SUBMIT_ORDERS`~~, ~~`OKX_SIMULATED_TRADING`~~, ~~`HERMX_EXEC_API`~~, ~~`HERMX_EXEC_WRITE_BACKEND`~~, ~~`HERMX_EXEC_SHADOW`~~ — superseded by `execution_mode` + `HERMX_LIVE_TRADING`. (`HERMX_EXEC_BACKEND` is **retained** as an optional CCXT override.) |
 | Ingress | Tailscale Funnel via `TS_AUTHKEY` (the sole supported ingress; `cloudflared` is not used) |
 | Advisor [BUILT, OFF] | `HERMX_ADVISOR_ENABLED`, `HERMX_ADVISOR_COMMAND`, `HERMX_ADVISOR_SKILLS`, `HERMX_ADVISOR_MODEL`, `HERMX_ADVISOR_TIMEOUT_SECONDS` |
 | Intelligence [PLANNED] | `KRONOS_API_URL`, `MXC_DASHBOARD_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USERS`, `WHATSAPP_*`, `HERMX_ADVISOR_MIN_SCORE`, `HERMX_PROACTIVE_ENABLED` |
@@ -827,7 +827,7 @@ This is the deploy flow (see INSTALL.md §8.4, `deploy/install-services.sh`, and
 2. Copy the package to `/opt/hermx`.
 3. Create the venv and `pip install -r requirements.txt`.
 4. Copy `setup/env.example` → `/opt/hermx/.env`, fill secrets, `chmod 600`.
-5. Set each strategy's `execution_mode` (`demo` vs. `live`) and `submit_orders`; keep
+5. Set each strategy's `execution_mode` (`demo` vs. `live`); keep
    `HERMX_LIVE_TRADING` off (live trading disabled) until verified.
 6. Install Tailscale; `tailscale up` to authenticate to **your own** tailnet.
 7. `tailscale funnel --bg 8891` → note your URL `https://hermx.<tailnet>.ts.net/webhook`.

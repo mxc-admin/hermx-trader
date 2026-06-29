@@ -149,9 +149,11 @@ def test_flag_off_invalid_alert_logged_but_processed_byte_identical(wr, monkeypa
     alert["exchange"] = "binance"
 
     monkeypatch.setitem(wr.STRATEGY_ENGINE, "enforce_alert_schema", False)
-    # Dry-run posture (per-strategy submit flag off) so the corpus strategy does not
-    # arm a real sandbox submit -- keeps both runs deterministic and byte-identical.
-    monkeypatch.setitem(wr.STRATEGIES["btcusdt_duo_base_dev_2h"], "submit_orders", False)
+    # Force the execution surface unavailable so the corpus strategy resolves to a
+    # deterministic not_submitted outcome rather than attempting a real sandbox submit
+    # -- keeps both runs byte-identical. (2-mode model: the per-strategy submit_orders
+    # flag is gone, so a demo strategy would otherwise arm and submit.)
+    monkeypatch.setattr(wr.ExecutorFactory, "available", lambda: False)
 
     # Baseline = the schema feature effectively absent (pre-M2): validator says
     # valid, so the M2 block is a no-op.
@@ -162,9 +164,8 @@ def test_flag_off_invalid_alert_logged_but_processed_byte_identical(wr, monkeypa
     # the flag OFF. Reset dedupe so the replay isn't flagged a duplicate.
     monkeypatch.undo()
     monkeypatch.setitem(wr.STRATEGY_ENGINE, "enforce_alert_schema", False)
-    # Dry-run posture (per-strategy submit flag off) so the corpus strategy does not
-    # arm a real sandbox submit -- keeps both runs deterministic and byte-identical.
-    monkeypatch.setitem(wr.STRATEGIES["btcusdt_duo_base_dev_2h"], "submit_orders", False)
+    # Same deterministic posture for the replay (execution surface unavailable).
+    monkeypatch.setattr(wr.ExecutorFactory, "available", lambda: False)
     _reset_dedupe(wr)
     before = dict(wr.ALERT_SCHEMA_METRICS)
     off_status, off_record = wr.build_record(alert, RECEIVED_AT)

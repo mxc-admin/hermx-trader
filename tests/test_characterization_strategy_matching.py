@@ -69,19 +69,23 @@ def test_all_four_active_strategies_match(wr):
 
 # --- end-to-end via build_record (status codes + record shape) ---------------
 
-def test_build_record_valid_match_is_trial(wr, monkeypatch):
-    # An unpromoted trial strategy: per-strategy submit flag off => dry-run posture.
-    monkeypatch.setitem(wr.STRATEGIES["btcusdt_duo_base_dev_2h"], "submit_orders", False)
+def test_build_record_valid_match_demo_is_armed_sandboxed(wr, monkeypatch):
+    # 2-mode model: a demo strategy is armed (both demo and live submit); the legacy
+    # submit_orders flag is ignored and execution_mode alone decides sandbox vs live.
+    # Force the execution surface unavailable so the offline outcome is deterministic
+    # (a real submit would otherwise be attempted against the sandbox venue).
+    monkeypatch.setattr(wr.ExecutorFactory, "available", lambda: False)
     status, record = wr.build_record(load_alert("strategy/btcusdt_buy.json"), RECEIVED_AT)
     assert status == 200
     assert record["mode"] == "strategy_file_trial"
     assert record["ok"] is True
     assert record.get("quarantined") is not True
     assert record["strategy_config"]["strategy_id"] == "btcusdt_duo_base_dev_2h"
-    # Trial alerts never paper-trade and never arm OKX (dry-run posture). The readiness
-    # now also surfaces the operative execution_mode (demo => sandbox routing).
+    # Demo arms submission but routes to the sandbox; the execution surface being
+    # unavailable yields a deterministic not_submitted/execution_unavailable outcome.
     assert record["okx_execution"]["mode"] == "not_submitted"
-    assert record["execution_readiness"]["live_execution_enabled"] is False
+    assert record["okx_execution"]["reason"] == "execution_unavailable"
+    assert record["execution_readiness"]["live_execution_enabled"] is True
     assert record["execution_readiness"]["execution_mode"] == "demo"
     assert record["execution_readiness"]["simulated_trading"] is True
 

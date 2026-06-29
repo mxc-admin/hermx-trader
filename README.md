@@ -33,7 +33,7 @@ Tailscale Funnel (stable public HTTPS URL — no domain or open ports needed)
         ↓
 Webhook Receiver (validates, authenticates, rate-limits)
         ↓
-Safety Gate Chain (submit_orders flag + execution_mode + idempotency + journal + reconciliation + more)
+Safety Gate Chain (execution_mode + idempotency + journal + reconciliation + more)
         ↓
 CCXT Executor → Exchange (OKX fully tested; others supported)
         ↓

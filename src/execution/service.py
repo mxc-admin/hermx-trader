@@ -6,10 +6,10 @@ import time
 from pathlib import Path
 
 # Canonical strategy execution modes (mirrors schemas/strategy.schema.json). Anything
-# else is a config typo and must fail closed, never route a submit. 'demo'/'paper'/
-# 'shadow' are sandbox-only; 'live' is the ONLY mode permitted to reach a real venue,
-# and only with the global HERMX_LIVE_TRADING kill switch armed.
-CANONICAL_EXECUTION_MODES = frozenset({"demo", "paper", "shadow", "live"})
+# else is a config typo and must fail closed, never route a submit. 'demo' routes to the
+# exchange sandbox/paper account; 'live' is the ONLY mode permitted to reach a real
+# venue, and only with the global HERMX_LIVE_TRADING kill switch armed.
+CANONICAL_EXECUTION_MODES = frozenset({"demo", "live"})
 
 
 def resolve_execution_config(config: dict, readiness: dict | None = None) -> dict:
@@ -94,10 +94,9 @@ class ExecutionService:
             append_jsonl(execution_ledger, {"received_at": record.get("received_at"), "okx_execution": result})
             return result
 
-        # Gate 1 -- arming + health. Arms on the single per-strategy submit flag
-        # (readiness.live_execution_enabled, derived from strategy.submit_orders) plus
-        # auth + watchdog health. The dead config-flag arming chain (execution.enabled/
-        # submit_orders, risk.allow_live_execution) is gone.
+        # Gate 1 -- arming + health. Both demo and live submit orders; the difference
+        # is sandbox vs real account. This gate checks readiness.live_execution_enabled
+        # (always True for valid strategies) plus auth + watchdog health.
         should_execute = (
             bool(readiness.get("live_execution_enabled"))
             and bool(auth_healthy)
@@ -127,7 +126,7 @@ class ExecutionService:
         # venue requires the global HERMX_LIVE_TRADING switch -- not just
         # execution_mode==live. "Real venue" is decided exactly as the adapter decides it:
         # the RESOLVED execution config's ``simulated_trading`` is falsey (the adapter
-        # skips set_sandbox_mode). Demo/paper/shadow must stay sandbox-only.
+        # skips set_sandbox_mode). Demo must stay sandbox-only.
         # A close-only record (operator-instructed flatten) BYPASSES the kill switch:
         # the switch exists to stop the system OPENING real-venue risk, but a close
         # only REDUCES exposure. Refusing it would trap an operator who needs to

@@ -35,7 +35,7 @@ export interface Strategy {
   instrument?: Instrument
   capital?: Capital
   execution_mode?: string // "demo" | "live"
-  submit_orders?: boolean
+  submit_orders?: boolean // false = Pause (no orders submitted); default true
   effective_mode?: string // "pause" | "demo" | "live" — resolved by backend
   leverage?: number
   margin_mode?: string // "isolated" | "cross"

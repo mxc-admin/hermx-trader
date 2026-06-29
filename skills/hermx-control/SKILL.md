@@ -167,8 +167,8 @@ to *educate yourself* about a strategy; never copy numbers out of them into a re
    order will definitely submit".
 
 **The real submit-time gate chain (in this order):**
-1. **Submission gate** — `readiness.live_execution_enabled` (= the matched strategy's
-   `submit_orders`) ∧ auth-health ∧ watchdog must all hold, else `not_submitted`.
+1. **Strategy active gate** — `readiness.live_execution_enabled` (always True for valid
+   strategies) ∧ auth-health ∧ watchdog must all hold, else `not_submitted`.
 2. **Live kill switch** — for an `execution_mode: "live"` strategy, `HERMX_LIVE_TRADING`
    must be truthy, else `not_submitted` (`live_trading_disabled`). Demo strategies skip
    this and route to the sandbox.

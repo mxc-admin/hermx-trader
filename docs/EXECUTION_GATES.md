@@ -15,7 +15,7 @@ the **first** blocking gate so the operator never has to guess.
 
 | # | Gate (`gate` field) | Blocks when | `reason` |
 |---|---------------------|-------------|----------|
-| 1 | `strategy_submit_flag` | `strategy.submit_orders` is false (readiness `live_execution_enabled` off) | `execution disabled` / strategy `block_reason` |
+| 1 | `strategy_active` | strategy has no valid `execution_mode` (readiness `live_execution_enabled` off) | `execution disabled` / strategy `block_reason` |
 | 1 | `auth_health` | webhook auth config unhealthy (missing secret, or HMAC required w/o key) | `Auth health gate is not affirmative` |
 | 1 | `watchdog` | liveness watchdog has paused submission | watchdog reason |
 | 2 | `execution_mode` | `execution_mode` is non-empty but not canonical | `unknown_execution_mode` |
@@ -35,10 +35,10 @@ A submit is **sandbox** unless the *resolved* execution config's `simulated_trad
 falsey (the CCXT adapter then skips `set_sandbox_mode`, hitting the real venue). The
 adapter defaults `simulated_trading` to **true**, so missing/ambiguous config stays
 sandbox. The kill switch (Gate 3) therefore guards **any** real-venue submit — not just
-`execution_mode == "live"`. `demo` / `paper` / `shadow` are sandbox-only; a non-live mode
-that resolves to a real venue is refused outright (`sandbox_only`).
+`execution_mode == "live"`. `demo` is sandbox-only; a non-live mode that resolves to a real venue is refused
+outright (`sandbox_only`).
 
-Canonical `execution_mode` values: `demo`, `paper`, `shadow`, `live` (anything else →
+Canonical `execution_mode` values: `demo`, `live` (anything else →
 `unknown_execution_mode`).
 
 ## Environment defaults & safety posture
@@ -46,7 +46,7 @@ Canonical `execution_mode` values: `demo`, `paper`, `shadow`, `live` (anything e
 | Env var | Default | Posture |
 |---------|---------|---------|
 | `HERMX_SECRET` | _(unset → `""`)_ | **Fail closed.** The sole secret for webhook + dashboard auth; blank ⇒ every webhook gets `401`, protected dashboard routes `401`. No legacy fallbacks. |
-| `HERMX_LIVE_TRADING` | _(unset → disabled)_ | **Global kill switch.** Required for ANY real-venue submit. Unset/false ⇒ no real-money order can be sent; demo/paper sandbox is unaffected. |
+| `HERMX_LIVE_TRADING` | _(unset → disabled)_ | **Global kill switch.** Required for ANY real-venue submit. Unset/false ⇒ no real-money order can be sent; demo sandbox is unaffected. |
 | `HERMX_REQUIRE_HMAC` | `false` | When false **and** the receiver binds a non-loopback interface, boot logs a SECURITY warning (off-host reachable on the shared secret alone). Recommended **true** for any non-loopback exposure. |
 | `HERMX_WEBHOOK_HMAC_KEY` | _(unset)_ | Required when HMAC is on; missing ⇒ fail closed (`401`). |
 | `HERMX_REPLAY_WINDOW_SECONDS` | `300` | **Security freshness** for the HMAC timestamp. Independent of the dedupe window — neither widens the other. |

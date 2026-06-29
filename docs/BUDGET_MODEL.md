@@ -32,12 +32,12 @@ The current four-asset Duo Base Dev trial uses `$6,000` because each asset has i
 
 ## Important Rule
 
-Paper/shadow budget and real account budget must not be mixed.
+Demo sandbox budget and real account budget must not be mixed.
 
 The dashboard should clearly label whether numbers come from:
 
 - historical paper replay
-- sandbox execution (`execution_mode: demo`, `paper`, or `shadow` — all route to the
-  sandbox/paper account; any non-`live` mode is treated as `simulated_trading`)
+- sandbox execution (`execution_mode: demo` — routes to the sandbox/paper account;
+  treated as `simulated_trading`)
 - live execution (`execution_mode: live` — the only real-money mode; real account, requires
   `HERMX_LIVE_TRADING=true`)

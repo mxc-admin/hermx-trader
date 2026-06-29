@@ -118,7 +118,7 @@ This is the most important part of the system. All of it lives in `ExecutionServ
 | # | Invariant | Enforcement (in `ExecutionService.execute`) | On failure |
 |---|---|---|---|
 | 1 | **Live kill switch** | for an `execution_mode: "live"` strategy, `live_trading_enabled()` reads `HERMX_LIVE_TRADING`; unless truthy (`true`/`1`/`yes`) the live order is hard-blocked. Demo strategies never consult it | `not_submitted` (`live_trading_disabled`) |
-| 2 | **Submission gate** | `readiness.live_execution_enabled` (= the strategy's `submit_orders`) ∧ `auth_healthy` ∧ `watchdog_ok` must all be true | `not_submitted` (block reason names the failing gate) |
+| 2 | **Strategy active gate** | `readiness.live_execution_enabled` (always True for valid strategies) ∧ `auth_healthy` ∧ `watchdog_ok` must all be true | `not_submitted` (block reason names the failing gate) |
 | 3 | **Symbol pause** | `symbol_pause_info(symbol)` consults the per-symbol pause registry | `not_submitted` (`symbol_paused`) |
 | 4 | **Idempotency** | `latest_order_record(cl_ord_id)` — a duplicate stable `cl_ord_id` is refused | `not_submitted` (`duplicate_cl_ord_id`) |
 | 5 | **Write-ahead journal** | `record_order_state(PLANNED)` then `record_order_state(SUBMITTED)` are fsync-durable *before* the adapter is called; an `OSError` here calls `fail_closed_state_write` and re-raises | submit never happens without a prior durable record |
@@ -133,7 +133,6 @@ Whether an order is placed — and where — is decided by exactly two controls.
 
 | Control | Location | Key | Fresh-install posture |
 |---|---|---|---|
-| Per-strategy submission | `strategies/<id>.json` | `submit_orders` (`true`\|`false`) | `true` — a strategy with `submit_orders:false` is inert |
 | Per-strategy routing | `strategies/<id>.json` | `execution_mode` (`demo`\|`live`) | `demo` — routes to the exchange sandbox, no global switch needed |
 | Global live switch | `.env` (environment) | `HERMX_LIVE_TRADING` | unset/`false` = live disabled (fail-closed); must be truthy for any `execution_mode:"live"` order |
 

@@ -59,10 +59,9 @@ V2_TWIN = {
     "instrument": {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap"},
     "capital": {"budget_usd": 1500, "reinvest": True},
     "execution_mode": "demo",
-    "submit_orders": True,
     "leverage": 2,
     "margin_mode": "isolated",
-    "notes": "Active OKX sandbox/demo candidate. submit_orders=false makes it inert.",
+    "notes": "Active OKX sandbox/demo candidate.",
 }
 
 
@@ -138,8 +137,8 @@ def test_normalize_shim_canonicalizes_v2_instrument():
     assert out["instrument"]["inst_id"] == "BTC-USDT-SWAP"
     assert out["instrument"]["exchange"] == "okx"
     assert out["instrument"]["type"] == "swap"
-    # The okx_submit_orders bridge is preserved (out of scope for this slice).
-    assert out["okx_submit_orders"] is True
+    # The okx_submit_orders bridge is preserved for backward compat.
+    assert out["okx_submit_orders"] is False
 
 
 def test_normalize_shim_does_not_inject_legacy_okx_inst_id():
@@ -165,7 +164,7 @@ def test_normalize_is_idempotent_for_v2():
     twice = m.normalize_strategy_record(json.loads(json.dumps(once)))
     assert m.strategy_instrument(once) == m.strategy_instrument(twice)
     assert once["instrument"]["inst_id"] == twice["instrument"]["inst_id"]
-    assert bool(once["okx_submit_orders"]) == bool(twice["okx_submit_orders"])
+    assert once.get("okx_submit_orders") == twice.get("okx_submit_orders")
 
 
 # --------------------------------------------------------------------------- #
@@ -214,7 +213,7 @@ def test_v2_strategy_file_loads_and_is_money_ready(tmp_path):
         # Layer C: the loaded v2 strategy resolves via the canonical instrument block.
         assert loaded["instrument"]["inst_id"] == "BTC-USDT-SWAP"
         assert "okx_inst_id" not in loaded
-        assert loaded["okx_submit_orders"] is True
+        assert loaded.get("okx_submit_orders") is False
 
         _, readiness = _readiness_for_btc_buy(m)
 

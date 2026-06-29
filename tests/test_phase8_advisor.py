@@ -22,11 +22,13 @@ ALERT = "strategy/btcusdt_buy.json"
 
 @pytest.fixture(autouse=True)
 def _dryrun_strategy(wr, monkeypatch):
-    """Keep the corpus strategy in dry-run posture (per-strategy submit flag off) so the
-    advisor's veto/proceed/fail-open behaviour is exercised against a deterministic
-    not_submitted execution, never a real sandbox order. The advisor sits ABOVE the
-    submit gate, so this does not change what these tests assert."""
-    monkeypatch.setitem(wr.STRATEGIES["btcusdt_duo_base_dev_2h"], "submit_orders", False)
+    """Keep execution deterministic by making the controlled execution surface
+    unavailable, so the proceed/fail-open paths resolve to a not_submitted/
+    execution_unavailable outcome rather than attempting a real sandbox order. The
+    advisor sits ABOVE the submit gate, so this does not change what these tests
+    assert. (2-mode model: the per-strategy submit_orders flag no longer exists, so a
+    demo strategy would otherwise arm and submit.)"""
+    monkeypatch.setattr(wr.ExecutorFactory, "available", lambda: False)
 
 
 def _enable(wr, monkeypatch):

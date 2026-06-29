@@ -38,10 +38,10 @@ are supplied by the strategy file matched on `strategy_id`:
   `okx`, `kucoin`, `bybit`, `hyperliquid` — so an alert declaring any other venue fails validation
   when schema enforcement is on. The strategy may route to other configured venues via
   `instrument.exchange`; the alert `exchange` need only be one of the four schema-allowed values.
-- **Execution mode** is `strategy.execution_mode`, a four-value enum — `demo`, `paper`, `live`,
-  `shadow`. **Only `live` is real-money**: it routes to the real account and additionally requires
-  the global kill switch `HERMX_LIVE_TRADING=true`. `demo`, `paper`, and `shadow` all route to the
-  venue's sandbox/paper account (always allowed; any non-`live` mode is sandboxed).
+- **Execution mode** is `strategy.execution_mode`, a two-value enum — `demo` or `live`.
+  **Only `live` is real-money**: it routes to the real account and additionally requires
+  the global kill switch `HERMX_LIVE_TRADING=true`. `demo` routes to the venue's
+  sandbox/paper account (always allowed; treated as `simulated_trading`).
 - **Sizing** is computed in the receiver as `capital.budget_usd * leverage`. The alert has **no**
   size, notional, budget, or leverage field; any such value would be ignored.
 

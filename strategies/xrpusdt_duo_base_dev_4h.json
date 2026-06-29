@@ -14,8 +14,7 @@
     "reinvest": true
   },
   "execution_mode": "demo",
-  "submit_orders": true,
   "leverage": 2,
   "margin_mode": "isolated",
-  "notes": "Active OKX sandbox/demo candidate. submit_orders=false makes it inert."
+  "notes": "Active OKX sandbox/demo candidate."
 }

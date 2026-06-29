@@ -1,7 +1,7 @@
 # Skill: Emergency Stop
 
 Use this when execution must be paused immediately. The system has two operative
-controls — a per-strategy `execution_mode`/`submit_orders` and the global
+controls — a per-strategy `execution_mode` (`demo` or `live`) and the global
 `HERMX_LIVE_TRADING` switch — so a stop can be global, per-strategy, or per-symbol.
 
 ## Stop Levels
@@ -33,17 +33,17 @@ account. (`live_trading_enabled()` in `src/hermx_shared.py` is the single source
 truth, read by `ExecutionService.execute()` and mirrored in the dashboard `/health`
 `arm` block as `kill_switch_engaged`.)
 
-> Note: non-`live` strategies (`demo`, `paper`, `shadow`) route to the exchange
-> **sandbox** and do not consult this switch. To stop one of those too, use Level 1
-> (per-strategy) below.
+> Note: `demo` strategies route to the exchange **sandbox** and do not consult this
+> switch. To stop one of those too, use Level 1 (per-strategy) below.
 
 ### Level 1: Stop a single strategy
 
-Set `submit_orders: false` in that strategy's `strategies/<id>.json` and restart the
-receiver. The strategy still validates and ledgers but places no order (demo or live).
+Switch the strategy's `execution_mode` from `"live"` to `"demo"` in its
+`strategies/<id>.json` and restart the receiver. The strategy still validates and
+ledgers, but routes to the sandbox instead of the real account.
 
-To take a strategy off the real account but keep it running in sandbox, instead change
-`execution_mode: "live"` back to `execution_mode: "demo"`.
+To fully stop a strategy from submitting (even to sandbox), remove its strategy file
+from `strategies/` or use the per-symbol pause in `control-state.json`.
 
 ### Level 2: Pause a single symbol
 
@@ -58,25 +58,23 @@ Stop the receiver service. The dashboard may remain online for read-only status.
 
 - close open positions on the venue,
 - verify flat,
-- set `HERMX_LIVE_TRADING=false` and/or each strategy's `submit_orders: false` to keep
+- set `HERMX_LIVE_TRADING=false` and/or switch each strategy's `execution_mode` to `"demo"` to keep
   it flat.
 
 ## Execution control model
 
 Two controls decide whether and where an order is placed:
 
-1. **Per-strategy** — `submit_orders` (true|false) and `execution_mode`
-   (`demo`|`paper`|`live`|`shadow`) in `strategies/<id>.json`. **Only `live` is real-money**
-   and routes to the real account; `demo`, `paper`, and `shadow` all route to the exchange
-   sandbox (any non-`live` mode is sandboxed). During an incident, recognise that a `paper`
-   or `shadow` strategy is sandboxed just like `demo`.
+1. **Per-strategy** — `execution_mode` (`demo` or `live`) in `strategies/<id>.json`.
+   **Only `live` is real-money** and routes to the real account; `demo` routes to the
+   exchange sandbox (treated as `simulated_trading`).
 2. **Global** — `HERMX_LIVE_TRADING` (env). Required truthy for any `live` order;
    irrelevant to non-`live` (sandbox) modes.
 
 `ExecutionService.execute()` blocks submission (fail-safe `not_submitted`) on any of:
-`submit_orders` false / auth unhealthy / watchdog paused; a `live` strategy when
-`HERMX_LIVE_TRADING` is not truthy (`live_trading_disabled`); a paused symbol; or a
-duplicate `cl_ord_id`. The system never submits on uncertainty.
+strategy without valid `execution_mode` / auth unhealthy / watchdog paused; a `live`
+strategy when `HERMX_LIVE_TRADING` is not truthy (`live_trading_disabled`); a paused
+symbol; or a duplicate `cl_ord_id`. The system never submits on uncertainty.
 
 ## Required Log
 

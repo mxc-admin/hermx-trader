@@ -69,8 +69,7 @@ to a fully operational install, interactively.
 
 | Control | File | Field | Fresh-install value |
 |---|---|---|---|
-| Per-strategy submission | `strategies/<id>.json` | `submit_orders` | `true` |
-| Per-strategy routing | `strategies/<id>.json` | `execution_mode` | `"demo"` (sandbox) |
+| Per-strategy mode | `strategies/<id>.json` | `execution_mode` | `"demo"` (sandbox) |
 | Global live switch | `.env` | `HERMX_LIVE_TRADING` | `false` (unset = live disabled) |
 
 `execution_mode: "demo"` always routes to the exchange sandbox/demo account — no real money, no global
@@ -352,23 +351,23 @@ ls strategies/
 
 The repo ships **four** strategies (all OKX swaps, 2x leverage, isolated margin, demo mode):
 
-| File | `strategy_id` | Asset | Instrument | Timeframe | Budget (USD) | Leverage | `execution_mode` | `submit_orders` |
+| File | `strategy_id` | Asset | Instrument | Timeframe | Budget (USD) | Leverage | `execution_mode` |
 |---|---|---|---|---|---:|---:|---|---|
-| `btcusdt_duo_base_dev_2h.json` | `btcusdt_duo_base_dev_2h` | BTCUSDT | BTC-USDT-SWAP | 2h | 1500 | 2x | demo | true |
-| `ethusdt_duo_base_dev_2h.json` | `ethusdt_duo_base_dev_2h` | ETHUSDT | ETH-USDT-SWAP | 2h | 1500 | 2x | demo | true |
-| `solusdt_duo_base_dev_3h.json` | `solusdt_duo_base_dev_3h` | SOLUSDT | SOL-USDT-SWAP | 3h | 1500 | 2x | demo | true |
-| `xrpusdt_duo_base_dev_4h.json` | `xrpusdt_duo_base_dev_4h` | XRPUSDT | XRP-USDT-SWAP | 4h | 1500 | 2x | demo | true |
+| `btcusdt_duo_base_dev_2h.json` | `btcusdt_duo_base_dev_2h` | BTCUSDT | BTC-USDT-SWAP | 2h | 1500 | 2x | demo |
+| `ethusdt_duo_base_dev_2h.json` | `ethusdt_duo_base_dev_2h` | ETHUSDT | ETH-USDT-SWAP | 2h | 1500 | 2x | demo |
+| `solusdt_duo_base_dev_3h.json` | `solusdt_duo_base_dev_3h` | SOLUSDT | SOL-USDT-SWAP | 3h | 1500 | 2x | demo |
+| `xrpusdt_duo_base_dev_4h.json` | `xrpusdt_duo_base_dev_4h` | XRPUSDT | XRP-USDT-SWAP | 4h | 1500 | 2x | demo |
 
 > Total demo budget across all four ≈ **$6,000**. These are `schema_version: 2` strategy files — the
 > instrument and budget live in nested blocks (`instrument.inst_id`, `capital.budget_usd`); there is
-> **no `asset` or `status` field**. A strategy is inert when its `submit_orders` is `false`.
+> **no `asset` or `status` field**. A strategy is inert only when its file is removed from `strategies/`.
 
 Print each strategy's summary so the user sees the real values:
 
 ```bash
 for f in strategies/*.json; do
   echo "=== $f ==="
-  grep -E '"(strategy_id|inst_id|timeframe|budget_usd|leverage|margin_mode|execution_mode|submit_orders)"' "$f"
+  grep -E '"(strategy_id|inst_id|timeframe|budget_usd|leverage|margin_mode|execution_mode)"' "$f"
 done
 ```
 
@@ -376,16 +375,15 @@ done
 
 For **each** strategy, ask the user:
 
-1. *"Do you want to enable this strategy?"* — A strategy is **enabled** when its `submit_orders` is
-   `true` (and `execution_mode` decides where it routes — `demo` = sandbox). All four ship with
-   `submit_orders: true`, `execution_mode: "demo"`. To make one inert, set its `submit_orders` to
-   `false` so no order is placed for its alerts.
+1. *"Do you want to enable this strategy?"* — A strategy is **enabled** when its file is present
+   in `strategies/` (and `execution_mode` decides where it routes — `demo` = sandbox). All four ship with
+   `execution_mode: "demo"`. To make one inert, remove its file from `strategies/`.
 2. *"Confirm the risk parameters for this strategy: budget `$<budget_usd>`, leverage `<leverage>x`.
    Keep these or change them?"* — If they change `budget_usd` or `leverage`, edit the strategy JSON
    and re-validate.
 
-> If the user changes a value, edit the JSON in place and keep `submit_orders: true`,
-> `execution_mode: "demo"`, `margin_mode: "isolated"`. Remember: the master `.env` gate
+> If the user changes a value, edit the JSON in place and keep `execution_mode: "demo"`,
+> `margin_mode: "isolated"`. Remember: the master `.env` gate
 > (`HERMX_LIVE_TRADING=false`) keeps live execution disabled — demo strategies route to the sandbox.
 
 Then re-validate the strategy files if a validator is available:
@@ -423,7 +421,7 @@ printf '%s\n' \
 cat ENABLED_STRATEGIES.txt
 ```
 
-**✅ Verify Phase 3:** Every enabled strategy has `submit_orders: true` and `execution_mode: "demo"`;
+**✅ Verify Phase 3:** Every enabled strategy has `execution_mode: "demo"`;
 the user has confirmed each budget and leverage; and `ENABLED_STRATEGIES.txt` lists the IDs.
 
 ---
@@ -871,15 +869,14 @@ Next step: Fire a test alert from TradingView and confirm it appears in the dash
 
 ### Enabling LIVE execution later (only when the user asks)
 
-Demo strategies (`execution_mode: "demo"`, `submit_orders: true`) already route to the exchange
+Demo strategies (`execution_mode: "demo"`) already route to the exchange
 **sandbox** account — no real money, nothing to flip. To move a strategy to the **real** account,
 after synthetic tests pass and the user explicitly asks:
 
 ```bash
 # 1) In the strategy JSON:   "execution_mode": "live"   (was "demo")
 # 2) In .env:                HERMX_LIVE_TRADING=true     (global live switch; unset/false = disabled)
-# 3) Confirm the strategy:   "submit_orders": true
-# 4) Restart the receiver:
+# 3) Restart the receiver:
 sudo systemctl restart hermx-receiver      # systemd
 # or
 docker compose restart receiver            # docker
@@ -912,10 +909,9 @@ order is blocked (`live_trading_disabled`). Never enable live unless the user ex
   the keys in the **demo/sandbox/testnet** environment, that the passphrase matches, and that the
   right variables are filled for your chosen exchange (`OKX_DEMO_*`, `KUCOIN_PAPER_*`,
   `BYBIT_TESTNET_*`). Demo strategies route to the sandbox via `execution_mode: "demo"` — no `OKX_SIMULATED_TRADING` flag is needed.
-- **Orders never submit even with valid alerts**: check `submit_orders: true` in the strategy file;
-  for a `live` strategy also confirm `HERMX_LIVE_TRADING=true` in `.env`. A demo strategy with
-  `submit_orders: true` routes to the sandbox automatically. Any `false`/disabled control blocks
-  submission **by design**.
+- **Orders never submit even with valid alerts**: confirm `execution_mode` is set in the strategy
+  file; for a `live` strategy also confirm `HERMX_LIVE_TRADING=true` in `.env`. A demo strategy
+  routes to the sandbox automatically.
 - **Dashboard reads fail / agent says UNKNOWN**: `HERMX_DASH_AUTH=true` but no token supplied —
   either set `HERMX_DASH_AUTH=false` (loopback) or pass `HERMX_SECRET` via the
   `X-Dashboard-Token` header.
