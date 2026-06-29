@@ -222,14 +222,14 @@ if [[ "$HONOR_SUBMIT" != true ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Ensure shadow-config.json exists
+# Ensure engine-config.json exists
 # ---------------------------------------------------------------------------
-if [[ ! -f "$ROOT/shadow-config.json" ]]; then
+if [[ ! -f "$ROOT/engine-config.json" ]]; then
   if [[ -f "$ROOT/config/runtime.demo.json" ]]; then
-    cp "$ROOT/config/runtime.demo.json" "$ROOT/shadow-config.json"
-    ok "Created shadow-config.json from config/runtime.demo.json"
+    cp "$ROOT/config/runtime.demo.json" "$ROOT/engine-config.json"
+    ok "Created engine-config.json from config/runtime.demo.json"
   else
-    err "config/runtime.demo.json missing — cannot seed shadow-config.json"
+    err "config/runtime.demo.json missing — cannot seed engine-config.json"
     exit 1
   fi
 fi
@@ -404,7 +404,7 @@ if [[ "$HONOR_SUBMIT" != true ]]; then
   cat <<SUMMARY
   ${YELLOW}Live submission is BLOCKED (HERMX_LIVE_TRADING=false); demo/paper orders${RESET}
   ${YELLOW}may still submit if a strategy has submit_orders=true.${RESET}
-  Pass --honor-submit to let .env / shadow-config.json control submission.
+  Pass --honor-submit to let .env / engine-config.json control submission.
 SUMMARY
 fi
 

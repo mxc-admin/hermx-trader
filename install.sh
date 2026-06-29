@@ -160,18 +160,18 @@ pick_exchange() {
     set_env "OKX_FORCE_IPV4" "1"
   fi
 
-  # Select the matching DISARMED runtime profile -> shadow-config.json. OKX is the
+  # Select the matching DISARMED runtime profile -> engine-config.json. OKX is the
   # reference venue and ships as the generic config/runtime.demo.json (no okx-suffixed file).
   local cfg="config/runtime.${ex_id}.demo.json"
   [[ "$ex_id" == "okx" ]] && cfg="config/runtime.demo.json"
   if [[ -f "$cfg" ]]; then
-    cp "$cfg" shadow-config.json
-    ok "Copied $cfg -> shadow-config.json"
+    cp "$cfg" engine-config.json
+    ok "Copied $cfg -> engine-config.json"
   elif [[ -f "config/runtime.demo.json" ]]; then
-    cp "config/runtime.demo.json" shadow-config.json
-    warn "$cfg not found — fell back to config/runtime.demo.json -> shadow-config.json"
+    cp "config/runtime.demo.json" engine-config.json
+    warn "$cfg not found — fell back to config/runtime.demo.json -> engine-config.json"
   else
-    err "No runtime config found to copy to shadow-config.json."
+    err "No runtime config found to copy to engine-config.json."
   fi
 }
 
@@ -456,12 +456,12 @@ if [[ "$IS_VPS" == "true" ]]; then
       # Pre-flight: both files are bind-mounted read-only into the containers, so
       # a missing file makes `docker compose up` fail with an opaque mount error.
       preflight_ok="true"
-      if [[ ! -f "$REPO_ROOT/shadow-config.json" ]]; then
-        err "shadow-config.json is missing — it is bind-mounted into both containers."
+      if [[ ! -f "$REPO_ROOT/engine-config.json" ]]; then
+        err "engine-config.json is missing — it is bind-mounted into both containers."
         err "Re-run Phase 3 (exchange picker) or copy a config/runtime.*.demo.json profile."
         preflight_ok="false"
       else
-        ok "Pre-flight: shadow-config.json present."
+        ok "Pre-flight: engine-config.json present."
       fi
       if [[ ! -f "$ENV_FILE" ]]; then
         err ".env is missing — run Phase 2 (Configure .env) first."

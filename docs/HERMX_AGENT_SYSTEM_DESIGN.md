@@ -802,7 +802,7 @@ services:
 
 ### 8.3 Environment configuration
 
-`.env` (secrets, mode 600) holds everything sensitive; config files (`shadow-config.json`,
+`.env` (secrets, mode 600) holds everything sensitive; config files (`engine-config.json`,
 `strategies/*.json`) hold non-secret runtime behavior. Real env keys (from `setup/env.example`):
 
 | Group | Keys |
@@ -851,7 +851,7 @@ ingress URL with no shared infrastructure — the system is genuinely fork-and-o
 | `strategies/*.json` | venv |
 | `logs/*.jsonl` (ledgers — the money record) | systemd units (in `deploy/`) |
 | `*-state.json`, `*.checkpoint.json` | Tailscale (re-auth) |
-| `shadow-config.json` | — |
+| `engine-config.json` | — |
 
 Restore = re-deploy code + venv, restore `.env` + `strategies/` + `logs/` + state JSON,
 restart units. The position-journal checkpoint reconciles on load, so restoring the
@@ -913,7 +913,7 @@ evaluates — and it cannot relay anything while the kill switch is engaged.
 | Advisor verdicts | `advisor-decisions.jsonl` | JSONL | agent decisions + ML dataset seed |
 | MXC availability | `tab-health.jsonl` | JSONL | health-gate context |
 | Last alert | `latest.json` | JSON | `/latest` |
-| Runtime config | `shadow-config.json` | JSON | non-secret config |
+| Runtime config | `engine-config.json` | JSON | non-secret config |
 
 ### 11.2 Durability & integrity
 

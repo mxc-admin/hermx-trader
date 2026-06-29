@@ -203,7 +203,7 @@ cd ~/hermx
 
 ```bash
 cp setup/env.example .env
-cp config/runtime.demo.json shadow-config.json   # if this path differs, ask the user for the demo profile
+cp config/runtime.demo.json engine-config.json   # if this path differs, ask the user for the demo profile
 chmod 600 .env                                    # owner-only — the receiver checks this
 ```
 
@@ -332,8 +332,8 @@ python scripts/validate_package.py    # sanity-check the package (if present)
 - `ls -l .env` shows `-rw-------` (mode 600).
 - `HERMX_SECRET` and the chosen exchange's demo credentials are filled in (non-blank).
 - `HERMX_LIVE_TRADING=false` (or unset) — live execution disabled; demo strategies route to the sandbox.
-- `shadow-config.json` is the demo profile — confirm it routes to the sandbox: `"account": "sandbox"`
-  and `"td_mode": "isolated"`. Run: `grep -E '"(mode|account|td_mode|ccxt_exchange)"' shadow-config.json`.
+- `engine-config.json` is the demo profile — confirm it carries the `strategy_engine` block:
+  `grep -E '"(strategy_engine|strategies_dir|require_strategy_id)"' engine-config.json`.
 - `pip install` completed without errors.
 
 ---
@@ -592,7 +592,7 @@ not used**. Key properties of the default compose:
   pinned to `127.0.0.1:8891` / `127.0.0.1:8098` — reachable from the host but never
   exposed on a public interface.
 - **Non-root runtime** — processes run as the `hermx` user (uid/gid `10001`).
-- **Read-only config + strategies** — `shadow-config.json` and `strategies/` are
+- **Read-only config + strategies** — `engine-config.json` and `strategies/` are
   bind-mounted **`:ro`** into both services; edit them on the host, then restart.
 - **Two named volumes** — `hermx-data` holds the append-only ledgers/logs (`/app/logs`,
   receiver rw, dashboard ro); `hermx-state` holds the four mutable state snapshots
@@ -618,7 +618,7 @@ not used**. Key properties of the default compose:
    for your tailnet (admin console → **DNS/Settings**; Funnel must be allowed in the
    tailnet's ACL). The serve config already requests Funnel on `:443`.
 
-With `.env`, `shadow-config.json`, and `TS_AUTHKEY` in place:
+With `.env`, `engine-config.json`, and `TS_AUTHKEY` in place:
 
 ```bash
 docker compose up -d --build
@@ -916,7 +916,7 @@ order is blocked (`live_trading_disabled`). Never enable live unless the user ex
   either set `HERMX_DASH_AUTH=false` (loopback) or pass `HERMX_SECRET` via the
   `X-Dashboard-Token` header.
 - **Docker healthcheck unhealthy**: `docker compose logs receiver` for the boot error; confirm
-  `.env` and `shadow-config.json` are present and readable (both are bind-mounted into the
+  `.env` and `engine-config.json` are present and readable (both are bind-mounted into the
   containers). The default compose uses bridge networking, so the host probes
   `127.0.0.1:8891`/`:8098` via the published ports; only `docker-compose.host.yml` uses
   `network_mode: host` (Linux-only).

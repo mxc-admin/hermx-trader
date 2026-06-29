@@ -77,10 +77,10 @@ if ($Check) {
   else { Write-Host "CHECK: FAILED"; exit 1 }
 }
 
-# --- ensure shadow-config.json exists (copy from demo profile if missing) ----
-if (-not (Test-Path "shadow-config.json")) {
-  Copy-Item "config/runtime.demo.json" "shadow-config.json"
-  Write-Host "Created shadow-config.json from config/runtime.demo.json"
+# --- ensure engine-config.json exists (copy from demo profile if missing) ----
+if (-not (Test-Path "engine-config.json")) {
+  Copy-Item "config/runtime.demo.json" "engine-config.json"
+  Write-Host "Created engine-config.json from config/runtime.demo.json"
 }
 
 $env:SHADOW_ROOT = $Root

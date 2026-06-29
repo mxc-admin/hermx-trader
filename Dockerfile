@@ -30,9 +30,9 @@ COPY docs/ ./docs/
 COPY scripts/ ./scripts/
 COPY deploy/ ./deploy/
 
-# Fallback baseline config. Compose bind-mounts the operator's shadow-config.json
+# Fallback baseline config. Compose bind-mounts the operator's engine-config.json
 # read-only over this, but the baked copy keeps the image runnable on its own.
-COPY shadow-config.json /app/shadow-config.json
+COPY engine-config.json /app/engine-config.json
 
 # Pre-create the mutable mount points and hand them (and the app tree) to the
 # non-root user so the named volumes mount writable for receiver state + logs.

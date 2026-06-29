@@ -43,7 +43,7 @@ services:
       - "127.0.0.1:8891:8891"
     volumes:
       # Operator's runtime config + strategies, read-only (edits happen on host).
-      - ./shadow-config.json:/app/shadow-config.json:ro
+      - ./engine-config.json:/app/engine-config.json:ro
       - ./strategies:/app/strategies:ro
       # Append-only ledgers persist across container restarts (writable).
       - hermx-data:/app/logs
@@ -76,7 +76,7 @@ services:
       - /tmp
     volumes:
       # Same config + strategies the receiver sees, read-only.
-      - ./shadow-config.json:/app/shadow-config.json:ro
+      - ./engine-config.json:/app/engine-config.json:ro
       - ./strategies:/app/strategies:ro
       # Dashboard reads the same ledgers the receiver writes (read-only).
       - hermx-data:/app/logs:ro
