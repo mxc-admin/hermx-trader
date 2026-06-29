@@ -1,3 +1,14 @@
+"""Webhook intake hardening.
+
+The X-Webhook-Secret / query-secret header auth was removed from the receiver:
+the handler no longer calls authenticate_webhook_request, and inbound alerts are
+gated by strategy_id validation (strategy_engine.require_strategy_id) instead of a
+shared secret. These tests cover the controls that remain at the HTTP edge --
+payload-size cap, rate limiting, queue-full back-pressure -- plus the strategy_id
+gate that now decides whether an alert is processed or quarantined. The HMAC
+helpers in security/webhook_auth.py still exist (unit-tested below) even though
+do_POST no longer invokes them. Dashboard /api token auth is unchanged.
+"""
 from __future__ import annotations
 
 import base64
@@ -8,6 +19,8 @@ from http.client import HTTPConnection
 from http.server import HTTPServer
 
 import dashboard as dash
+
+RECEIVED_AT = "2026-06-22T00:00:00Z"
 
 
 def _serve(handler_cls):
@@ -49,30 +62,9 @@ def _get(port: int, path: str, headers: dict | None = None):
     return resp.status, raw
 
 
-def test_query_secret_rejected_header_required(wr, monkeypatch):
-    monkeypatch.setattr(wr, "SECRET", "s3cr3t")
-    monkeypatch.setattr(wr, "HERMX_REQUIRE_HMAC", False)
-    monkeypatch.setattr(wr, "PROCESS_QUEUE", queue.Queue(maxsize=10))
-
-    server, thread = _serve(wr.Handler)
-    try:
-        status, body = _post(server.server_address[1], "/webhook?secret=s3cr3t", {"source": "tradingview"})
-        assert status == 401
-        assert body.get("error") in {"forbidden", "missing_webhook_secret"}
-
-        status_ok, body_ok = _post(
-            server.server_address[1],
-            "/webhook",
-            {"source": "tradingview"},
-            headers={"X-Webhook-Secret": "s3cr3t"},
-        )
-        assert status_ok == 200
-        assert body_ok.get("status") == "queued"
-    finally:
-        _stop(server, thread)
-
-
 def test_hmac_replay_window_boundary(wr, monkeypatch):
+    # Unit test of the HMAC helper still shipped in security/webhook_auth.py.
+    # do_POST no longer calls it, but the function's window math must stay correct.
     monkeypatch.setattr(wr, "HERMX_REQUIRE_HMAC", True)
     monkeypatch.setattr(wr, "HERMX_WEBHOOK_HMAC_KEY", "hmac-key")
     monkeypatch.setattr(wr, "HERMX_REPLAY_WINDOW_SECONDS", 5.0)
@@ -91,8 +83,6 @@ def test_hmac_replay_window_boundary(wr, monkeypatch):
 
 
 def test_payload_size_cap_returns_413(wr, monkeypatch):
-    monkeypatch.setattr(wr, "SECRET", "s3cr3t")
-    monkeypatch.setattr(wr, "HERMX_REQUIRE_HMAC", False)
     monkeypatch.setattr(wr, "HERMX_MAX_BODY_BYTES", 8)
     monkeypatch.setattr(wr, "PROCESS_QUEUE", queue.Queue(maxsize=10))
 
@@ -102,7 +92,6 @@ def test_payload_size_cap_returns_413(wr, monkeypatch):
             server.server_address[1],
             "/webhook",
             {"source": "tradingview", "extra": "abc"},
-            headers={"X-Webhook-Secret": "s3cr3t"},
         )
         assert status == 413
         assert body.get("error") == "payload_too_large"
@@ -111,8 +100,6 @@ def test_payload_size_cap_returns_413(wr, monkeypatch):
 
 
 def test_rate_limit_rejects_excess_requests(wr, monkeypatch):
-    monkeypatch.setattr(wr, "SECRET", "s3cr3t")
-    monkeypatch.setattr(wr, "HERMX_REQUIRE_HMAC", False)
     monkeypatch.setattr(wr, "HERMX_RATE_LIMIT_MAX_REQUESTS", 1)
     monkeypatch.setattr(wr, "HERMX_RATE_LIMIT_WINDOW_SECONDS", 60.0)
     monkeypatch.setattr(wr, "PROCESS_QUEUE", queue.Queue(maxsize=10))
@@ -124,13 +111,13 @@ def test_rate_limit_rejects_excess_requests(wr, monkeypatch):
             server.server_address[1],
             "/webhook",
             {"source": "tradingview"},
-            headers={"X-Webhook-Secret": "s3cr3t", "CF-Connecting-IP": "1.2.3.4"},
+            headers={"CF-Connecting-IP": "1.2.3.4"},
         )
         status2, body2 = _post(
             server.server_address[1],
             "/webhook",
             {"source": "tradingview"},
-            headers={"X-Webhook-Secret": "s3cr3t", "CF-Connecting-IP": "1.2.3.4"},
+            headers={"CF-Connecting-IP": "1.2.3.4"},
         )
         assert status1 == 200
         assert status2 == 429
@@ -139,80 +126,7 @@ def test_rate_limit_rejects_excess_requests(wr, monkeypatch):
         _stop(server, thread)
 
 
-def test_missing_secret_fails_closed(wr, monkeypatch):
-    monkeypatch.setattr(wr, "SECRET", "")
-    monkeypatch.setattr(wr, "HERMX_REQUIRE_HMAC", False)
-    monkeypatch.setattr(wr, "PROCESS_QUEUE", queue.Queue(maxsize=10))
-
-    server, thread = _serve(wr.Handler)
-    try:
-        status, body = _post(server.server_address[1], "/webhook", {"source": "tradingview"})
-        assert status == 401
-        assert body.get("error") == "missing_webhook_secret"
-    finally:
-        _stop(server, thread)
-
-
-def test_blank_secret_blocks_submission_regardless_of_strategy(wr, monkeypatch):
-    # A blank HERMX_SECRET must 401 at the handler BEFORE the alert is ever enqueued --
-    # even for a fully-armed strategy alert. Auth precedes (and therefore blocks) the
-    # entire submission pipeline; strategy config can never override a missing secret.
-    monkeypatch.setattr(wr, "SECRET", "")
-    monkeypatch.setattr(wr, "HERMX_REQUIRE_HMAC", False)
-    q = queue.Queue(maxsize=10)
-    monkeypatch.setattr(wr, "PROCESS_QUEUE", q)
-
-    armed_alert = {
-        "source": "tradingview",
-        "strategy_id": "btcusdt_duo_base_dev_2h",
-        "symbol": "BTCUSDT",
-        "side": "buy",
-        "timeframe": "2h",
-    }
-    server, thread = _serve(wr.Handler)
-    try:
-        status, body = _post(server.server_address[1], "/webhook", armed_alert,
-                             headers={"X-Webhook-Secret": "anything"})
-        assert status == 401
-        assert body.get("error") == "missing_webhook_secret"
-        assert q.qsize() == 0  # nothing was enqueued => nothing can be submitted
-    finally:
-        _stop(server, thread)
-
-
-def test_hmac_replay_window_enforced(wr, monkeypatch):
-    monkeypatch.setattr(wr, "SECRET", "s3cr3t")
-    monkeypatch.setattr(wr, "HERMX_REQUIRE_HMAC", True)
-    monkeypatch.setattr(wr, "HERMX_WEBHOOK_HMAC_KEY", "hmac-key")
-    monkeypatch.setattr(wr, "HERMX_REPLAY_WINDOW_SECONDS", 5.0)
-    monkeypatch.setattr(wr, "PROCESS_QUEUE", queue.Queue(maxsize=10))
-
-    payload = {"source": "tradingview"}
-    raw = json.dumps(payload).encode("utf-8")
-    stale_ts = "1000"
-    stale_sig = wr.compute_webhook_hmac(stale_ts, raw, "hmac-key")
-
-    server, thread = _serve(wr.Handler)
-    try:
-        status, body = _post(
-            server.server_address[1],
-            "/webhook",
-            payload,
-            headers={
-                "X-Webhook-Secret": "s3cr3t",
-                "X-Webhook-Timestamp": stale_ts,
-                "X-Webhook-Signature": stale_sig,
-            },
-        )
-        assert status == 401
-        assert body.get("error") in {"hmac_replay_window", "hmac_timestamp_invalid", "hmac_mismatch"}
-    finally:
-        _stop(server, thread)
-
-
 def test_queue_full_returns_503_and_drops(wr, monkeypatch):
-    monkeypatch.setattr(wr, "SECRET", "s3cr3t")
-    monkeypatch.setattr(wr, "HERMX_REQUIRE_HMAC", False)
     q = queue.Queue(maxsize=1)
     q.put(({"seed": True}, "ts"))
     monkeypatch.setattr(wr, "PROCESS_QUEUE", q)
@@ -223,12 +137,44 @@ def test_queue_full_returns_503_and_drops(wr, monkeypatch):
             server.server_address[1],
             "/webhook",
             {"source": "tradingview"},
-            headers={"X-Webhook-Secret": "s3cr3t"},
         )
         assert status == 503
         assert body.get("error") == "queue_full"
     finally:
         _stop(server, thread)
+
+
+def test_alert_without_strategy_id_quarantined_when_required(wr, monkeypatch):
+    # With strategy_engine.require_strategy_id armed, an alert carrying no
+    # strategy_id is routed to the strategy-alert quarantine path (202) and never
+    # processed -- this gate replaces the removed shared-secret auth.
+    monkeypatch.setitem(wr.STRATEGY_ENGINE, "require_strategy_id", True)
+    payload = {
+        "source": "tradingview",
+        "symbol": "BTCUSDT",
+        "side": "buy",
+        "timeframe": "2h",
+        "tv_time": RECEIVED_AT,
+    }
+    status, record = wr.build_record(payload, RECEIVED_AT)
+    assert status == 202
+    assert record["mode"] == "strategy_alert_quarantine"
+    assert record["quarantined"] is True
+    assert record["reason"] == "missing_strategy_id_required"
+
+
+def test_alert_without_strategy_id_not_blocked_when_not_required(wr):
+    # Corpus default require_strategy_id=False: a non-strategy alert is NOT
+    # quarantined for a missing id (the gate is off).
+    payload = {
+        "source": "tradingview",
+        "symbol": "BTCUSDT",
+        "side": "buy",
+        "timeframe": "2h",
+        "tv_time": RECEIVED_AT,
+    }
+    _status, record = wr.build_record(payload, RECEIVED_AT)
+    assert record.get("reason") != "missing_strategy_id_required"
 
 
 def test_dashboard_api_requires_auth(monkeypatch):

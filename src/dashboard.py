@@ -166,13 +166,30 @@ def is_strategy_active(strategy) -> bool:
     return bool(strategy.get("submit_orders", False))
 
 
-_VALID_STRATEGY_MODES = frozenset({"shadow", "demo", "live"})
+_VALID_STRATEGY_MODES = frozenset({"pause", "demo", "live"})
 # Flag mapping must stay in sync with webhook_receiver.set_strategy_override.
 _STRATEGY_MODE_FLAGS = {
-    "shadow": {"execution_mode": "demo", "submit_orders": False},
-    "demo":   {"execution_mode": "demo", "submit_orders": True},
-    "live":   {"execution_mode": "live", "submit_orders": True},
+    "pause": {"execution_mode": "demo", "submit_orders": False},
+    "demo":  {"execution_mode": "demo", "submit_orders": True},
+    "live":  {"execution_mode": "live", "submit_orders": True},
 }
+# Legacy UI-mode label remap: control-state.json written before the shadow->pause
+# rename may still carry "mode": "shadow". Normalize on read so the dashboard pill
+# resolves to "pause" (the underlying execution_mode/submit_orders flags are unchanged).
+_LEGACY_STRATEGY_MODE_ALIASES = {"shadow": "pause"}
+
+
+def _normalize_override_modes(overrides: dict) -> dict:
+    """Remap legacy override 'mode' labels (e.g. shadow->pause) in-place. Only the
+    display label is touched; execution_mode/submit_orders flags are left as-is."""
+    if not isinstance(overrides, dict):
+        return overrides
+    for entry in overrides.values():
+        if isinstance(entry, dict):
+            alias = _LEGACY_STRATEGY_MODE_ALIASES.get(entry.get("mode"))
+            if alias:
+                entry["mode"] = alias
+    return overrides
 
 
 def _load_control_state() -> dict:
@@ -184,7 +201,11 @@ def _load_control_state() -> dict:
         if not CONTROL_STATE_FILE.exists():
             return {}
         state = json.loads(CONTROL_STATE_FILE.read_text(encoding="utf-8"))
-        return state if isinstance(state, dict) else {}
+        if not isinstance(state, dict):
+            return {}
+        if isinstance(state.get("strategy_overrides"), dict):
+            _normalize_override_modes(state["strategy_overrides"])
+        return state
     except Exception:
         return {}
 
@@ -1207,7 +1228,7 @@ def api_payload():
 
     # Merge strategy-mode overrides (control-state.json) into the payload. An override
     # takes precedence over the strategy file; otherwise effective_mode is derived from
-    # the file's submit_orders + execution_mode (shadow = orders off).
+    # the file's submit_orders + execution_mode (pause = orders off).
     _ctrl = _load_control_state()
     _overrides = _ctrl.get("strategy_overrides") if isinstance(_ctrl.get("strategy_overrides"), dict) else {}
     annotated_strategies = []
@@ -1222,7 +1243,7 @@ def api_payload():
             so = bool(s.get("submit_orders") or s.get("okx_submit_orders"))
             s = dict(s)
             if not so:
-                s["effective_mode"] = "shadow"
+                s["effective_mode"] = "pause"
             elif em == "live":
                 s["effective_mode"] = "live"
             else:
@@ -2441,7 +2462,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_bytes(404, b"not found", "text/plain")
 
     # ---- Strategy-mode control (write) -------------------------------------
-    # POST   /api/control/strategy/{id}  body {"mode": "shadow"|"demo"|"live"|"clear"}
+    # POST   /api/control/strategy/{id}  body {"mode": "pause"|"demo"|"live"|"clear"}
     # DELETE /api/control/strategy/{id}  -> clear override (restore file default)
     _CONTROL_PREFIXES = (
         "/dashboard/api/control/strategy/",
@@ -2469,8 +2490,9 @@ class Handler(BaseHTTPRequestHandler):
         if sid not in known:
             self._send_control_error(404, f"unknown strategy_id: {sid}")
             return
-        if mode not in {"shadow", "demo", "live", "clear"}:
-            self._send_control_error(400, "mode must be one of: shadow, demo, live, clear")
+        mode = _LEGACY_STRATEGY_MODE_ALIASES.get(mode, mode)  # accept legacy "shadow" -> "pause"
+        if mode not in {"pause", "demo", "live", "clear"}:
+            self._send_control_error(400, "mode must be one of: pause, demo, live, clear")
             return
         if mode == "clear":
             _clear_strategy_override(sid)  # idempotent: no-op if no override existed

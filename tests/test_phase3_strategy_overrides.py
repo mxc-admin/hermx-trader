@@ -19,9 +19,12 @@ exercise the real Handler over a loopback ThreadingHTTPServer on an ephemeral
 port. No network, no exchange, nothing can arm a real submission.
 
 Flag mapping under test (must stay identical in both modules):
-    shadow -> {execution_mode: demo, submit_orders: False}
-    demo   -> {execution_mode: demo, submit_orders: True}
-    live   -> {execution_mode: live, submit_orders: True}
+    pause -> {execution_mode: demo, submit_orders: False}
+    demo  -> {execution_mode: demo, submit_orders: True}
+    live  -> {execution_mode: live, submit_orders: True}
+
+The legacy UI label "shadow" is accepted and normalized to "pause" for backward
+compatibility with control-state.json written before the rename.
 """
 from __future__ import annotations
 
@@ -85,7 +88,7 @@ def _strategy_record(strategy_id: str, *, execution_mode: str, submit_orders: bo
 @pytest.mark.parametrize(
     "mode,expected",
     [
-        ("shadow", {"execution_mode": "demo", "submit_orders": False}),
+        ("pause", {"execution_mode": "demo", "submit_orders": False}),
         ("demo", {"execution_mode": "demo", "submit_orders": True}),
         ("live", {"execution_mode": "live", "submit_orders": True}),
     ],
@@ -109,13 +112,13 @@ def test_set_strategy_override_invalid_mode_no_write(wr):
 
 def test_set_strategy_override_empty_id_no_write(wr):
     assert not wr.CONTROL_STATE_FILE.exists()
-    assert wr.set_strategy_override("", "shadow") is False
-    assert wr.set_strategy_override("   ", "shadow") is False
+    assert wr.set_strategy_override("", "pause") is False
+    assert wr.set_strategy_override("   ", "pause") is False
     assert not wr.CONTROL_STATE_FILE.exists()
 
 
 def test_set_strategy_override_overwrites_existing(wr):
-    assert wr.set_strategy_override("strat-A", "shadow") is True
+    assert wr.set_strategy_override("strat-A", "pause") is True
     assert wr.set_strategy_override("strat-A", "live") is True
 
     overrides = _read_control_state(wr)["strategy_overrides"]
@@ -159,13 +162,37 @@ def test_load_control_state_missing_field_defaults_to_empty(wr):
     assert wr.load_control_state()["strategy_overrides"] == {}
 
 
+def test_load_control_state_remaps_legacy_shadow_to_pause(wr):
+    # Backward compat: a control-state.json written before the shadow->pause rename
+    # carries "mode": "shadow". On load the label normalizes to "pause"; the
+    # execution_mode/submit_orders flags are unchanged (still orders-off demo).
+    state = wr.default_control_state()
+    state["strategy_overrides"] = {
+        "strat-A": {"mode": "shadow", "execution_mode": "demo", "submit_orders": False, "set_at": "x"},
+    }
+    wr.CONTROL_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+
+    entry = wr.load_control_state()["strategy_overrides"]["strat-A"]
+    assert entry["mode"] == "pause"
+    assert entry["execution_mode"] == "demo"
+    assert entry["submit_orders"] is False
+
+
+def test_set_strategy_override_accepts_legacy_shadow_label(wr):
+    # The legacy "shadow" input label is normalized to "pause" on write.
+    assert wr.set_strategy_override("strat-A", "shadow") is True
+    entry = _read_control_state(wr)["strategy_overrides"]["strat-A"]
+    assert entry["mode"] == "pause"
+    assert entry["submit_orders"] is False
+
+
 # ===========================================================================
 # Section 2 — build_strategy_execution_readiness override behavior
 # ===========================================================================
 
-def test_readiness_shadow_override_forces_no_submit(wr):
-    # File says demo + submit; shadow override -> demo mode, submission OFF.
-    wr.set_strategy_override("strat-A", "shadow")
+def test_readiness_pause_override_forces_no_submit(wr):
+    # File says demo + submit; pause override -> demo mode, submission OFF.
+    wr.set_strategy_override("strat-A", "pause")
     rd = wr.build_strategy_execution_readiness(
         _strategy_record("strat-A", execution_mode="demo", submit_orders=True)
     )
@@ -274,6 +301,12 @@ def dash(tmp_path):
     orig_root = os.environ.get("SHADOW_ROOT")
     os.environ["SHADOW_ROOT"] = str(root)
 
+    # dashboard_core/dashboard read DASH_AUTH_TOKEN from HERMX_SECRET at import
+    # time. run.sh exports a real secret before pytest, so force the test value
+    # here (setdefault in conftest won't override an already-set env var).
+    orig_secret = os.environ.get("HERMX_SECRET")
+    os.environ["HERMX_SECRET"] = "test-secret"
+
     import dashboard_core as core
     importlib.reload(core)
     import dashboard as dash_mod
@@ -294,6 +327,10 @@ def dash(tmp_path):
             os.environ["SHADOW_ROOT"] = orig_root
         else:
             os.environ.pop("SHADOW_ROOT", None)
+        if orig_secret is not None:
+            os.environ["HERMX_SECRET"] = orig_secret
+        else:
+            os.environ.pop("HERMX_SECRET", None)
 
 
 @contextmanager
@@ -337,12 +374,12 @@ def test_post_valid_mode_writes_override(dash):
     dash_mod, _strategies_dir, _root = dash
     with _serve(dash_mod) as port:
         status, data = _request(port, "POST", "/api/control/strategy/dash-demo",
-                                 body={"mode": "shadow"})
+                                 body={"mode": "pause"})
     assert status == 200
-    assert json.loads(data)["mode"] == "shadow"
+    assert json.loads(data)["mode"] == "pause"
 
     overrides = dash_mod._load_control_state()["strategy_overrides"]
-    assert overrides["dash-demo"]["mode"] == "shadow"
+    assert overrides["dash-demo"]["mode"] == "pause"
     assert overrides["dash-demo"]["submit_orders"] is False
 
 
@@ -370,7 +407,7 @@ def test_post_unknown_strategy_returns_404(dash):
     dash_mod, _strategies_dir, _root = dash
     with _serve(dash_mod) as port:
         status, _ = _request(port, "POST", "/api/control/strategy/no-such-strategy",
-                             body={"mode": "shadow"})
+                             body={"mode": "pause"})
     assert status == 404
 
 
@@ -378,7 +415,7 @@ def test_post_without_token_returns_401(dash):
     dash_mod, _strategies_dir, _root = dash
     with _serve(dash_mod) as port:
         status, _ = _request(port, "POST", "/api/control/strategy/dash-demo",
-                             token=None, body={"mode": "shadow"})
+                             token=None, body={"mode": "pause"})
     assert status == 401
     # Auth failed before any write.
     assert dash_mod._load_control_state().get("strategy_overrides", {}) == {}
@@ -408,9 +445,9 @@ def test_api_payload_effective_mode_from_file(dash, execution_mode, submit_order
     assert row["effective_mode"] == expected
 
 
-def test_api_payload_effective_mode_shadow_when_submit_off(dash, monkeypatch):
+def test_api_payload_effective_mode_pause_when_submit_off(dash, monkeypatch):
     # A submit_orders=false strategy is normally filtered out of the active set, so
-    # exercise api_payload's shadow-derivation branch by injecting such a row.
+    # exercise api_payload's pause-derivation branch by injecting such a row.
     dash_mod, _strategies_dir, _root = dash
     monkeypatch.setattr(dash_mod, "active_strategies",
                         lambda *a, **k: [{"strategy_id": "off", "execution_mode": "demo", "submit_orders": False}])
@@ -418,7 +455,7 @@ def test_api_payload_effective_mode_shadow_when_submit_off(dash, monkeypatch):
 
     payload = dash_mod.api_payload()
     row = next(s for s in payload["strategies"] if s["strategy_id"] == "off")
-    assert row["effective_mode"] == "shadow"
+    assert row["effective_mode"] == "pause"
 
 
 def test_api_payload_effective_mode_override_wins(dash):
@@ -431,3 +468,20 @@ def test_api_payload_effective_mode_override_wins(dash):
     row = next(s for s in payload["strategies"] if s["strategy_id"] == "dash-demo")
     assert row["effective_mode"] == "live"
     assert payload["strategy_overrides"]["dash-demo"]["mode"] == "live"
+
+
+def test_api_payload_remaps_legacy_shadow_override_to_pause(dash):
+    # A legacy control-state.json override with "mode": "shadow" surfaces as "pause"
+    # in both the per-strategy effective_mode and the raw strategy_overrides payload.
+    dash_mod, _strategies_dir, _root = dash
+    dash_mod.CONTROL_STATE_FILE.write_text(json.dumps({
+        "strategy_overrides": {
+            "dash-demo": {"mode": "shadow", "execution_mode": "demo", "submit_orders": False, "set_at": "x"},
+        },
+    }), encoding="utf-8")
+    _bust(dash_mod)
+
+    payload = dash_mod.api_payload()
+    row = next(s for s in payload["strategies"] if s["strategy_id"] == "dash-demo")
+    assert row["effective_mode"] == "pause"
+    assert payload["strategy_overrides"]["dash-demo"]["mode"] == "pause"

@@ -36,7 +36,7 @@ export interface Strategy {
   capital?: Capital
   execution_mode?: string // "demo" | "live"
   submit_orders?: boolean
-  effective_mode?: string // "shadow" | "demo" | "live" — resolved by backend
+  effective_mode?: string // "pause" | "demo" | "live" — resolved by backend
   leverage?: number
   margin_mode?: string // "isolated" | "cross"
   notes?: string

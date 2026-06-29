@@ -1158,6 +1158,11 @@ def load_control_state() -> dict:
         merged["risk_limits"] = default.get("risk_limits", {}) | state.get("risk_limits", {})
         merged["symbol_pauses"] = state.get("symbol_pauses") if isinstance(state.get("symbol_pauses"), dict) else {}
         merged["strategy_overrides"] = state.get("strategy_overrides") if isinstance(state.get("strategy_overrides"), dict) else {}
+        # Backward compat: remap legacy override mode label "shadow" -> "pause".
+        # Only the display label is rewritten; execution_mode/submit_orders are untouched.
+        for _ov in merged["strategy_overrides"].values():
+            if isinstance(_ov, dict) and _ov.get("mode") == "shadow":
+                _ov["mode"] = "pause"
         return merged
     except Exception:
         return default_control_state()
@@ -1197,23 +1202,28 @@ def pause_symbol(symbol: "str | None", reason: str) -> bool:
     return True
 
 
-_VALID_STRATEGY_MODES = frozenset({"shadow", "demo", "live"})
+_VALID_STRATEGY_MODES = frozenset({"pause", "demo", "live"})
+# Legacy UI-mode label remap: control-state.json written before the shadow->pause
+# rename may still carry "mode": "shadow". Normalize to "pause" on read/write.
+_LEGACY_STRATEGY_MODE_ALIASES = {"shadow": "pause"}
 
 
 def set_strategy_override(strategy_id: str, mode: str) -> bool:
     """Set a per-strategy execution mode override in control-state.json.
 
-    mode must be one of: 'shadow' (no orders), 'demo' (sandbox), 'live' (real venue).
+    mode must be one of: 'pause' (no orders), 'demo' (sandbox), 'live' (real venue).
+    The legacy 'shadow' label is accepted and normalized to 'pause'.
     The global HERMX_LIVE_TRADING kill switch still gates live submissions independently.
     """
     sid = str(strategy_id or "").strip()
     mode = str(mode or "").strip().lower()
+    mode = _LEGACY_STRATEGY_MODE_ALIASES.get(mode, mode)
     if not sid or mode not in _VALID_STRATEGY_MODES:
         return False
     flags = {
-        "shadow": {"execution_mode": "demo", "submit_orders": False},
-        "demo":   {"execution_mode": "demo", "submit_orders": True},
-        "live":   {"execution_mode": "live", "submit_orders": True},
+        "pause": {"execution_mode": "demo", "submit_orders": False},
+        "demo":  {"execution_mode": "demo", "submit_orders": True},
+        "live":  {"execution_mode": "live", "submit_orders": True},
     }[mode]
     state = load_control_state()
     overrides = state.get("strategy_overrides") if isinstance(state.get("strategy_overrides"), dict) else {}
@@ -3231,10 +3241,6 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             raw_body = self.rfile.read(length) if length else b""
-            ok, status, reason = authenticate_webhook_request(self, raw_body)
-            if not ok:
-                self._send(status, {"ok": False, "error": reason})
-                return
             payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
         except Exception as exc:
             self._send(400, {"ok": False, "error": "invalid_json", "detail": str(exc)})

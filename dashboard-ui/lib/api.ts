@@ -58,7 +58,7 @@ export async function fetchHealth(): Promise<HealthPayload> {
 
 export async function setStrategyMode(
   strategyId: string,
-  mode: 'shadow' | 'demo' | 'live' | 'clear',
+  mode: 'pause' | 'demo' | 'live' | 'clear',
 ): Promise<void> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)

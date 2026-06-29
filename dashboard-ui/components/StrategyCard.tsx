@@ -14,7 +14,7 @@ interface StrategyCardProps {
   onModeChange?: () => void
 }
 
-const MODES = ['shadow', 'demo', 'live'] as const
+const MODES = ['pause', 'demo', 'live'] as const
 type Mode = typeof MODES[number]
 
 function ModePill({
@@ -28,9 +28,9 @@ function ModePill({
   onSelect: (m: Mode) => void
   pending: boolean
 }) {
-  const modeLabel: Record<Mode, string> = { shadow: 'Shadow', demo: 'Demo', live: 'Live' }
+  const modeLabel: Record<Mode, string> = { pause: 'Pause', demo: 'Demo', live: 'Live' }
   const modeColor: Record<Mode, string> = {
-    shadow: 'var(--text-muted)',
+    pause: 'var(--text-muted)',
     demo: 'var(--text-primary)',
     live: 'var(--positive)',
   }
@@ -63,7 +63,7 @@ function ModePill({
               background: isActive ? 'var(--bg-hover, rgba(255,255,255,0.08))' : 'transparent',
               color: isActive ? modeColor[m] : isLocked ? 'var(--text-muted)' : 'var(--text-secondary)',
               border: 'none',
-              borderLeft: m !== 'shadow' ? '1px solid var(--border-dim)' : 'none',
+              borderLeft: m !== 'pause' ? '1px solid var(--border-dim)' : 'none',
               cursor: isLocked ? 'not-allowed' : 'pointer',
               display: 'inline-flex',
               alignItems: 'center',
