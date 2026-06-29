@@ -2,7 +2,7 @@ import type { ApiPayload, HealthPayload } from './types'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:7070'
 
-const TIMEOUT_MS = 8000
+const TIMEOUT_MS = 15000
 
 // Auth token: prefer the meta tag injected by the Python server (keeps the
 // secret out of the JS bundle), then fall back to the build-time env var
