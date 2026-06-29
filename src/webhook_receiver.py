@@ -97,6 +97,23 @@ from webhook.position_journal import (  # noqa: E402
     _ensure_policy_bucket,
     _coerce_state_numeric_fields,
 )
+# Option A: leaf-pure time + JSONL-I/O primitives extracted to webhook/timeutil.py
+# and webhook/ledger_io.py. Re-export so wr.now_iso / wr.append_jsonl / ... stay
+# importable and monkeypatchable at call sites that live in this module. The
+# path-bound recorders (record_pipeline_event, record_raw_webhook,
+# startup_quarantine_partial_ledgers) deliberately STAY here -- they bind LOG_DIR
+# path constants not yet extracted to a config module.
+from webhook.timeutil import (  # noqa: E402  F401
+    now_iso,
+    parse_tv_time,
+    latency_info,
+    _epoch_from_iso,
+)
+from webhook.ledger_io import (  # noqa: E402  F401
+    append_jsonl,
+    append_jsonl_durable,
+    read_jsonl_tolerant,
+)
 
 PORT = int(os.environ.get("SHADOW_PORT", "8891"))
 # Address the HTTP server binds to. Default 127.0.0.1 keeps bare-host/systemd
@@ -628,27 +645,6 @@ LIVE_READ_SLEEP_SECONDS = float(os.environ.get("MXC_LIVE_READ_SLEEP_SECONDS", "1
 HEALTH_CACHE_MAX_AGE_SECONDS = float(os.environ.get("MXC_HEALTH_CACHE_MAX_AGE_SECONDS", "420"))
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def parse_tv_time(value) -> datetime | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        if text.isdigit():
-            raw = int(text)
-            if raw > 10_000_000_000:
-                raw = raw / 1000.0
-            return datetime.fromtimestamp(raw, tz=timezone.utc)
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
-    except Exception:
-        return None
-
-
 def webhook_auth_config_healthy() -> bool:
     return _webhook_auth_config_healthy(SECRET, HERMX_REQUIRE_HMAC, HERMX_WEBHOOK_HMAC_KEY)
 
@@ -866,19 +862,6 @@ def authenticate_webhook_request(handler: BaseHTTPRequestHandler, body: bytes) -
     )
 
 
-def latency_info(tv_time, received_at: str) -> dict:
-    received_dt = parse_tv_time(received_at) or datetime.now(timezone.utc)
-    tv_dt = parse_tv_time(tv_time)
-    if not tv_dt:
-        return {"tv_time_parse_ok": False, "latency_seconds": None, "latency_minutes": None}
-    seconds = (received_dt - tv_dt).total_seconds()
-    return {
-        "tv_time_parse_ok": True,
-        "latency_seconds": round(seconds, 3),
-        "latency_minutes": round(seconds / 60.0, 3),
-    }
-
-
 def dedupe_key(normalized: dict) -> str:
     return "|".join(str(normalized.get(k, "")) for k in ("strategy_id", "symbol", "side", "timeframe", "tv_time"))
 
@@ -902,13 +885,6 @@ def _dedupe_window_seconds() -> float:
     # silently widen idempotency retention -- two unrelated concerns. Neither widens the
     # other now: freshness is the HMAC's job, idempotency is this ledger's job.
     return max(1.0, HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS)
-
-
-def _epoch_from_iso(ts: str | None) -> float | None:
-    dt = parse_tv_time(ts)
-    if dt is None:
-        return None
-    return dt.timestamp()
 
 
 def _load_signal_dedupe_index(now_seconds: float | None = None) -> None:
@@ -1002,33 +978,6 @@ def check_and_mark_signal(normalized: dict, received_at: str) -> tuple[bool, dic
         )
         meta["first_seen_at"] = received_at
         return False, meta
-
-
-def append_jsonl(path: Path, obj: dict) -> None:
-    """Append one JSONL record atomically + durably (whole-line write + fsync).
-
-    Phase 1 task 2 remainder (REFACTOR_PLAN.md:206): all append_jsonl callers inherit
-    durable writes. The whole encoded line (incl. trailing newline) is written via a
-    short-write loop on a single unbuffered fd, so the OS can never wedge a HALF-written
-    record in front of later appends -- a money-path PLANNED record is all-or-nothing.
-    A crash mid-write can only ever leave a clean TRAILING tear, which read_jsonl_tolerant
-    quarantines without bricking the ledger."""
-    line = (json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
-    # buffering=0 => binary, unbuffered: f.write is a direct os.write we can complete.
-    with path.open("ab", buffering=0) as f:
-        fd = f.fileno()
-        view = memoryview(line)
-        while view:
-            written = os.write(fd, view)
-            if written <= 0:  # pragma: no cover - defensive against a stuck fd
-                raise OSError(f"append_jsonl: zero-length write to {path}")
-            view = view[written:]
-        os.fsync(fd)
-
-
-def append_jsonl_durable(path: Path, obj: dict) -> None:
-    """Compatibility alias for durable JSONL appends."""
-    append_jsonl(path, obj)
 
 
 # --- Consolidated-ledger writers + size rotation ------------------------------
@@ -1136,42 +1085,6 @@ def record_raw_webhook(phase: str, payload: dict) -> None:
     record.update(payload or {})
     append_jsonl(RAW_WEBHOOK_LEDGER, record)
     _rotate_ledger_if_large(RAW_WEBHOOK_LEDGER)
-
-
-def read_jsonl_tolerant(path: Path) -> list[dict]:
-    """Parse a JSONL file, tolerating a truncated/partial *trailing* line
-    (REFACTOR_PLAN.md:206, :234). A crash mid-append can leave a half-written
-    final line; that line is dropped (and copied to ``<path>.corrupt`` for
-    forensics) and reading continues — never raises. An invalid line that is NOT
-    the last non-empty line is genuine mid-file corruption: log loudly and raise,
-    because silently skipping it would fabricate state."""
-    if not path.exists():
-        return []
-    raw = path.read_text(encoding="utf-8")
-    if not raw:
-        return []
-    lines = raw.split("\n")
-    last_idx = -1
-    for i, ln in enumerate(lines):
-        if ln.strip():
-            last_idx = i
-    out: list[dict] = []
-    for i, ln in enumerate(lines):
-        if not ln.strip():
-            continue
-        try:
-            out.append(json.loads(ln))
-        except (json.JSONDecodeError, ValueError):
-            if i == last_idx:
-                try:
-                    (path.parent / (path.name + ".corrupt")).write_text(ln, encoding="utf-8")
-                except Exception:
-                    pass
-                logging.warning("read_jsonl_tolerant: quarantined truncated trailing line in %s", path)
-                break
-            logging.error("read_jsonl_tolerant: corrupt non-trailing line %d in %s (mid-file corruption)", i, path)
-            raise
-    return out
 
 
 def startup_quarantine_partial_ledgers(paths: "list[Path] | tuple[Path, ...] | None" = None) -> dict:
@@ -4418,6 +4331,106 @@ def worker_loop(worker_name: str = "shadow-policy-worker-1") -> None:
             PROCESS_QUEUE.task_done()
 
 
+def replay_intake_webhooks(now_seconds=None) -> "tuple[int, int, int]":
+    """Re-queue intake rows that were accepted (HTTP 200) but never dequeued
+    before a restart. Returns (replayed, skipped, dropped). Best-effort:
+    never raises.
+
+    Option A: drops any intake row whose payload lacks a time field, because
+    normalize() would use now_iso() for tv_time, producing a different
+    signal_id on replay and bypassing the dedupe ledger.
+    """
+    if not HERMX_REPLAY_ENABLED or REPLAY_LOOKBACK_SECONDS <= 0:
+        return (0, 0, 0)
+
+    now = time.time() if now_seconds is None else float(now_seconds)
+    try:
+        rows = read_jsonl_tolerant(RAW_WEBHOOK_LEDGER)
+    except Exception as exc:
+        logging.error("replay: failed reading raw-webhooks.jsonl: %s", exc)
+        return (0, 0, 0)
+
+    processed = {
+        r.get("received_at")
+        for r in rows
+        if isinstance(r, dict) and r.get("phase") == "webhook" and r.get("received_at")
+    }
+    intake_rows = [
+        r for r in rows
+        if isinstance(r, dict) and r.get("phase") == "intake"
+    ]
+
+    replayed = skipped = dropped = 0
+    seen_received_at: "set[str]" = set()
+
+    # Load dedupe index once (covers the 24h window).
+    with _SIGNAL_DEDUPE_LOCK:
+        _load_signal_dedupe_index(now_seconds=now)
+        sig_idx = _SIGNAL_DEDUPE_INDEX.get("signals", {})
+        key_idx = _SIGNAL_DEDUPE_INDEX.get("keys", {})
+
+    for r in intake_rows:
+        rcv = r.get("received_at")
+        if not rcv or rcv in seen_received_at:
+            skipped += 1
+            continue
+        seen_received_at.add(rcv)
+
+        if rcv in processed:
+            skipped += 1
+            continue
+
+        rcv_epoch = _epoch_from_iso(rcv)
+        if rcv_epoch is None or rcv_epoch < now - REPLAY_LOOKBACK_SECONDS:
+            skipped += 1
+            continue
+
+        payload = r.get("payload")
+        if not isinstance(payload, dict):
+            skipped += 1
+            continue
+
+        # Option A: require a deterministic time field.
+        if not _has_time_field(payload):
+            logging.warning("replay: dropping intake row at %s -- no time field in payload", rcv)
+            dropped += 1
+            continue
+
+        norm = normalize(payload)
+        sid = str(norm.get("signal_id") or "")
+        dedup_key = dedupe_key(norm)
+        if sid in sig_idx or dedup_key in key_idx:
+            skipped += 1
+            continue
+
+        tv_time_str = str(norm.get("tv_time") or "")
+        tv_epoch = _epoch_from_iso(tv_time_str)
+        if tv_epoch is None:
+            logging.warning("replay: dropping intake row at %s -- unparseable tv_time %r", rcv, tv_time_str)
+            dropped += 1
+            continue
+        if tv_epoch < now - REPLAY_MAX_TV_AGE_SECONDS:
+            logging.info(
+                "replay: dropping stale signal tv_time=%s (epoch=%s, now=%s, delta=%s)",
+                tv_time_str, tv_epoch, now, now - tv_epoch,
+            )
+            dropped += 1
+            continue
+
+        try:
+            work_item = _queue_work_item(payload, rcv)
+            PROCESS_QUEUE.put_nowait(work_item)
+            replayed += 1
+            logging.info("replay: requeued signal %s (received_at=%s)", sid, rcv)
+        except queue.Full:
+            logging.warning("replay: queue full, dropping signal %s", sid)
+            _burn_symbol_ticket(work_item[2], work_item[3])
+            dropped += 1
+            break  # further puts will also fail
+
+    return (replayed, skipped, dropped)
+
+
 class Handler(BaseHTTPRequestHandler):
     timeout = max(1.0, HERMX_REQUEST_TIMEOUT_SECONDS)  # kills stalled body reads
 
@@ -4651,6 +4664,25 @@ def main():
         reconcile_startup()
     except Exception as exc:  # pragma: no cover - never block boot on observe-only reconcile
         logging.error("startup reconcile failed (observe-only, continuing): %s", exc)
+    # Replay any intake webhooks accepted before a restart but never dequeued.
+    # TradingView got HTTP 200 and will not retry -- we must recover them. This
+    # runs BEFORE worker threads start, so replayed items are already queued when
+    # workers begin dequeuing.
+    if HERMX_REPLAY_ENABLED and REPLAY_LOOKBACK_SECONDS > 0:
+        try:
+            replayed, skipped, dropped = replay_intake_webhooks()
+        except Exception as exc:  # pragma: no cover - never block boot on best-effort replay
+            logging.error("startup replay failed (continuing): %s", exc)
+        else:
+            if replayed or dropped:
+                logging.info(
+                    "Startup replay: requeued=%d skipped=%d dropped=%d",
+                    replayed, skipped, dropped,
+                )
+                record_pipeline_event(
+                    "startup_replay", None,
+                    {"replayed": replayed, "skipped": skipped, "dropped": dropped, "at": now_iso()},
+                )
     if unknown_resolver_enabled():
         threading.Thread(target=unknown_resolver_loop, daemon=True, name="unknown-resolver").start()
     pool_size = max(1, HERMX_WORKER_POOL_SIZE)
