@@ -84,3 +84,24 @@
 - **Verdict:** REJECTED
 - **Reason:** `DEFAULT_CHART_TYPE` was never consumed by production (normalize uses payload or None). `POLICY_KEYS` served a dead policy engine. Fee/funding constants are fiction — CCXT provides real per-venue values. All deleted.
 - **Date:** June 2026
+
+### PyPI package as primary distribution
+- **What**: Package HermX as `pip install hermx` with entry-point scripts.
+- **Tested**: Compared against Docker Compose alternative for VPS install.
+- **Verdict**: REJECTED
+- **Reason**: PyPI buries strategies in `site-packages/` (read-only, hard to edit). `pip install --upgrade` can overwrite package data including jsonl files unless explicitly externalized. Docker named volumes solve both problems natively.
+- **Date tested**: June 2026
+
+### COPY engine-config.json in Dockerfile
+- **What**: `COPY engine-config.json /app/engine-config.json` in the Dockerfile.
+- **Tested**: `git check-ignore engine-config.json` — file is gitignored (`.gitignore:7`).
+- **Verdict**: REJECTED
+- **Reason**: A fresh clone / CI checkout does not contain `engine-config.json`, so `docker build` fails with `COPY failed: no such file or directory`. Replaced with `COPY config/runtime.demo.json` (tracked, identical defaults).
+- **Date tested**: June 2026
+
+### Removing read_only from dashboard service to fix control-state writes
+- **What**: Remove `read_only: true` from the dashboard compose service so it can write `control-state.json`.
+- **Tested**: Code review of `dashboard.py:2497-2518` (`_save_control_state`) and compose service definition.
+- **Verdict**: REJECTED
+- **Reason**: Removing `read_only` weakens container hardening for a single file write. Better: add `HERMX_DATA_DIR=/app/data` + `hermx-state:/app/data` (rw) mount. Root fs stays read-only; only the volume mount is writable.
+- **Date tested**: June 2026

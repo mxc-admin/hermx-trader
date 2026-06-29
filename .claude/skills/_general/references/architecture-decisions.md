@@ -75,3 +75,23 @@
 - **Decision:** `ALLOWED_SYMBOLS = frozenset(s.get("asset") for s in STRATEGIES.values())` instead of `CONFIG["assets"].keys()`
 - **Alternatives:** Keep a global `assets` block in config
 - **Rationale:** If a strategy file defines an asset, it's allowed by definition. No separate allow-list to maintain. Removes a class of "strategy exists but asset not in config" failures.
+
+### Multi-stage Dockerfile with Node UI builder
+- **Decision**: Build `dashboard-ui/out` inside a `node:20-slim` stage, copy into Python runtime stage.
+- **Alternatives**: CI pre-build (A2) — commit build artifacts to repo; host-mount `dashboard-ui/out` from laptop.
+- **Rationale**: Self-contained, no Node on VPS, no build-artifact commits. Stage 1 rebuilds clean from `package-lock.json` regardless of host state.
+
+### Bake tracked config/runtime.demo.json as engine-config.json
+- **Decision**: `COPY config/runtime.demo.json /app/engine-config.json` in Dockerfile.
+- **Alternatives**: `COPY engine-config.json` directly (rejected — file is gitignored, breaks clean/CI builds).
+- **Rationale**: `runtime.demo.json` is tracked, venue-agnostic, and byte-identical to code defaults. The image is self-runnable standalone. Compose bind-mounts `:ro` for operator overrides.
+
+### Seed strategies from image in installer before first compose up
+- **Decision**: Installer extracts `strategies/` from the pulled image into the host install dir before `docker compose up`.
+- **Alternatives**: Trust the baked fallback (rejected — empty host bind-mounted `:ro` dir shadows baked files → zero strategies → all alerts quarantined).
+- **Rationale**: Docker bind-mounts are all-or-nothing; an empty host dir completely replaces the image contents. Pre-seeding guarantees the operator has editable strategy files.
+
+### Docker named volumes for state isolation
+- **Decision**: `hermx-data` (ledgers) + `hermx-state` (snapshots) as named volumes; bind-mounts only for operator-editable config.
+- **Alternatives**: Host directories for everything (rejected — permissions mess with non-root uid 10001); bake state into image (rejected — destroyed on every update).
+- **Rationale**: Named volumes have independent lifecycle, preserve data across image pulls, and inherit correct ownership from the image's pre-created mount points.
