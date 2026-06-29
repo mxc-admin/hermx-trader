@@ -15,7 +15,7 @@ from unittest import mock
 
 import pytest
 
-from skills.hermes_execution import HermesExecutionSkill, build_execution_intent
+from skills.hermes_execution import HermesRelayAdapter, build_execution_intent
 
 
 def _signal(**over):
@@ -68,7 +68,7 @@ def test_intent_is_stable_and_close_verify_open_ordered():
 
 def test_dry_run_returns_not_submitted_and_never_calls_service():
     service = mock.Mock()
-    skill = HermesExecutionSkill(service=service)
+    skill = HermesRelayAdapter(service=service)
 
     out = skill.execute(signal=_signal(), strategy=_strategy(), account_context=_account(), mode="dry_run")
 
@@ -82,7 +82,7 @@ def test_dry_run_returns_not_submitted_and_never_calls_service():
 
 def test_dry_run_is_the_default_mode():
     service = mock.Mock()
-    skill = HermesExecutionSkill(service=service)
+    skill = HermesRelayAdapter(service=service)
 
     out = skill.execute(signal=_signal(), strategy=_strategy(), account_context=_account())
 
@@ -100,7 +100,7 @@ def test_live_routes_through_service_and_maps_filled():
         "mode": "submit_enabled",
         "payload": {"fill_summary": {"status": "filled"}},
     }
-    skill = HermesExecutionSkill(service=service)
+    skill = HermesRelayAdapter(service=service)
 
     out = skill.execute(signal=_signal(), strategy=_strategy(), account_context=_account(), mode="live")
 
@@ -120,7 +120,7 @@ def test_live_maps_submitted_when_not_yet_filled():
         "mode": "submit_enabled",
         "payload": {"fill_summary": {"status": "submitted"}},
     }))
-    skill = HermesExecutionSkill(service=service)
+    skill = HermesRelayAdapter(service=service)
 
     out = skill.execute(signal=_signal(), strategy=_strategy(), account_context=_account(), mode="live")
 
@@ -135,7 +135,7 @@ def test_live_maps_reconciled_state_over_stdout():
         "payload": {"fill_summary": {"status": "submitted"}},
         "reconcile": {"state": "FILLED"},
     }))
-    skill = HermesExecutionSkill(service=service)
+    skill = HermesRelayAdapter(service=service)
 
     out = skill.execute(signal=_signal(), strategy=_strategy(), account_context=_account(), mode="live")
 
@@ -151,7 +151,7 @@ def test_kill_switch_not_submitted_reason_is_surfaced():
         "mode": "not_submitted",
         "reason": "live_trading_disabled",
     }))
-    skill = HermesExecutionSkill(service=service)
+    skill = HermesRelayAdapter(service=service)
 
     out = skill.execute(signal=_signal(), strategy=_strategy(), account_context=_account(), mode="live")
 
@@ -166,7 +166,7 @@ def test_gate_false_not_submitted_reason_is_surfaced():
         "mode": "not_submitted",
         "reason": "execution disabled",
     }))
-    skill = HermesExecutionSkill(service=service)
+    skill = HermesRelayAdapter(service=service)
 
     out = skill.execute(signal=_signal(), strategy=_strategy(), account_context=_account(), mode="live")
 
@@ -179,7 +179,7 @@ def test_gate_false_not_submitted_reason_is_surfaced():
 def test_service_exception_maps_to_unknown_and_does_not_retry():
     service = mock.Mock()
     service.execute.side_effect = TimeoutError("boom")
-    skill = HermesExecutionSkill(service=service)
+    skill = HermesRelayAdapter(service=service)
 
     out = skill.execute(signal=_signal(), strategy=_strategy(), account_context=_account(), mode="live")
 
@@ -195,7 +195,7 @@ def test_submit_exception_result_mode_maps_to_unknown():
         "mode": "submit_exception",
         "error": "redacted",
     }))
-    skill = HermesExecutionSkill(service=service)
+    skill = HermesRelayAdapter(service=service)
 
     out = skill.execute(signal=_signal(), strategy=_strategy(), account_context=_account(), mode="live")
 
@@ -209,7 +209,7 @@ def test_submit_failed_rejected_maps_to_rejected():
         "mode": "submit_failed",
         "payload": {"fill_summary": {"status": "rejected"}},
     }))
-    skill = HermesExecutionSkill(service=service)
+    skill = HermesRelayAdapter(service=service)
 
     out = skill.execute(signal=_signal(), strategy=_strategy(), account_context=_account(), mode="live")
 
@@ -220,7 +220,7 @@ def test_submit_failed_rejected_maps_to_rejected():
 
 def test_unresolved_venue_mapping_fails_closed_without_submit():
     service = mock.Mock()
-    skill = HermesExecutionSkill(service=service)
+    skill = HermesRelayAdapter(service=service)
     # No inst_id anywhere (strategy lacks it, account has no asset map).
     strat = _strategy()
     strat.pop("inst_id")
@@ -234,7 +234,7 @@ def test_unresolved_venue_mapping_fails_closed_without_submit():
 
 def test_invalid_side_fails_closed_without_submit():
     service = mock.Mock()
-    skill = HermesExecutionSkill(service=service)
+    skill = HermesRelayAdapter(service=service)
 
     out = skill.execute(signal=_signal(side="hold"), strategy=_strategy(), account_context=_account(), mode="live")
 
@@ -254,4 +254,4 @@ def test_inst_id_resolved_from_account_asset_map():
 
 def test_constructing_without_service_is_rejected():
     with pytest.raises(ValueError):
-        HermesExecutionSkill(service=None)
+        HermesRelayAdapter(service=None)

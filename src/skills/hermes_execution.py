@@ -3,7 +3,7 @@
 
 This is the concrete runtime behind ``docs/hermes-execution.md`` -- the single
 agent-facing execution surface. The agent never touches an exchange SDK; it calls
-:meth:`HermesExecutionSkill.execute`, which:
+:meth:`HermesRelayAdapter.execute`, which:
 
   1. Normalizes ``signal`` + ``strategy`` + ``account_context`` into a controlled
      ``execution_intent`` (stable client-order-id, target direction, actions).
@@ -212,7 +212,7 @@ def _map_service_mode(result: dict) -> str:
     return MODE_UNKNOWN
 
 
-class HermesExecutionSkill:
+class HermesRelayAdapter:
     """Runtime for the Hermes execution skill (the only agent-facing surface).
 
     The skill is constructed with a controlled ``service`` (an
@@ -223,7 +223,7 @@ class HermesExecutionSkill:
 
     def __init__(self, *, service, intent_builder=None, record_builder=None, hooks=None):
         if service is None:
-            raise ValueError("HermesExecutionSkill requires a controlled execution service")
+            raise ValueError("HermesRelayAdapter requires a controlled execution service")
         self.service = service
         self._build_intent = intent_builder or build_execution_intent
         self._build_record = record_builder or build_execution_record

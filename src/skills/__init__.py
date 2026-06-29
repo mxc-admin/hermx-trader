@@ -11,13 +11,13 @@ journal, idempotency, UNKNOWN handling) stays above the adapter boundary.
 from __future__ import annotations
 
 from .hermes_execution import (
-    HermesExecutionSkill,
+    HermesRelayAdapter,
     build_execution_intent,
     build_execution_record,
 )
 
 __all__ = [
-    "HermesExecutionSkill",
+    "HermesRelayAdapter",
     "build_execution_intent",
     "build_execution_record",
 ]

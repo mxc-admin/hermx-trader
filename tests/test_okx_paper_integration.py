@@ -13,7 +13,7 @@ from execution.service import ExecutionService
 from executors.ccxt_adapter import CcxtExecutor
 from executors.factory import ExecutorFactory
 from security.credentials import resolve_exchange_credentials
-from skills.hermes_execution import HermesExecutionSkill
+from skills.hermes_execution import HermesRelayAdapter
 
 
 RUN_OKX_PAPER = (os.environ.get("HERMX_RUN_OKX_PAPER_TESTS") or "").strip().lower() in {"1", "true", "yes"}
@@ -269,7 +269,7 @@ def test_hermes_skill_to_execution_service_kill_switch_blocks_okx_paper_submit(r
         "redact_secrets": lambda text: text,
     }
     service = ExecutionService(config=_okx_paper_config(repo_root), root=repo_root, executor_factory=ExecutorFactory, hooks=hooks)
-    skill = HermesExecutionSkill(service=service)
+    skill = HermesRelayAdapter(service=service)
 
     with mock.patch.object(CcxtExecutor, "execute", autospec=True) as adapter_execute:
         out = skill.execute(

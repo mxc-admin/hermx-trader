@@ -125,10 +125,16 @@ class ExecutionService:
         # execution_mode==live. "Real venue" is decided exactly as the adapter decides it:
         # the RESOLVED execution config's ``simulated_trading`` is falsey (the adapter
         # skips set_sandbox_mode). Demo/paper/shadow must stay sandbox-only.
+        # A close-only record (operator-instructed flatten) BYPASSES the kill switch:
+        # the switch exists to stop the system OPENING real-venue risk, but a close
+        # only REDUCES exposure. Refusing it would trap an operator who needs to
+        # flatten a live position during an emergency (the exact moment the switch is
+        # likely off). Every other gate (submit flag, mode, idempotency, auth,
+        # watchdog) still applies -- only this one gate is bypassed for a close.
         resolved_exec = self._execution_config(readiness).get("execution") or {}
         non_sandbox = not bool(resolved_exec.get("simulated_trading", True))
         is_live_mode = execution_mode == "live"
-        if is_live_mode or non_sandbox:
+        if (is_live_mode or non_sandbox) and not readiness.get("close_only"):
             live_trading_enabled = self._h("live_trading_enabled")
             if not live_trading_enabled()[0]:
                 return _blocked("live_trading_disabled", "live_trading_kill_switch")
@@ -139,10 +145,15 @@ class ExecutionService:
                 # Live mode but the resolved config still sandboxes: no live/sim mixing.
                 return _blocked("live_mode_simulated_inconsistent", "live_sandbox_consistency")
 
-        symbol_pause_info = self._h("symbol_pause_info")
-        symbol_pause = symbol_pause_info(readiness.get("symbol"))
-        if symbol_pause:
-            return _blocked("symbol_paused", "symbol_pause", symbol_pause=symbol_pause)
+        # Symbol pause is BYPASSED for a close. A pause is set when a symbol is in an
+        # uncertain/dangerous state (e.g. a stuck UNKNOWN order); a close is the
+        # RESOLUTION to that state, not new risk. Blocking the close here would trap
+        # the operator -- they could never flatten the very symbol the pause flagged.
+        if not readiness.get("close_only"):
+            symbol_pause_info = self._h("symbol_pause_info")
+            symbol_pause = symbol_pause_info(readiness.get("symbol"))
+            if symbol_pause:
+                return _blocked("symbol_paused", "symbol_pause", symbol_pause=symbol_pause)
 
         order_intent_from_readiness = self._h("order_intent_from_readiness")
         cl_ord_id_from_readiness = self._h("cl_ord_id_from_readiness")

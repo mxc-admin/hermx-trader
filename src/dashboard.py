@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from dashboard_core import (
     LEDGER_READ_STATS,
@@ -299,6 +299,57 @@ def _pipeline_rows(stage, limit, scan=None):
     if limit and len(rows) > limit:
         rows = rows[-limit:]
     return rows, stats
+
+
+SIGNALS_MAX_N = 500
+SIGNALS_DEFAULT_N = 50
+
+
+def _signal_projection(row):
+    """Project one execution-stage pipeline row to the compact /api/signals shape.
+
+    Handles both normal TV-triggered submissions (fields nested under
+    ``okx_execution.payload.plan``) and operator closes (symbol/strategy_id/kind/
+    operator/reason stamped at the top level by execute_operator_close)."""
+    okx = row.get("okx_execution") or {}
+    payload = okx.get("payload") or {}
+    plan = payload.get("plan") or {}
+    intent = plan.get("execution_intent") or {}
+    return {
+        "ts": row.get("ts"),
+        "submitted_at": row.get("received_at") or row.get("ts"),
+        "symbol": row.get("symbol") or plan.get("symbol"),
+        "side": plan.get("signal_side") or plan.get("target_side"),
+        "strategy_id": row.get("strategy_id") or plan.get("strategy_id"),
+        "mode": okx.get("mode") or payload.get("mode"),
+        "reason": okx.get("reason"),
+        "kind": row.get("kind"),
+        "operator": row.get("operator"),
+        "cl_ord_id": row.get("cl_ord_id") or intent.get("client_order_id"),
+        "ok": okx.get("ok"),
+        "elapsed_ms": okx.get("elapsed_ms"),
+    }
+
+
+def signals_payload(n=SIGNALS_DEFAULT_N, symbol=None):
+    """Last ``n`` execution-stage events from pipeline.jsonl (the full TV-triggered +
+    operator-close trade history), most recent first, optionally filtered by symbol.
+
+    A missing ledger yields ``{"ok": True, "signals": [], "count": 0}``. ``n`` is
+    clamped to [1, SIGNALS_MAX_N]; the underlying reverse-tail read stays bounded."""
+    n = max(1, min(int(n), SIGNALS_MAX_N))
+    symbol_filter = str(symbol or "").strip().upper() or None
+    # Scan a wider window than n so a symbol filter still surfaces n matches when
+    # the stage interleaves many symbols; the read is OOM-bounded regardless.
+    scan = max(n * 12, 2000)
+    rows, _stats = _pipeline_rows("execution", scan, scan=scan)
+    projected = [_signal_projection(r) for r in rows]
+    if symbol_filter:
+        projected = [p for p in projected if str(p.get("symbol") or "").strip().upper() == symbol_filter]
+    projected = list(reversed(projected))  # most recent first
+    if len(projected) > n:
+        projected = projected[:n]
+    return {"ok": True, "signals": projected, "count": len(projected)}
 
 
 def _alerts_rows(kind, limit, scan=None):
@@ -2698,6 +2749,23 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path in {"/dashboard", "/dashboard/", "/dashboard/api", "/dashboard/api/", "/", "/shadow/dashboard", "/api", "/shadow/dashboard/api"} and not self._dashboard_auth_ok():
             self._auth_challenge()
+            return
+        if path in {"/api/signals", "/shadow/api/signals", "/dashboard/api/signals"}:
+            if not self._dashboard_auth_ok():
+                self._auth_challenge()
+                return
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                n = int((qs.get("n") or [SIGNALS_DEFAULT_N])[0])
+            except (TypeError, ValueError):
+                n = SIGNALS_DEFAULT_N
+            symbol = (qs.get("symbol") or [None])[0]
+            try:
+                payload = signals_payload(n, symbol)
+            except Exception as exc:  # unexpected read/projection failure only
+                self.send_bytes(500, json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+                return
+            self.send_bytes(200, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             return
         static_ready = STATIC_DIR.is_dir()
         if path in {"/dashboard/api", "/dashboard/api/", "/api", "/shadow/dashboard/api"}:
