@@ -77,7 +77,6 @@ def _hyperliquid_paper_config(repo_root: Path) -> dict:
         }
     )
     cfg["execution"] = execution
-    cfg.setdefault("risk", {})["allow_live_execution"] = True
     return cfg
 
 
