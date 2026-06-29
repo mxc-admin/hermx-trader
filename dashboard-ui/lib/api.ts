@@ -55,3 +55,37 @@ export async function fetchApi(): Promise<ApiPayload> {
 export async function fetchHealth(): Promise<HealthPayload> {
   return fetchJson<HealthPayload>('/health')
 }
+
+export async function setStrategyMode(
+  strategyId: string,
+  mode: 'shadow' | 'demo' | 'live' | 'clear',
+): Promise<void> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}/api/control/strategy/${encodeURIComponent(strategyId)}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        ...authHeaders(),
+      },
+      body: JSON.stringify({ mode }),
+      signal: controller.signal,
+      cache: 'no-store',
+    })
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error(`setStrategyMode timed out`)
+    }
+    throw new Error(`setStrategyMode failed: ${(err as Error).message}`)
+  } finally {
+    clearTimeout(timer)
+  }
+  if (!res.ok) {
+    let detail = ''
+    try { detail = await res.text() } catch { /* ignore */ }
+    throw new Error(`setStrategyMode ${res.status}: ${detail}`)
+  }
+}

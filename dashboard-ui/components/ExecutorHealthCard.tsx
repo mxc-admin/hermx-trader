@@ -32,7 +32,7 @@ export function ExecutorHealthCard() {
   return (
     <div>
       <StatCard
-        label="EXECUTOR"
+        label="EXECUTION ENGINE"
         value={value}
         sub={sub}
         accentColor={accentColor}

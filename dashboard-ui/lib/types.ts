@@ -36,6 +36,7 @@ export interface Strategy {
   capital?: Capital
   execution_mode?: string // "demo" | "live"
   submit_orders?: boolean
+  effective_mode?: string // "shadow" | "demo" | "live" — resolved by backend
   leverage?: number
   margin_mode?: string // "isolated" | "cross"
   notes?: string
@@ -205,15 +206,22 @@ export interface PanelWithStats<T> {
   stats: LedgerStats
 }
 
+export interface HermesAdvisor {
+  enabled?: boolean
+  ok?: boolean
+}
+
 export interface ApiPayload {
   generated_at?: string
   source_counts?: SourceCounts
+  strategy_overrides?: Record<string, unknown>
   backfill?: unknown
   strategies?: Strategy[]
   strategy_alerts?: StrategyAlert[]
   okx_live?: OkxLive
   okx_executions?: ExecutionRow[]
   executor?: ExecutorHealth
+  hermes?: HermesAdvisor
   ledger_health?: LedgerHealth
   freshness?: Freshness
   open_orders?: PanelWithStats<OpenOrder>

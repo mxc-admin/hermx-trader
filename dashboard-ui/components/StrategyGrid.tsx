@@ -2,13 +2,12 @@
 import { useDashboardContext } from './DashboardProvider'
 import { StrategyCard } from './StrategyCard'
 
-// Responsive grid of strategy cards. Positions come from okx_live.positions
-// keyed by symbol; alert counts are tallied from strategy_alerts.
 export function StrategyGrid() {
-  const { data } = useDashboardContext()
+  const { data, health, refresh } = useDashboardContext()
   const strategies = data?.strategies ?? []
   const positions = data?.okx_live?.positions ?? {}
   const alerts = data?.strategy_alerts ?? []
+  const liveEnabled = health?.arm?.live_trading_enabled ?? false
 
   if (strategies.length === 0) {
     return (
@@ -33,6 +32,8 @@ export function StrategyGrid() {
           strategy={strategy}
           position={strategy.asset ? positions[strategy.asset] : undefined}
           alertCount={alertCount(strategy)}
+          liveEnabled={liveEnabled}
+          onModeChange={refresh}
         />
       ))}
     </div>

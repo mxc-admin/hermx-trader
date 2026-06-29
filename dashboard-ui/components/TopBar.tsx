@@ -18,7 +18,7 @@ export function TopBar() {
           color: 'var(--text-muted)',
         }}
       >
-        Kinetic Flow
+        Kinetic Flow by Momentumx
       </div>
       <h1
         style={{
@@ -28,7 +28,7 @@ export function TopBar() {
           color: 'var(--text-primary)',
         }}
       >
-        Execution Dashboard
+        HermX Dashboard
       </h1>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         <span

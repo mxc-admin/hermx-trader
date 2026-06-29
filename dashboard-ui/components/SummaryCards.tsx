@@ -80,6 +80,22 @@ export function SummaryCards() {
     execKind = 'good'
   }
 
+  const hermes = data?.hermes ?? {}
+  const hermesOk = hermes.ok ?? false
+  const hermesEnabled = hermes.enabled ?? false
+  let hermesLabel: string
+  let hermesColor: string
+  if (!hermesEnabled) {
+    hermesLabel = 'Hermes - Off'
+    hermesColor = 'var(--text-muted)'
+  } else if (hermesOk) {
+    hermesLabel = 'Hermes - Ok'
+    hermesColor = 'var(--positive)'
+  } else {
+    hermesLabel = 'Hermes - Error'
+    hermesColor = 'var(--negative)'
+  }
+
   return (
     <div className="summary-cards" style={gridStyle}>
       <StatCard
@@ -104,10 +120,12 @@ export function SummaryCards() {
         valueColor={kindColor(posKind)}
       />
       <StatCard
-        label="EXECUTOR"
-        value={execLabel}
-        accentColor={kindColor(execKind)}
+        label="EXECUTION ENGINE"
+        value={`Engine - ${execLabel}`}
         valueColor={kindColor(execKind)}
+        value2={hermesLabel}
+        value2Color={hermesColor}
+        accentColor={kindColor(execKind)}
       />
     </div>
   )

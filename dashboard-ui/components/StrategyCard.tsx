@@ -1,35 +1,123 @@
+'use client'
 import type { CSSProperties } from 'react'
+import { useState, useCallback } from 'react'
 import type { Strategy, LivePosition } from '../lib/types'
 import { money, num, sideColor, sideKind } from '../lib/format'
 import { Badge } from './Badge'
+import { setStrategyMode } from '../lib/api'
 
 interface StrategyCardProps {
   strategy: Strategy
   position?: LivePosition
   alertCount: number
+  liveEnabled: boolean
+  onModeChange?: () => void
 }
 
-// Mirrors src/dashboard.py:strategy_card(). One wide card per active strategy:
-// header (asset + name + live state), config strip, and the budget/PnL metrics.
-export function StrategyCard({ strategy, position, alertCount }: StrategyCardProps) {
+const MODES = ['shadow', 'demo', 'live'] as const
+type Mode = typeof MODES[number]
+
+function ModePill({
+  current,
+  liveEnabled,
+  onSelect,
+  pending,
+}: {
+  current: Mode
+  liveEnabled: boolean
+  onSelect: (m: Mode) => void
+  pending: boolean
+}) {
+  const modeLabel: Record<Mode, string> = { shadow: 'Shadow', demo: 'Demo', live: 'Live' }
+  const modeColor: Record<Mode, string> = {
+    shadow: 'var(--text-muted)',
+    demo: 'var(--text-primary)',
+    live: 'var(--positive)',
+  }
+
+  return (
+    <div
+      style={{
+        display: 'inline-flex',
+        border: '1px solid var(--border-dim)',
+        borderRadius: 6,
+        overflow: 'hidden',
+        opacity: pending ? 0.6 : 1,
+        pointerEvents: pending ? 'none' : 'auto',
+        flexShrink: 0,
+      }}
+    >
+      {MODES.map((m) => {
+        const isActive = current === m
+        const isLocked = m === 'live' && !liveEnabled
+        return (
+          <button
+            key={m}
+            title={isLocked ? 'Requires HERMX_LIVE_TRADING=true' : undefined}
+            disabled={isLocked || pending}
+            onClick={() => !isLocked && onSelect(m)}
+            style={{
+              padding: '3px 10px',
+              fontSize: 11,
+              fontWeight: isActive ? 700 : 400,
+              background: isActive ? 'var(--bg-hover, rgba(255,255,255,0.08))' : 'transparent',
+              color: isActive ? modeColor[m] : isLocked ? 'var(--text-muted)' : 'var(--text-secondary)',
+              border: 'none',
+              borderLeft: m !== 'shadow' ? '1px solid var(--border-dim)' : 'none',
+              cursor: isLocked ? 'not-allowed' : 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+              lineHeight: 1,
+              transition: 'background 0.15s',
+            }}
+          >
+            {isLocked && <span style={{ fontSize: 10 }}>🔒</span>}
+            {modeLabel[m]}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+export function StrategyCard({ strategy, position, alertCount, liveEnabled, onModeChange }: StrategyCardProps) {
   const sym = strategy.asset ?? ''
   const side = (position?.side ?? 'FLAT').toUpperCase()
   const isLive = side !== 'FLAT'
 
-  const submitEnabled = !!(strategy.submit_orders ?? strategy.okx_submit_orders)
+  const effectiveMode = (strategy.effective_mode ?? 'demo') as Mode
+  const [pending, setPending] = useState(false)
+  const [modeError, setModeError] = useState<string | null>(null)
 
   const budget = strategy.capital?.budget_usd ?? strategy.budget_usd ?? 0
   const realized = position?.realized_pnl ?? 0
   const upl = position?.upl ?? 0
   const equityNow = budget + realized + upl
 
-  // Coincap icon pattern (base ticker, USDT suffix stripped).
   const logo = `https://assets.coincap.io/assets/icons/${sym
     .replace(/USDT?$/i, '')
     .toLowerCase()}@2x.png`
 
   const uplColor =
     upl > 0 ? 'var(--positive)' : upl < 0 ? 'var(--negative)' : 'var(--text-muted)'
+
+  const handleModeChange = useCallback(
+    async (mode: Mode) => {
+      if (!strategy.strategy_id) return
+      setPending(true)
+      setModeError(null)
+      try {
+        await setStrategyMode(strategy.strategy_id, mode)
+        onModeChange?.()
+      } catch (e) {
+        setModeError((e as Error).message)
+      } finally {
+        setPending(false)
+      }
+    },
+    [strategy.strategy_id, onModeChange],
+  )
 
   const cardStyle: CSSProperties = {
     background: 'var(--bg-panel)',
@@ -70,10 +158,11 @@ export function StrategyCard({ strategy, position, alertCount }: StrategyCardPro
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          <Badge label={strategy.execution_mode ?? 'demo'} kind="neutral" />
-          <Badge
-            label={submitEnabled ? 'submit enabled' : 'orders disabled'}
-            kind={submitEnabled ? 'good' : 'warn'}
+          <ModePill
+            current={effectiveMode}
+            liveEnabled={liveEnabled}
+            onSelect={handleModeChange}
+            pending={pending}
           />
           {isLive ? (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
@@ -85,6 +174,11 @@ export function StrategyCard({ strategy, position, alertCount }: StrategyCardPro
           )}
         </div>
       </div>
+
+      {/* Mode error (transient) */}
+      {modeError && (
+        <p style={{ fontSize: 11, color: 'var(--negative)', margin: 0 }}>{modeError}</p>
+      )}
 
       {/* Config strip */}
       <div>

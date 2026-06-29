@@ -19,7 +19,7 @@ export default function HealthPage() {
   return (
     <main className="max-w-[1200px] mx-auto px-4 md:px-6 py-8 space-y-8">
       <div>
-        <p className="metric-label mb-1">KINETIC FLOW</p>
+        <p className="metric-label mb-1">KINETIC FLOW BY MOMENTUMX</p>
         <h1 className="text-2xl font-mono font-bold" style={{ color: 'var(--text-primary)' }}>
           System Health
         </h1>

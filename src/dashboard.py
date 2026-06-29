@@ -7,11 +7,12 @@ import hmac
 import json
 import os
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from dashboard_core import (
     LEDGER_READ_STATS,
@@ -48,8 +49,14 @@ DASH_AUTH_ENABLED = (os.environ.get("HERMX_DASH_AUTH") or "true").strip().lower(
 # Unified secret: HERMX_SECRET is the sole dashboard token (X-Dashboard-Token,
 # Bearer, or Basic password). Empty/missing => fail closed (protected routes 401).
 DASH_AUTH_TOKEN = (os.environ.get("HERMX_SECRET") or "").strip()
+_hermes_enabled = (os.environ.get("HERMX_ADVISOR_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on"}
 BACKFILL_FILE = ROOT / "research" / "mxc-backfill-jun11-jun16.json"
 STRATEGIES_DIR = ROOT / "strategies"
+# Strategy-mode override state, shared (read+write) with webhook_receiver. Both
+# processes resolve the same path: receiver uses DATA_DIR = HERMX_DATA_DIR (or ROOT),
+# so we mirror that here. Writes are atomic (mkstemp + os.replace) -> cross-process
+# concurrent writes are last-writer-wins, never corruption. See _set_strategy_override.
+CONTROL_STATE_FILE = Path(os.environ.get("HERMX_DATA_DIR", ROOT)) / "control-state.json"
 # Unified consolidated ledgers (JSONL ledger consolidation). pipeline.jsonl holds
 # every signal-processing event tagged with a ``stage`` field; alerts.jsonl holds
 # operator/reconcile/state alerts tagged with a ``kind`` field. The dashboard reads
@@ -159,6 +166,82 @@ def is_strategy_active(strategy) -> bool:
     inert and removes its card, with no code change.
     """
     return bool(strategy.get("submit_orders", False))
+
+
+_VALID_STRATEGY_MODES = frozenset({"shadow", "demo", "live"})
+# Flag mapping must stay in sync with webhook_receiver.set_strategy_override.
+_STRATEGY_MODE_FLAGS = {
+    "shadow": {"execution_mode": "demo", "submit_orders": False},
+    "demo":   {"execution_mode": "demo", "submit_orders": True},
+    "live":   {"execution_mode": "live", "submit_orders": True},
+}
+
+
+def _load_control_state() -> dict:
+    """Read control-state.json read-only. Fail-safe: returns {} on any error so a
+    missing/corrupt file never breaks the dashboard. We do NOT write a default file
+    here (unlike the receiver) — the dashboard is a pure reader for this path except
+    via the explicit override setters below."""
+    try:
+        if not CONTROL_STATE_FILE.exists():
+            return {}
+        state = json.loads(CONTROL_STATE_FILE.read_text(encoding="utf-8"))
+        return state if isinstance(state, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_control_state(state: dict) -> None:
+    """Atomic write: mkstemp + fsync + os.replace, mirroring
+    webhook_receiver.save_control_state. No cross-process lock (the receiver's
+    _STATE_WRITE_LOCK is per-process); atomic replace makes concurrent writers
+    last-writer-wins, never corrupt."""
+    fd, tmp_path = tempfile.mkstemp(prefix=f"{CONTROL_STATE_FILE.name}.", suffix=".tmp", dir=str(CONTROL_STATE_FILE.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(state, indent=2, ensure_ascii=False))
+            f.flush()
+            os.fsync(f.fileno())
+        Path(tmp_path).replace(CONTROL_STATE_FILE)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def _set_strategy_override(strategy_id: str, mode: str) -> bool:
+    """Set a per-strategy execution-mode override. Read-modify-write of control-state.
+    Mirrors webhook_receiver.set_strategy_override (same flag mapping + entry shape)."""
+    sid = str(strategy_id or "").strip()
+    mode = str(mode or "").strip().lower()
+    if not sid or mode not in _VALID_STRATEGY_MODES:
+        return False
+    now = datetime.now(timezone.utc).isoformat()
+    state = _load_control_state()
+    overrides = state.get("strategy_overrides") if isinstance(state.get("strategy_overrides"), dict) else {}
+    overrides[sid] = {"mode": mode, **_STRATEGY_MODE_FLAGS[mode], "set_at": now}
+    state["strategy_overrides"] = overrides
+    state["updated_at"] = now
+    _save_control_state(state)
+    return True
+
+
+def _clear_strategy_override(strategy_id: str) -> bool:
+    """Remove a strategy override, reverting to the strategy file's mode."""
+    sid = str(strategy_id or "").strip()
+    if not sid:
+        return False
+    state = _load_control_state()
+    overrides = state.get("strategy_overrides") if isinstance(state.get("strategy_overrides"), dict) else {}
+    if sid not in overrides:
+        return False
+    overrides.pop(sid)
+    state["strategy_overrides"] = overrides
+    state["updated_at"] = datetime.now(timezone.utc).isoformat()
+    _save_control_state(state)
+    return True
 
 
 def active_strategies(strategies=None):
@@ -1210,15 +1293,45 @@ def api_payload():
     open_orders, oo_stats = order_journal_open_orders()
     recon, rc_stats = reconcile_alert_records()
     ops, op_stats = operator_alert_records()
+
+    # Merge strategy-mode overrides (control-state.json) into the payload. An override
+    # takes precedence over the strategy file; otherwise effective_mode is derived from
+    # the file's submit_orders + execution_mode (shadow = orders off).
+    _ctrl = _load_control_state()
+    _overrides = _ctrl.get("strategy_overrides") if isinstance(_ctrl.get("strategy_overrides"), dict) else {}
+    annotated_strategies = []
+    for s in model.get("active_strategies") or []:
+        sid = s.get("strategy_id") or ""
+        ov = _overrides.get(sid)
+        if isinstance(ov, dict) and ov.get("mode"):
+            s = dict(s)
+            s["effective_mode"] = ov["mode"]
+        else:
+            em = (s.get("execution_mode") or "demo").lower()
+            so = bool(s.get("submit_orders") or s.get("okx_submit_orders"))
+            s = dict(s)
+            if not so:
+                s["effective_mode"] = "shadow"
+            elif em == "live":
+                s["effective_mode"] = "live"
+            else:
+                s["effective_mode"] = "demo"
+        annotated_strategies.append(s)
+
     return {
         "generated_at": model["generated_at"],
         "source_counts": {k: loaded[k] for k in ("historical_count", "backfill_count", "live_count")},
         "backfill": loaded["backfill"],
-        "strategies": model.get("active_strategies") or [],
+        "strategies": annotated_strategies,
+        "strategy_overrides": _overrides,
         "strategy_alerts": model.get("strategy_alerts") or [],
         "okx_live": model.get("okx_live"),
         "okx_executions": model.get("okx_executions") or [],
         "executor": model.get("executor") or {},
+        "hermes": {
+            "enabled": _hermes_enabled,
+            "ok": _hermes_enabled,
+        },
         "ledger_health": model.get("ledger_health") or {},
         "freshness": model.get("freshness") or {},
         # Read-only order/reconcile/operator observability (each with its read stats).
@@ -2144,7 +2257,7 @@ def summary_cards(model):
   {card("SYSTEM STATUS", sys_label, f"{len(strategies)} strategies active", sys_kind)}
   {card("ACTIVE STRATEGIES", strat_label, strat_sub, strat_kind)}
   {card("OPEN POSITIONS", pos_label, pos_sub, pos_kind)}
-  {card("EXECUTOR", exec_label, exec_sub, exec_kind)}
+  {card("EXECUTION ENGINE", exec_label, exec_sub, exec_kind)}
 </div>"""
 
 
@@ -2525,7 +2638,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_header("Access-Control-Allow-Origin", DEV_CORS_ORIGIN)
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 
     def _auth_challenge(self):
         body = {"ok": False, "error": "unauthorized"}
@@ -2602,6 +2715,83 @@ class Handler(BaseHTTPRequestHandler):
             self.send_bytes(200, render().encode("utf-8"), "text/html; charset=utf-8")
         else:
             self.send_bytes(404, b"not found", "text/plain")
+
+    # ---- Strategy-mode control (write) -------------------------------------
+    # POST   /api/control/strategy/{id}  body {"mode": "shadow"|"demo"|"live"|"clear"}
+    # DELETE /api/control/strategy/{id}  -> clear override (restore file default)
+    _CONTROL_PREFIXES = (
+        "/dashboard/api/control/strategy/",
+        "/shadow/dashboard/api/control/strategy/",
+        "/api/control/strategy/",
+    )
+
+    def _strategy_control_id(self, path):
+        """Return the {id} from a strategy-control path, or None if not such a route."""
+        for prefix in self._CONTROL_PREFIXES:
+            if path.startswith(prefix):
+                return unquote(path[len(prefix):]).strip("/").strip()
+        return None
+
+    def _send_control_error(self, status, message):
+        body = json.dumps({"ok": False, "error": message}, ensure_ascii=False).encode("utf-8")
+        self.send_bytes(status, body, "application/json; charset=utf-8")
+
+    def _apply_strategy_control(self, sid, mode):
+        sid = (sid or "").strip()
+        if not sid:
+            self._send_control_error(400, "missing strategy_id")
+            return
+        known = {s.get("strategy_id") for s in active_strategies()}
+        if sid not in known:
+            self._send_control_error(404, f"unknown strategy_id: {sid}")
+            return
+        if mode not in {"shadow", "demo", "live", "clear"}:
+            self._send_control_error(400, "mode must be one of: shadow, demo, live, clear")
+            return
+        if mode == "clear":
+            _clear_strategy_override(sid)  # idempotent: no-op if no override existed
+            resp = {"ok": True, "strategy_id": sid, "mode": "clear"}
+        else:
+            if not _set_strategy_override(sid, mode):
+                self._send_control_error(400, "failed to set override")
+                return
+            resp = {"ok": True, "strategy_id": sid, "mode": mode}
+        self.send_bytes(200, json.dumps(resp, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        sid = self._strategy_control_id(path)
+        if sid is None:
+            self.send_bytes(404, b"not found", "text/plain")
+            return
+        if not self._dashboard_auth_ok():
+            self._auth_challenge()
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        raw = self.rfile.read(length) if length > 0 else b""
+        mode = ""
+        if raw:
+            try:
+                body = json.loads(raw.decode("utf-8"))
+            except Exception:
+                self._send_control_error(400, "invalid JSON body")
+                return
+            mode = str((body or {}).get("mode") or "").strip().lower()
+        self._apply_strategy_control(sid, mode)
+
+    def do_DELETE(self):
+        path = urlparse(self.path).path
+        sid = self._strategy_control_id(path)
+        if sid is None:
+            self.send_bytes(404, b"not found", "text/plain")
+            return
+        if not self._dashboard_auth_ok():
+            self._auth_challenge()
+            return
+        self._apply_strategy_control(sid, "clear")
 
     def log_message(self, _fmt, *_args):
         return
