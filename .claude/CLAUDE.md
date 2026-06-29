@@ -29,3 +29,10 @@ When updating any of these, update BOTH locations.
 - `hermx-control` — system-specific control & emergency procedures
 
 Invoke: `claude -p "/<skill-name> <args>" --permission-mode dontAsk`
+
+## Proven Patterns (money-system correctness)
+- **`raw-webhooks.jsonl` is the durable WAL.** Every intake is fsync'd to it before the queue put, so it — not the in-memory `PROCESS_QUEUE` — is the recovery source. For durability, replay it at startup; don't add a new queue store.
+- **The dedupe ledger (`signals.jsonl`) is written AFTER dequeue.** This cleanly partitions "processed" from "queued but not yet dequeued", making it the correctness backstop on replay — not the correlation logic.
+- **`received_at` (microsecond ISO) is the join key** between intake and outcome rows. Collision-safe; use it to correlate, not as a freshness measure.
+- **Freshness is bounded on signal bar time (`tv_time`), never server time (`received_at`).** After an outage the server clock is current but the bar is stale.
+- **Restarts are routine, not rare:** systemd `Restart=always` / `RestartSec=5`. Design recovery for frequent restarts.

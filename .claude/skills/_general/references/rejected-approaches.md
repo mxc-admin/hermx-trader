@@ -42,3 +42,31 @@
 - **Verdict:** REJECTED (deferred)
 - **Reason:** Nothing reads the file today. Add only once ≥3 skills are installed and the use case is real.
 - **Date:** June 2026
+
+### Redis/SQLite persistent queue for queue durability (Option A in analysis)
+- **What:** Replace in-memory `PROCESS_QUEUE` with a Redis- or SQLite-backed durable queue.
+- **Tested:** Durability design analysis.
+- **Verdict:** REJECTED
+- **Reason:** Over-engineered; adds a network/process dependency. `raw-webhooks.jsonl` is already a durable WAL — a replay reader recovers the queue with no new store. (See architecture-decisions: startup replay.)
+- **Date:** June 2026
+
+### Hybrid WAL queue (Option C) for durability
+- **What:** A dedicated write-ahead queue file alongside `raw-webhooks.jsonl`.
+- **Tested:** Durability design analysis.
+- **Verdict:** REJECTED
+- **Reason:** Duplicates `raw-webhooks.jsonl` and introduces divergence failure modes (two logs that can disagree). One durable primitive is correct.
+- **Date:** June 2026
+
+### Option B — intake_signal_id enrichment on the hot path
+- **What:** Compute and persist a stable `signal_id` at intake by calling `normalize()` before queue put.
+- **Tested:** Durability design analysis.
+- **Verdict:** REJECTED (in favor of Option A: drop time-less payloads on replay)
+- **Reason:** Adds a `normalize()` call to the hot intake path. Option A keeps intake cheap and avoids the non-determinism entirely by dropping payloads without a time field.
+- **Date:** June 2026
+
+### File watcher / mtime poll for strategy reload
+- **What:** Reload strategies/ when the directory mtime changes or a file watcher fires.
+- **Tested:** Strategy-reload design analysis.
+- **Verdict:** REJECTED
+- **Reason:** Race conditions with in-flight signals (a reload mid-signal yields inconsistent strategy state). An explicit reload endpoint is deterministic and sub-second.
+- **Date:** June 2026
