@@ -46,7 +46,7 @@ def test_submit_timeout_maps_to_unknown(monkeypatch):
         "payload": {"error": "RequestTimeout"},
     })
     monkeypatch.setattr(wr.ExecutorFactory, "create", lambda cfg, root: fake)
-    out = wr.execute_okx_if_enabled(_armed_record(cl))
+    out = wr.execute_if_enabled(_armed_record(cl))
 
     assert out["mode"] == "submit_timeout"
     # UNKNOWN, not a failure: the order journal records UNKNOWN and the order stays
@@ -62,7 +62,7 @@ def test_watchdog_pause_blocks_submission(monkeypatch):
     wr._set_watchdog_submission_paused(True, "watchdog_degraded")
 
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
-        out = wr.execute_okx_if_enabled(_armed_record("mxcstablewatchdogid000000000000001"))
+        out = wr.execute_if_enabled(_armed_record("mxcstablewatchdogid000000000000001"))
 
     create_mock.assert_not_called()
     assert out["mode"] == "not_submitted"

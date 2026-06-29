@@ -40,6 +40,9 @@ def resolve_execution_config(config: dict, readiness: dict | None = None) -> dic
     venue = str(instrument.get("exchange") or "").strip().lower()
     if venue:
         execution_cfg["ccxt_exchange"] = venue
+    inst_type = str(instrument.get("type") or "").strip().lower()
+    if inst_type:
+        execution_cfg["ccxt_default_type"] = inst_type
     # Phase A: per-strategy execution_mode controls sandbox routing. The readiness block
     # carries the resolved ``simulated_trading`` (always True in Phase A) and the
     # ``execution_mode`` so the adapter sandboxes accordingly.

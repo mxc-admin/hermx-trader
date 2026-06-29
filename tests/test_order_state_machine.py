@@ -227,7 +227,7 @@ def _run_forced_submit(wr, monkeypatch, adapter_fn):
     monkeypatch.setattr(wr, "append_jsonl_durable", spy_durable)
     monkeypatch.setattr(wr.ExecutorFactory, "create", lambda cfg, root: fake)
 
-    result = wr.execute_okx_if_enabled(_armed_record())
+    result = wr.execute_if_enabled(_armed_record())
     return events, result
 
 
@@ -327,7 +327,7 @@ def test_blocked_gate_writes_no_order_journal(wr, monkeypatch):
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
 
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
-        result = wr.execute_okx_if_enabled(_blocked_record())
+        result = wr.execute_if_enabled(_blocked_record())
 
     create_mock.assert_not_called()  # no executor built => no submit
     assert result["mode"] == "not_submitted"
@@ -340,7 +340,7 @@ def test_not_submitted_branch_writes_no_order_journal(wr, monkeypatch):
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
 
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
-        result = wr.execute_okx_if_enabled(_blocked_record())
+        result = wr.execute_if_enabled(_blocked_record())
 
     create_mock.assert_not_called()
     assert result["mode"] == "not_submitted"

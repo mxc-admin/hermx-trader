@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from webhook.config import EXEC_BACKEND
+
 from .base import BaseExecutor
 
 try:
@@ -56,8 +58,12 @@ class ExecutorFactory:
 
     @classmethod
     def create(cls, config: dict, root: Path) -> BaseExecutor:
-        """Instantiate the executor selected by ``config['execution']['exchange']``."""
-        exchange = ((config or {}).get("execution") or {}).get("exchange")
+        """Instantiate the executor selected by ``config['execution']['exchange']``.
+
+        Post CCXT cutover the adapter backend is hardcoded to ``EXEC_BACKEND`` (ccxt,
+        env-overridable); a config that omits ``exchange`` resolves to it rather than None.
+        """
+        exchange = ((config or {}).get("execution") or {}).get("exchange") or EXEC_BACKEND
         key = cls.resolve_key(exchange)
         executor_cls = cls._registry.get(key)
         if executor_cls is None:

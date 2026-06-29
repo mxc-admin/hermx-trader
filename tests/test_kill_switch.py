@@ -51,7 +51,7 @@ def test_demo_mode_submits_with_kill_switch_off(monkeypatch):
 
     fake = _fake_executor()
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):
-        wr.execute_okx_if_enabled(_armed_record())
+        wr.execute_if_enabled(_armed_record())
 
     fake.execute.assert_called_once()
 
@@ -62,7 +62,7 @@ def test_demo_mode_submits_with_kill_switch_unset(monkeypatch):
 
     fake = _fake_executor()
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):
-        wr.execute_okx_if_enabled(_armed_record())
+        wr.execute_if_enabled(_armed_record())
 
     fake.execute.assert_called_once()
 
@@ -75,7 +75,7 @@ def test_per_strategy_submit_flag_blocks(monkeypatch):
     rec["execution_readiness"]["live_execution_enabled"] = False
 
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
-        result = wr.execute_okx_if_enabled(rec)
+        result = wr.execute_if_enabled(rec)
 
     create_mock.assert_not_called()
     assert result["mode"] == "not_submitted"

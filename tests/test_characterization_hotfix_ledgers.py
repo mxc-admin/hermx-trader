@@ -10,7 +10,7 @@ Closes the two deferred acceptance criteria:
 The hotfix was the EXECUTION_PLAN_LEDGER / EXECUTION_LEDGER constants (module
 lines 37-38). Previously the readiness/execution writers referenced undefined
 OKX_*_LEDGER names and raised NameError silently. Here we drive real alerts all
-the way through the readiness builders + execute_okx_if_enabled and assert both
+the way through the readiness builders + execute_if_enabled and assert both
 ledgers got valid JSON lines with no exception.
 
 Post the Phase A execution-mode refactor the submit path always routes through
@@ -61,7 +61,7 @@ def _stub_executor(monkeypatch, wr):
 
 
 def test_strategy_alert_writes_both_ledgers(wr, wr_root, monkeypatch):
-    """Strategy path: build_strategy_execution_readiness + execute_okx_if_enabled.
+    """Strategy path: build_strategy_execution_readiness + execute_if_enabled.
 
     The corpus strategy is execution_mode=demo with submit_orders=true, so it is armed
     for sandbox submission; the stubbed executor stands in for the exchange call."""
@@ -101,7 +101,7 @@ def test_execute_okx_directly_appends_execution_ledger(wr, wr_root, monkeypatch)
     """Direct call to the patched-constant writer proves the symbol resolves. A
     gate-blocked record (per-strategy submit flag off) stays not_submitted."""
     record = {"received_at": RECEIVED_AT, "execution_readiness": {"live_execution_enabled": False}}
-    result = wr.execute_okx_if_enabled(record)  # would NameError pre-hotfix
+    result = wr.execute_if_enabled(record)  # would NameError pre-hotfix
 
     assert result["mode"] == "not_submitted"
     rows = _pipeline_stage(wr_root, "execution")

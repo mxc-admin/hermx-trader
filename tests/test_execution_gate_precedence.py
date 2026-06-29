@@ -69,7 +69,7 @@ def test_any_gate_false_means_not_submitted(monkeypatch):
     for rec in cases:
         fake = _fake_executor()
         with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake) as create_mock:
-            out = wr.execute_okx_if_enabled(rec)
+            out = wr.execute_if_enabled(rec)
         # The blocked gate returns BEFORE the executor is ever built or called.
         create_mock.assert_not_called()
         fake.execute.assert_not_called()
@@ -83,7 +83,7 @@ def test_all_gates_true_can_submit(monkeypatch):
 
     fake = _fake_executor()
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):
-        out = wr.execute_okx_if_enabled(_record())
+        out = wr.execute_if_enabled(_record())
 
     # Every gate affirmative => the single executor submit is invoked exactly once.
     fake.execute.assert_called_once()

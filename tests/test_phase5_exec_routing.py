@@ -41,10 +41,10 @@ def test_submission_always_routes_through_service(monkeypatch):
 
     sentinel = {"ok": True, "mode": "routed-via-service"}
     service_spy = mock.Mock(return_value=sentinel)
-    monkeypatch.setattr(wr, "_execute_okx_via_service", service_spy)
+    monkeypatch.setattr(wr, "_execute_via_service", service_spy)
     rec = _record()
 
-    out = wr.execute_okx_if_enabled(rec)
+    out = wr.execute_if_enabled(rec)
 
     service_spy.assert_called_once_with(rec)
     assert out is sentinel
@@ -55,9 +55,9 @@ def test_fails_closed_when_service_unavailable(monkeypatch):
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setattr(wr, "ExecutionService", None)
     service_spy = mock.Mock()
-    monkeypatch.setattr(wr, "_execute_okx_via_service", service_spy)
+    monkeypatch.setattr(wr, "_execute_via_service", service_spy)
 
-    out = wr.execute_okx_if_enabled(_record())
+    out = wr.execute_if_enabled(_record())
 
     service_spy.assert_not_called()
     assert out["mode"] == "not_submitted"
@@ -68,10 +68,10 @@ def test_fails_closed_when_no_backend_registered(monkeypatch):
     """ccxt import failed => empty registry => fail closed, never submit."""
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
     service_spy = mock.Mock()
-    monkeypatch.setattr(wr, "_execute_okx_via_service", service_spy)
+    monkeypatch.setattr(wr, "_execute_via_service", service_spy)
     monkeypatch.setattr(wr.ExecutorFactory, "available", classmethod(lambda cls: []))
 
-    out = wr.execute_okx_if_enabled(_record())
+    out = wr.execute_if_enabled(_record())
 
     service_spy.assert_not_called()
     assert out["mode"] == "not_submitted"
@@ -83,7 +83,7 @@ def test_gate_false_blocks_real_path(monkeypatch):
     monkeypatch.setattr(wr, "CONFIG", _armed_config())
 
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
-        out = wr.execute_okx_if_enabled(_record(live_execution_enabled=False))
+        out = wr.execute_if_enabled(_record(live_execution_enabled=False))
 
     create_mock.assert_not_called()
     assert out["mode"] == "not_submitted"

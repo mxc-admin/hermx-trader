@@ -70,6 +70,15 @@ from webhook.ledger_io import (  # noqa: E402  F401
     append_jsonl_durable,
     read_jsonl_tolerant,
 )
+from webhook.config import (  # noqa: E402  F401
+    load_engine_config,
+    EXEC_BACKEND,
+    EXECUTION_DEFAULTS,
+    resolve_default_type,
+    _env_bool,
+    _env_float,
+    _env_str,
+)
 
 
 def as_float(value):
@@ -274,12 +283,11 @@ CONFIG_FILE = ROOT / "shadow-config.json"
 
 
 def load_shadow_config() -> dict:
+    # Residual shadow-config: fees/funding/policies/execution/assets/risk only. The
+    # strategy_engine + advisor blocks moved to engine-config.json (webhook/config.py);
+    # the old mode/primary_policy/execution_timeframe/base_notional_usd keys are gone.
     default = {
-        "mode": os.environ.get("SHADOW_MODE", "paper_shadow"),
-        "primary_policy": os.environ.get("PRIMARY_POLICY", "not_selected"),
-        "execution_timeframe": "30m",
         "chart_type": os.environ.get("DEFAULT_CHART_TYPE", "heikin_ashi"),
-        "base_notional_usd": float(os.environ.get("PAPER_BASE_NOTIONAL_USD", "10000")),
         "fees": {
             "maker_rate": float(os.environ.get("OKX_PERP_MAKER_FEE_RATE", "0.0002")),
             "taker_rate": float(os.environ.get("OKX_PERP_TAKER_FEE_RATE", "0.0005")),
@@ -308,26 +316,6 @@ def load_shadow_config() -> dict:
             "ETHUSDT": {"enabled": True, "budget_usd": 2000, "leverage": 2, "inst_id": "ETH-USDT-SWAP", "timeframe": "30m"},
         },
         "risk": {"allow_live_execution": False, "duplicate_protection": True, "max_slippage_pct": 0.25, "max_daily_loss_usd": 150.0},
-        # Phase 8: optional pre-execution Hermes/LLM advisor. DEFAULT OFF -> when
-        # disabled the strategy/shadow execution path is byte-identical to before.
-        # The advisor can only VETO (skip); it can NEVER change symbol,
-        # side, size, leverage, or strategy -- those stay locked in code. A single
-        # switch grants veto power: when enabled, a "skip" blocks the trade. Any
-        # timeout / error / malformed response FAILS OPEN to deterministic
-        # execution (front door is never down because of the LLM).
-        # The advisor invokes the **Hermes Agent** as a one-shot, loading the skills
-        # we built (`skills/hermx-control` -- and any we add later) so the agent can
-        # read the live local API (positions / PnL / arm state) before its verdict:
-        #   hermes -z "<prompt>" --skills hermx-control [-m model]
-        # This runs through Hermes (its configured xai provider + credentials), NOT a
-        # bare LLM call. ``skills`` is a comma-separated list that will grow.
-        "advisor": {
-            "enabled": False,
-            "command": "hermes",
-            "skills": "hermx-control",
-            "model": "",
-            "timeout_seconds": 30.0,
-        },
     }
     if not CONFIG_FILE.exists():
         return default
@@ -340,7 +328,6 @@ def load_shadow_config() -> dict:
         merged["execution"] = default["execution"] | loaded.get("execution", {})
         merged["assets"] = default["assets"] | loaded.get("assets", {})
         merged["risk"] = default["risk"] | loaded.get("risk", {})
-        merged["advisor"] = default["advisor"] | loaded.get("advisor", {})
         return merged
     except Exception as exc:
         logging.warning("Failed to load shadow config: %s", exc)
@@ -348,27 +335,22 @@ def load_shadow_config() -> dict:
 
 
 CONFIG = load_shadow_config()
-STRATEGY_ENGINE = CONFIG.get("strategy_engine", {}) or {}
+# Engine + advisor config now live in engine-config.json (leaf webhook/config.py),
+# split out of shadow-config.json. STRATEGY_ENGINE is sourced from it, not CONFIG.
+ENGINE_CONFIG_FILE = ROOT / "engine-config.json"
+ENGINE_CONFIG = load_engine_config(ENGINE_CONFIG_FILE)
+STRATEGY_ENGINE = ENGINE_CONFIG.get("strategy_engine", {}) or {}
 STRATEGIES_DIR = ROOT / str(STRATEGY_ENGINE.get("strategies_dir") or "strategies")
 
-# Phase 8 pre-execution advisor (see load_shadow_config "advisor" block). Env vars
+# Phase 8 pre-execution advisor (see engine-config "advisor" block). Env vars
 # override config so an operator can flip it on a running VPS without editing JSON.
-# Everything here is read-only config; the advisor itself never sizes or routes.
-_ADVISOR_CFG = CONFIG.get("advisor", {}) or {}
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
-
+_ADVISOR_CFG = ENGINE_CONFIG.get("advisor", {}) or {}
 
 HERMX_ADVISOR_ENABLED = _env_bool("HERMX_ADVISOR_ENABLED", bool(_ADVISOR_CFG.get("enabled", False)))
-HERMX_ADVISOR_COMMAND = (os.environ.get("HERMX_ADVISOR_COMMAND") or str(_ADVISOR_CFG.get("command") or "hermes")).strip()
-HERMX_ADVISOR_SKILLS = (os.environ.get("HERMX_ADVISOR_SKILLS") or str(_ADVISOR_CFG.get("skills") or "hermx-control")).strip()
-HERMX_ADVISOR_MODEL = (os.environ.get("HERMX_ADVISOR_MODEL") or str(_ADVISOR_CFG.get("model") or "")).strip()
-HERMX_ADVISOR_TIMEOUT_SECONDS = float(os.environ.get("HERMX_ADVISOR_TIMEOUT_SECONDS") or _ADVISOR_CFG.get("timeout_seconds") or 30.0)
+HERMX_ADVISOR_COMMAND = _env_str("HERMX_ADVISOR_COMMAND", str(_ADVISOR_CFG.get("command") or "hermes"))
+HERMX_ADVISOR_SKILLS = _env_str("HERMX_ADVISOR_SKILLS", str(_ADVISOR_CFG.get("skills") or "hermx-control"))
+HERMX_ADVISOR_MODEL = _env_str("HERMX_ADVISOR_MODEL", str(_ADVISOR_CFG.get("model") or ""))
+HERMX_ADVISOR_TIMEOUT_SECONDS = _env_float("HERMX_ADVISOR_TIMEOUT_SECONDS", float(_ADVISOR_CFG.get("timeout_seconds") or 30.0))
 # advisor-decisions, strategy-alerts, and strategy-alert-quarantine were folded into
 # the unified PIPELINE_LEDGER (stages "advisor", "strategy_match", "quarantine").
 # Phase 6 / M2 (REFACTOR_PLAN.md): explicit alert-schema enforcement at intake.
@@ -1446,6 +1428,8 @@ def build_strategy_execution_readiness(record: dict) -> dict:
     # below is the OKX translation of this same value, so derive both from one expression.
     margin_mode = strategy.get("margin_mode", execution_cfg.get("td_mode", "isolated"))
     instrument = strategy_instrument(strategy)
+    # Derive ccxt_default_type from strategy instrument.type (e.g., swap, spot, future)
+    instrument_type = resolve_default_type(instrument)
     plan = {
         "mode": "strategy_file_live_order_enabled" if live_allowed else "strategy_file_trial_no_order",
         "live_execution_enabled": live_allowed,
@@ -1453,9 +1437,10 @@ def build_strategy_execution_readiness(record: dict) -> dict:
         "simulated_trading": sandbox,
         "execution_policy": f"strategy_file:{normalized.get('strategy_id')}",
         "execution_policy_label": strategy.get("name") or normalized.get("strategy_id"),
-        "exchange": execution_cfg.get("exchange", "okx"),
-        "route": execution_cfg.get("route", "okx_api"),
-        "account": execution_cfg.get("account", "sandbox"),
+        "exchange": EXEC_BACKEND,
+        "ccxt_default_type": instrument_type,
+        "route": EXECUTION_DEFAULTS["route"],
+        "account": EXECUTION_DEFAULTS["account"],
         "symbol": normalized.get("symbol"),
         "inst_id": instrument.get("inst_id"),
         "expected_leverage": strategy.get("leverage"),
@@ -1833,7 +1818,7 @@ def record_order_state(
     """Validate ``prev_state -> new_state`` and durably (fsync) append one order-journal
     record. Raises ValueError on an illegal transition (the caller must not persist a
     state the machine forbids). OSError from the durable append propagates to the caller,
-    which fail-closes the money path (see execute_okx_if_enabled write-ahead)."""
+    which fail-closes the money path (see execute_if_enabled write-ahead)."""
     if not order_state_can_transition(prev_state, new_state):
         logging.error("ILLEGAL order-state transition for %s: %s -> %s", cl_ord_id, prev_state, new_state)
         raise ValueError(f"illegal order-state transition {prev_state} -> {new_state} for {cl_ord_id}")
@@ -2624,7 +2609,7 @@ def _run_execution_service(record: dict, *, journal_hook=None) -> dict:
     return service.execute(record)
 
 
-def _execute_okx_via_service(record: dict) -> dict:
+def _execute_via_service(record: dict) -> dict:
     return _run_execution_service(record)
 
 
@@ -2738,12 +2723,12 @@ def execute_operator_close(symbol: str, strategy: dict, *, operator=None, reason
     return {**result, "_cl_ord_id": cl_ord_id, "_submitted_at": submitted_at}
 
 
-def execute_okx_if_enabled(record: dict) -> dict:
+def execute_if_enabled(record: dict) -> dict:
     """Authoritative submission entry point: route through ExecutionService (CCXT)."""
-    return _execute_okx_authoritative(record)
+    return _execute_authoritative(record)
 
 
-def _execute_okx_authoritative(record: dict) -> dict:
+def _execute_authoritative(record: dict) -> dict:
     """Authoritative submission. Post P5-06/P5-07 cutover this ALWAYS routes through
     ExecutionService, whose sole executor backend is CCXT. The legacy inline okx_demo
     subprocess path was deleted.
@@ -2766,7 +2751,7 @@ def _execute_okx_authoritative(record: dict) -> dict:
         }
         record_pipeline_event("execution", _signal_id_of(record), {"received_at": record.get("received_at"), "okx_execution": result})
         return result
-    return _execute_okx_via_service(record)
+    return _execute_via_service(record)
 
 
 # --- Phase 8: optional pre-execution advisor -------------------------------
@@ -2906,10 +2891,10 @@ def run_execution_advisor(record: dict) -> "dict | None":
     return decision
 
 
-def execute_okx_with_advisor(record: dict) -> dict:
+def execute_with_advisor(record: dict) -> dict:
     """Single wrapper used by the execution paths: consult the advisor, honor a
     veto if granted, otherwise delegate to the authoritative submission path. With
-    the advisor disabled (default) this is exactly ``execute_okx_if_enabled``."""
+    the advisor disabled (default) this is exactly ``execute_if_enabled``."""
     decision = run_execution_advisor(record)
     if decision is not None:
         record["advisor"] = decision
@@ -2922,7 +2907,7 @@ def execute_okx_with_advisor(record: dict) -> dict:
             }
             record_pipeline_event("execution", _signal_id_of(record), {"received_at": record.get("received_at"), "okx_execution": result})
             return result
-    return execute_okx_if_enabled(record)
+    return execute_if_enabled(record)
 
 
 def build_record(payload: dict, received_at_override: str | None = None) -> tuple[int, dict]:
@@ -3051,7 +3036,7 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
             "paper_events": [],
         }
         record["execution_readiness"] = build_strategy_execution_readiness(record)
-        record["okx_execution"] = execute_okx_with_advisor(record)
+        record["okx_execution"] = execute_with_advisor(record)
         record_raw_webhook("webhook", {"received_at": record["received_at"], "payload": payload, "normalized": normalized, "strategy_id": normalized.get("strategy_id")})
         record_pipeline_event("strategy_match", normalized.get("signal_id"), record)
         record_pipeline_event("decision", normalized.get("signal_id"), record)

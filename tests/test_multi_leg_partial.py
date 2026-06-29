@@ -64,7 +64,7 @@ def test_submit_partial_records_unknown_not_rejected(wr, monkeypatch):
     fake.execute = mock.Mock(return_value=_partial_adapter_result())
     monkeypatch.setattr(wr.ExecutorFactory, "create", lambda cfg, root: fake)
 
-    result = wr.execute_okx_if_enabled(_armed_record(cl))
+    result = wr.execute_if_enabled(_armed_record(cl))
 
     fake.execute.assert_called_once()
     assert result["mode"] == "submit_partial"
@@ -94,7 +94,7 @@ def test_submit_partial_emits_operator_alert_when_reconcile_enabled(wr, monkeypa
     fake.execute = mock.Mock(return_value=_partial_adapter_result())
     monkeypatch.setattr(wr.ExecutorFactory, "create", lambda cfg, root: fake)
 
-    wr.execute_okx_if_enabled(_armed_record(cl))
+    wr.execute_if_enabled(_armed_record(cl))
 
     alerts = wr.read_jsonl_tolerant(wr.ALERTS_LEDGER)
     partial = [a for a in alerts if a.get("kind") == "reconcile" and a["detail"].get("stage") == "post_submit_partial"]
@@ -113,7 +113,7 @@ def test_adapter_exception_with_reconcile_enabled_does_not_raise_unbound(wr, mon
     fake.execute = mock.Mock(side_effect=RuntimeError("boom-create-order"))
     monkeypatch.setattr(wr.ExecutorFactory, "create", lambda cfg, root: fake)
 
-    result = wr.execute_okx_if_enabled(_armed_record(cl))  # was: UnboundLocalError
+    result = wr.execute_if_enabled(_armed_record(cl))  # was: UnboundLocalError
 
     assert result["ok"] is False
     assert result["mode"] == "submit_exception"

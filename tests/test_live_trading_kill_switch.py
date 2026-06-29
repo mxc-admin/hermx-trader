@@ -68,7 +68,7 @@ def test_live_mode_blocked_when_switch_unset(wr, monkeypatch):
 
     fake = _fake_executor()
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake) as create_mock:
-        out = wr.execute_okx_if_enabled(_record(execution_mode="live", simulated_trading=False))
+        out = wr.execute_if_enabled(_record(execution_mode="live", simulated_trading=False))
 
     create_mock.assert_not_called()
     fake.execute.assert_not_called()
@@ -82,7 +82,7 @@ def test_live_mode_blocked_when_switch_false(wr, monkeypatch):
 
     fake = _fake_executor()
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake) as create_mock:
-        out = wr.execute_okx_if_enabled(_record(execution_mode="live", simulated_trading=False))
+        out = wr.execute_if_enabled(_record(execution_mode="live", simulated_trading=False))
 
     create_mock.assert_not_called()
     fake.execute.assert_not_called()
@@ -98,7 +98,7 @@ def test_live_mode_blocked_when_simulated_trading_inconsistent(wr, monkeypatch):
     for sim in (True, None):  # True, and absent (defaults to simulated)
         fake = _fake_executor()
         with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake) as create_mock:
-            out = wr.execute_okx_if_enabled(_record(execution_mode="live", simulated_trading=sim))
+            out = wr.execute_if_enabled(_record(execution_mode="live", simulated_trading=sim))
         create_mock.assert_not_called()
         fake.execute.assert_not_called()
         assert out["mode"] == "not_submitted", sim
@@ -112,7 +112,7 @@ def test_live_mode_submits_when_switch_armed_and_not_simulated(wr, monkeypatch):
 
     fake = _fake_executor()
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):
-        out = wr.execute_okx_if_enabled(_record(execution_mode="live", simulated_trading=False))
+        out = wr.execute_if_enabled(_record(execution_mode="live", simulated_trading=False))
 
     fake.execute.assert_called_once()
     assert out["ok"] is True
@@ -137,7 +137,7 @@ def test_non_sandbox_non_live_blocked_even_with_switch_armed(wr, monkeypatch):
 
     fake = _fake_executor()
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake) as create_mock:
-        out = wr.execute_okx_if_enabled(_record(execution_mode="demo", simulated_trading=False))
+        out = wr.execute_if_enabled(_record(execution_mode="demo", simulated_trading=False))
 
     create_mock.assert_not_called()
     fake.execute.assert_not_called()
@@ -152,7 +152,7 @@ def test_non_sandbox_blocked_when_switch_unset(wr, monkeypatch):
 
     fake = _fake_executor()
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake) as create_mock:
-        out = wr.execute_okx_if_enabled(_record(execution_mode="paper", simulated_trading=False))
+        out = wr.execute_if_enabled(_record(execution_mode="paper", simulated_trading=False))
 
     create_mock.assert_not_called()
     fake.execute.assert_not_called()
@@ -167,7 +167,7 @@ def test_unknown_execution_mode_rejected(wr, monkeypatch):
 
     fake = _fake_executor()
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake) as create_mock:
-        out = wr.execute_okx_if_enabled(_record(execution_mode="production", simulated_trading=False))
+        out = wr.execute_if_enabled(_record(execution_mode="production", simulated_trading=False))
 
     create_mock.assert_not_called()
     fake.execute.assert_not_called()
@@ -181,7 +181,7 @@ def test_blocked_results_name_the_gate(wr, monkeypatch):
     monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
 
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=_fake_executor()):
-        out = wr.execute_okx_if_enabled(_record(execution_mode="live", simulated_trading=False))
+        out = wr.execute_if_enabled(_record(execution_mode="live", simulated_trading=False))
     assert out["reason"] == "live_trading_disabled"
     assert out["gate"] == "live_trading_kill_switch"
 
@@ -192,7 +192,7 @@ def test_demo_mode_ignores_switch_unset(wr, monkeypatch):
 
     fake = _fake_executor()
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):
-        out = wr.execute_okx_if_enabled(_record(execution_mode="demo", simulated_trading=True))
+        out = wr.execute_if_enabled(_record(execution_mode="demo", simulated_trading=True))
 
     fake.execute.assert_called_once()
     assert out["mode"] == "submit_enabled"
@@ -204,7 +204,7 @@ def test_demo_mode_ignores_switch_false(wr, monkeypatch):
 
     fake = _fake_executor()
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):
-        out = wr.execute_okx_if_enabled(_record(execution_mode="demo", simulated_trading=True))
+        out = wr.execute_if_enabled(_record(execution_mode="demo", simulated_trading=True))
 
     fake.execute.assert_called_once()
     assert out["mode"] == "submit_enabled"

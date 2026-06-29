@@ -267,7 +267,7 @@ def _force_submit(wr, monkeypatch, *, stub, submit_executor=None):
     # post-submit reconciliation then queries the read-only `stub`.
     monkeypatch.setattr(wr, "_reconciliation_executor", lambda: stub)
     monkeypatch.setattr(wr.ExecutorFactory, "create", lambda cfg, root: submit_executor or _submit_executor())
-    return wr.execute_okx_if_enabled(_armed_record())
+    return wr.execute_if_enabled(_armed_record())
 
 
 def test_post_submit_reconcile_writes_terminal_transition(wr, monkeypatch):
@@ -319,7 +319,7 @@ def test_reconcile_disabled_uses_stdout_outcome(wr, monkeypatch):
     monkeypatch.setattr(wr, "_reconciliation_executor", lambda: exec_calls.append(1) or StubExecutor())
     monkeypatch.setattr(wr.ExecutorFactory, "create", lambda cfg, root: _submit_executor())
 
-    result = wr.execute_okx_if_enabled(_armed_record())
+    result = wr.execute_if_enabled(_armed_record())
     assert "reconcile" not in result
     assert exec_calls == []  # no reconciliation executor constructed
     records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
@@ -384,7 +384,7 @@ def test_disabled_config_no_reconcile_no_journal(wr, monkeypatch):
 
     monkeypatch.setattr(wr, "_reconciliation_executor", boom)
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
-        result = wr.execute_okx_if_enabled(_blocked_record())
+        result = wr.execute_if_enabled(_blocked_record())
 
     create_mock.assert_not_called()
     assert result["mode"] == "not_submitted"

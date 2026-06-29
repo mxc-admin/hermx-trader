@@ -232,7 +232,7 @@ def test_live_override_still_blocked_by_kill_switch(wr, monkeypatch):
 
     record = {"received_at": "2026-06-25T00:00:00Z", "execution_readiness": rd}
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
-        out = wr.execute_okx_if_enabled(record)
+        out = wr.execute_if_enabled(record)
 
     create_mock.assert_not_called()
     assert out["mode"] == "not_submitted"

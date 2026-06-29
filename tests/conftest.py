@@ -90,6 +90,20 @@ def _build_populated_root(root: Path) -> None:
     for src in sorted(CORPUS_STRATEGIES_DIR.glob("*.json")):
         shutil.copy(src, strategies_dir / src.name)
     shutil.copy(CORPUS_CONFIG, root / "shadow-config.json")
+    # engine-config.json is the split-out home of strategy_engine + advisor (the
+    # receiver reads STRATEGY_ENGINE from it, not shadow-config.json). Derive it from
+    # the corpus strategy_engine block so the bound STRATEGY_ENGINE — notably
+    # require_strategy_id=false, which lets the corpus exercise non-strategy alerts
+    # without quarantine — is byte-identical to the pre-split behavior.
+    corpus = json.loads(CORPUS_CONFIG.read_text(encoding="utf-8"))
+    engine_cfg = {
+        "strategy_engine": corpus.get("strategy_engine", {}),
+        "advisor": corpus.get("advisor", {
+            "enabled": False, "command": "hermes", "skills": "hermx-control",
+            "model": "", "timeout_seconds": 30.0,
+        }),
+    }
+    (root / "engine-config.json").write_text(json.dumps(engine_cfg, indent=2), encoding="utf-8")
 
 
 @pytest.fixture

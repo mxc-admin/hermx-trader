@@ -372,7 +372,7 @@ def test_symbol_pause_blocks_submit_path(wr, monkeypatch):
     monkeypatch.setenv("HERMX_LIVE_TRADING", "1")
 
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
-        result = wr.execute_okx_if_enabled(_armed_record())
+        result = wr.execute_if_enabled(_armed_record())
 
     create_mock.assert_not_called()  # symbol pause blocks before any submit
     assert result["mode"] == "not_submitted"

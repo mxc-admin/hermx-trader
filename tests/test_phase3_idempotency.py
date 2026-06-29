@@ -78,7 +78,7 @@ def test_execute_blocks_duplicate_cl_ord_id_from_order_journal(wr, monkeypatch):
     }
 
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
-        out = wr.execute_okx_if_enabled(record)
+        out = wr.execute_if_enabled(record)
 
     create_mock.assert_not_called()  # duplicate clOrdId blocks before any submit
     assert out["mode"] == "not_submitted"
