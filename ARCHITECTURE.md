@@ -276,7 +276,7 @@ The agent **only calls down through the same HTTP API a human would use** — lo
 - **Relay:** `POST 127.0.0.1:8891/webhook` with an unaltered TradingView alert body.
 - **Hard constraints (in the skill prose, enforced in code below it):** cannot set size/notional/leverage (there is no such field — the receiver computes notional from the strategy file), cannot override a strategy or a gate, cannot call an exchange/shell/filesystem, must report a read failure as **UNKNOWN** (never "flat"), and must never relay a signal a human didn't ask for.
 
-The runtime behind the relay seam is `HermesExecutionSkill` (`src/skills/hermes_execution.py`): it normalizes signal+strategy into a controlled `execution_intent`, **fails closed** before any submit on an invalid side or unresolved venue mapping, returns `not_submitted` without calling the service in `dry_run`, and in `live` mode submits **only** through `ExecutionService` — owning no money-safety policy of its own.
+The runtime behind the relay seam is `HermesRelayAdapter` (`src/skills/hermes_execution.py`): it normalizes signal+strategy into a controlled `execution_intent`, **fails closed** before any submit on an invalid side or unresolved venue mapping, returns `not_submitted` without calling the service in `dry_run`, and in `live` mode submits **only** through `ExecutionService` — owning no money-safety policy of its own.
 
 ### 7.3 Orchestration roles (conceptual)
 
@@ -379,6 +379,11 @@ Every install is fully isolated: its own Tailscale tailnet/URL, its own `.env`, 
 3. Register it: `ln -sfn <path> ~/.hermes/skills/<name>`.
 4. No HermX code changes are required — skills are pure HTTP calls to the existing loopback endpoints.
 
+> **Not to be confused with the relay adapter.** The `HermesRelayAdapter`
+> (`src/skills/hermes_execution.py`) is an internal Python component and tested reference
+> seam — it is **not** a Hermes Agent skill. The agent's execution surface is the loopback
+> HTTP API only.
+
 ### 9.4 Adding a gate (safety guard)
 
 1. Add the predicate to the guard chain in `ExecutionService.execute()` (`src/execution/service.py`), returning a ledgered `not_submitted` when it vetoes.
@@ -418,7 +423,7 @@ Intelligence is **purely additive** and lives *outside* the money path. Pattern:
 | `src/executors/ccxt_adapter.py` | `CcxtExecutor` — sole execution backend: write path + normalized read/query contract |
 | `src/executors/factory.py` | `ExecutorFactory` — venue→adapter registry, aliases, fail-closed `available()` |
 | `src/executors/__init__.py` | Public executor API (`ExecutorFactory`, `BaseExecutor`) |
-| `src/skills/hermes_execution.py` | `HermesExecutionSkill` — agent-facing execution surface; delegates all safety to the service |
+| `src/skills/hermes_execution.py` | `HermesRelayAdapter` — internal relay adapter (reference seam), not a Hermes Agent skill; delegates all safety to the service |
 | `src/security/credentials.py` | Per-exchange namespaced credential resolution + `redact_secrets` |
 | `src/security/webhook_auth.py` | Pure auth/rate-limit/HMAC/replay helpers |
 | `skills/hermx-control/SKILL.md` | Agent skill: loopback reads + signal relay, with hard money-safety rules |

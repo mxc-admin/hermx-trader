@@ -564,41 +564,81 @@ echo
 info "Next: create the TradingView alerts (INSTALL.md Phase 7) and fire a test alert."
 
 # ===========================================================================
-# Optional — Hermes Agent + Telegram
+# Optional — Hermes Agent + Telegram gateway
 # ===========================================================================
 echo
 if ask "Set up Hermes Agent + Telegram (natural-language operator bot)?" "n"; then
-  phase "OPTIONAL: Hermes Agent + Telegram (manual steps)"
-  cat <<'HERMES'
-  Hermes is a SEPARATE install — these steps are printed, not automated.
-  Full detail: INSTALL.md Phase 6 / setup/09-hermes-agent.md
+  phase "OPTIONAL: Hermes Agent + Telegram gateway"
 
-  1) Install the agent:
-       curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-       source ~/.bashrc        # or ~/.zshrc
-       hermes --version
+  # 1. Ensure hermes binary is installed.
+  if ! have hermes; then
+    if ask "Hermes is not installed. Install it now (curl installer)?" "y"; then
+      info "Installing Hermes Agent..."
+      curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+      if [[ -f ~/.zshrc ]]; then source ~/.zshrc; fi
+      if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi
+    fi
+  fi
+  if ! have hermes; then
+    err "Hermes binary still not on PATH after install. Add ~/.local/bin to PATH and re-run."
+  else
+    ok "Hermes installed: $(hermes --version 2>&1 | head -1)"
+  fi
 
-  2) Configure its own env (~/.hermes/.env — NOT the HermX repo):
-       mkdir -p ~/.hermes
-       hermes provider setup    # pick xAI/Grok, OpenAI, Anthropic, Ollama, ...
-       cat >> ~/.hermes/.env <<'EOF'
-       TELEGRAM_BOT_TOKEN=123456789:ABC...
-       TELEGRAM_ALLOWED_USERS=<your numeric telegram id>
-       EOF
-       chmod 600 ~/.hermes/.env
-       hermes doctor
+  # 2. Provider key (one-time; safe default is manual).
+  if ask "Configure a model provider (xAI/OpenAI/Anthropic) for Hermes?" "y"; then
+    hermes provider setup || warn "Provider setup failed or was skipped."
+  fi
 
-  3) Register the hermx-control skill:
-       mkdir -p ~/.hermes/skills
-       ln -sfn "$PWD/skills/hermx-control" ~/.hermes/skills/hermx-control
-       hermes skills list | grep hermx-control
+  # 3. Telegram credentials.
+  mkdir -p ~/.hermes
+  HERMES_ENV=~/.hermes/.env
+  if [[ ! -f "$HERMES_ENV" ]] || ! grep -q "TELEGRAM_BOT_TOKEN=" "$HERMES_ENV" 2>/dev/null; then
+    info "Telegram gateway needs a bot token and your numeric user ID."
+    info "  Token: @BotFather -> /newbot"
+    info "  User ID: @userinfobot -> numeric Id"
+    read -r -p "  TELEGRAM_BOT_TOKEN: " tg_token
+    read -r -p "  TELEGRAM_ALLOWED_USERS: " tg_user
+    if [[ -n "$tg_token" && -n "$tg_user" ]]; then
+      touch "$HERMES_ENV"
+      chmod 600 "$HERMES_ENV"
+      grep -v "^TELEGRAM_BOT_TOKEN=" "$HERMES_ENV" > "$HERMES_ENV.tmp" 2>/dev/null || true
+      grep -v "^TELEGRAM_ALLOWED_USERS=" "$HERMES_ENV.tmp" > "$HERMES_ENV" 2>/dev/null || true
+      rm -f "$HERMES_ENV.tmp"
+      printf 'TELEGRAM_BOT_TOKEN=%s\nTELEGRAM_ALLOWED_USERS=%s\n' "$tg_token" "$tg_user" >> "$HERMES_ENV"
+      ok "Wrote Telegram credentials to $HERMES_ENV (mode 600)"
+    else
+      warn "Empty token or user ID — skipping Telegram credential write."
+    fi
+  else
+    ok "Telegram credentials already present in $HERMES_ENV"
+  fi
 
-  4) Start the Telegram gateway:
-       hermes gateway setup     # select Telegram
-       hermes gateway start
+  # 4. Register the hermx-control skill.
+  if [[ -d "$REPO_ROOT/skills/hermx-control" ]]; then
+    mkdir -p ~/.hermes/skills
+    ln -sfn "$REPO_ROOT/skills/hermx-control" ~/.hermes/skills/hermx-control
+    if hermes skills list 2>/dev/null | grep -q "hermx-control"; then
+      ok "hermx-control skill registered"
+    else
+      warn "hermx-control skill not yet discovered by Hermes. Try: hermes skills refresh"
+    fi
+  else
+    warn "Skill directory not found: $REPO_ROOT/skills/hermx-control"
+  fi
 
-  Get Telegram values: @BotFather -> /newbot (token); @userinfobot -> numeric id.
-HERMES
+  # 5. Health check and start gateway.
+  hermes doctor 2>/dev/null || warn "hermes doctor reported an issue."
+  if ask "Start the Hermes messaging gateway now?" "y"; then
+    hermes gateway setup || warn "gateway setup failed or was cancelled."
+    hermes gateway start || warn "gateway start failed."
+    if hermes gateway status 2>/dev/null | grep -q "running"; then
+      ok "Hermes gateway is running"
+    else
+      warn "Hermes gateway may not be running. Check: hermes gateway status"
+    fi
+  fi
+  info "Chat with the bot: @BotFather -> open your bot; send 'what's open?'"
 fi
 
 echo

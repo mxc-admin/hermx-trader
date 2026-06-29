@@ -4,17 +4,34 @@ description: Use when the user asks about the HermX trading system — open posi
 version: 1.1.0
 author: HermX
 license: MIT
+platforms: [linux, macos]
+required_environment_variables:
+  - name: HERMX_SECRET
+    prompt: "HermX dashboard/webhook shared secret (X-Dashboard-Token / X-Webhook-Secret header)"
+    help: "Set in HermX .env on this host. Required when HERMX_DASH_AUTH=true."
+    required_for: "Authenticated dashboard reads and webhook relay"
 metadata:
   hermes:
     tags: [trading, hermx, operations, read-only, execution]
-    related_skills: []
+    config:
+      - key: hermx.dashboard_base
+        description: "HermX dashboard base URL (loopback)"
+        default: "http://127.0.0.1:8098"
+        prompt: "HermX dashboard base URL"
+      - key: hermx.receiver_base
+        description: "HermX webhook receiver base URL (loopback)"
+        default: "http://127.0.0.1:8891"
+        prompt: "HermX webhook receiver base URL"
+    related_skills: [signal-memory, dashboard-risk, kronos-validate]
 ---
 # HermX Control
 
 ## Current posture (read this first)
 - **Mode: deterministic.** The TradingView webhook drives execution end-to-end. You
-  are an **advisory observer** — you read state and relay signals; you do not decide
-  trades. (Pre-execution advisor is built, default OFF — enable via HERMX_ADVISOR_ENABLED.)
+  may veto trades (via the advisor seam), relay sanctioned signals from TradingView, and
+  on explicit operator instruction close an existing position. You never originate sizing,
+  never bypass a gate, never call an exchange directly. (Pre-execution advisor is built,
+  default OFF — enable via HERMX_ADVISOR_ENABLED.)
 - **Venue: OKX, demo/paper only.** The dashboard reports `mode: paper_shadow`. Treat
   every position and balance as demo until told otherwise. Do not imply live capital.
 - **One order path only:** `POST 127.0.0.1:8891/webhook`. Nothing else submits.
@@ -95,6 +112,8 @@ to *educate yourself* about a strategy; never copy numbers out of them into a re
 - Read and summarize state from `/api` and `/health`.
 - Relay a TradingView-originated alert to `POST /webhook` verbatim (pass the signal
   fields through; do not alter prices, sides, or add sizes).
+- On explicit operator instruction, close an existing position via `POST /api/close`
+  (reduce-only; see Procedure).
 - Explain what a strategy file allows and what the system is currently doing.
 
 **CANNOT (hard rules)**
@@ -107,13 +126,27 @@ to *educate yourself* about a strategy; never copy numbers out of them into a re
 - **Never disable or claim to override** the kill switch, gates, or a symbol pause.
 - **Never report a failed/empty read as "flat / no positions."** A read error or
   `executor` degraded/stale means **UNKNOWN** — say so plainly.
-- **A standalone flatten / "close X" is NOT supported yet** via this API — there is no
-  operator-initiated close-only path. If asked to flatten a position on its own, say it
-  isn't supported here and must be done through the normal flow / manually for now; do not
-  improvise a close via `/webhook`. Note the distinction: a **reversal signal does
-  auto-close** — every reversal's `execution_intent` emits `CLOSE_OPPOSITE_IF_ANY` as its
-  first action before opening the new side, so an opposite-direction alert closes the
-  existing position automatically. What's missing is only a *close without a new open*.
+- **Operator-instructed close is supported** via a `POST /api/close` call (see
+  Procedure). This is reduce-only: the position must exist; you cannot open or add.
+  Never improvise a close via `/webhook`, and never close without an explicit operator
+  instruction. Note the distinction: a **reversal signal also auto-closes** — every
+  reversal's `execution_intent` emits `CLOSE_OPPOSITE_IF_ANY` as its first action before
+  opening the new side, so an opposite-direction alert closes the existing position
+  automatically.
+
+## Quick Reference
+
+| Action | Method | Endpoint | Auth Header |
+|--------|--------|----------|-------------|
+| Read state (positions, PnL, arm) | GET | `{hermx.dashboard_base}/api` | `X-Dashboard-Token: {HERMX_SECRET}` |
+| Read health / arm state | GET | `{hermx.dashboard_base}/health` | none |
+| Relay TV signal | POST | `{hermx.receiver_base}/webhook` | `X-Webhook-Secret: {HERMX_SECRET}` |
+| Operator-instructed close | POST | `{hermx.receiver_base}/api/close` | `X-Dashboard-Token: {HERMX_SECRET}` |
+
+**Armed truth-table** (`/health` → `arm` block):
+- `kill_switch_engaged: true` → live trading OFF, do not relay a signal
+- `live_strategies: 0` → no live strategies loaded
+- `all_auth_healthy: false` → exchange auth broken, do not relay
 
 ## Procedure
 
@@ -148,6 +181,16 @@ never claim a gate is open that you cannot read.
 1. Confirm the payload has all required fields and valid enums.
 2. `POST /webhook` with the JSON unchanged. Report back the receiver's response.
 3. The gate chain decides whether anything submits — relay its outcome truthfully.
+
+**Operator-instructed close (reduce-only)**
+1. Only on an explicit operator instruction to close/flatten a specific position —
+   never on your own initiative, a timer, or a hunch.
+2. `GET /api` first to confirm the position actually exists; if the read fails or is
+   stale, report UNKNOWN and do not close.
+3. `POST {hermx.receiver_base}/api/close` with `X-Dashboard-Token: {HERMX_SECRET}`.
+   This is reduce-only — it can only shrink/flatten an existing position, never open
+   or add. You do not set or influence size.
+4. Report the receiver's outcome truthfully (closed / not_submitted / UNKNOWN).
 
 ## Common Pitfalls
 1. Treating a 4xx/5xx or stale read as "flat" — this is a money-relevant lie. Report

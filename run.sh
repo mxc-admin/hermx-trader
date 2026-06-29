@@ -55,6 +55,28 @@ err()    { printf '  %sx%s %s\n' "$RED" "$RESET" "$1"; }
 # ---------------------------------------------------------------------------
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Print one-line Hermes gateway status if hermes is installed. The gateway is a
+# separate launchd/systemd service; we only report it, never start/stop it.
+print_hermes_status() {
+  if ! have hermes; then
+    info "Hermes gateway: not installed (skip with --no-hermes)"
+    return
+  fi
+  local gateway_status
+  gateway_status=$(hermes gateway status 2>&1) || true
+  if [[ -z "$gateway_status" ]]; then
+    warn "Hermes gateway: status unknown"
+    return
+  fi
+  if echo "$gateway_status" | grep -q "Gateway is.*running"; then
+    ok "Hermes gateway: $(echo "$gateway_status" | grep -E "Gateway is.*running" | head -1)"
+  elif echo "$gateway_status" | grep -q "not running"; then
+    warn "Hermes gateway: not running (run: hermes gateway start)"
+  else
+    info "Hermes gateway: status available"
+  fi
+}
+
 # Resolve a Python interpreter: prefer repo venv, then python3.11, then python3
 if [[ -x "$ROOT/.venv/bin/python" ]]; then
   PYTHON="$ROOT/.venv/bin/python"
@@ -488,4 +510,5 @@ fi
 print_summary
 info "HERMX_SECRET: ${HERMX_SECRET:-<not set>}"
 info "(also written to HERMX_SECRET.txt)"
+print_hermes_status
 wait

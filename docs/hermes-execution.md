@@ -1,8 +1,13 @@
-# Skill: Hermes Execution
+# HermX Relay Adapter
 
-Use this skill to execute trades through the controlled HermX execution API.
+> **This is the HermX-internal relay adapter (`HermesRelayAdapter`), not a Hermes Agent
+> SKILL.md.** It runs inside HermX behind the webhook receiver's execution seam. The Hermes
+> Agent accesses HermX only via the loopback HTTP API; it never imports or calls this
+> component directly.
 
-This skill is the only agent-facing execution surface.
+This component relays a validated signal + strategy context into the controlled HermX
+execution chokepoint (`ExecutionService`). It is internal to HermX, not an agent-facing
+surface.
 
 ## Purpose
 
@@ -69,7 +74,7 @@ If any gate is false/unknown, return `not_submitted` with reason.
 
 ## Runtime
 
-- Implemented by `src/skills/hermes_execution.py` (`HermesExecutionSkill`).
+- Implemented by `src/skills/hermes_execution.py` (`HermesRelayAdapter`).
 - `dry_run` builds the normalized intent and returns `not_submitted` (reason
   `dry_run`) without calling the service — it submits nothing.
 - `live` submits exclusively through `ExecutionService.execute(record)`; the

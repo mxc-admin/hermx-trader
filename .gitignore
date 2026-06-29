@@ -39,7 +39,12 @@ dashboard-ui/tsconfig.tsbuildinfo
 # python packaging
 *.egg-info/
 
-# runtime/backup artifacts
-.pytest_cache/
-shadow-config.json.bak*
+# Claude Code local settings (machine-specific permissions)
+.claude/settings.local.json
+
+# Keep tracked:
+# .claude/CLAUDE.md, .claude/rules/*, .claude/skills/*/SKILL.md
+# .claude/skills/*/references/*, .claude/skills/*/scripts/*
+# .windsurf/rules/*, .windsurf/workflows/*
+# CLAUDE.md, AGENTS.md, verify_install.sh
 

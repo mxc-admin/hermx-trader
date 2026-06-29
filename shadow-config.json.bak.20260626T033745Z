@@ -1,0 +1,78 @@
+{
+  "mode": "duo_base_dev_strategy_demo",
+  "primary_policy": "strategy_file_duo_base_dev",
+  "execution_timeframe": "strategy_file",
+  "chart_type": "heikin_ashi",
+  "base_notional_usd": 0,
+  "fees": {
+    "maker_rate": 0.0002,
+    "taker_rate": 0.0005,
+    "default_liquidity": "taker"
+  },
+  "funding": {
+    "enabled": false,
+    "default_rate": 0.0
+  },
+  "policies": {
+    "enabled": []
+  },
+  "execution": {
+    "enabled": true,
+    "mode": "demo_live",
+    "exchange": "okx",
+    "execution_policy": "strategy_file_duo_base_dev",
+    "shadow_policy": "none",
+    "route": "okx_api",
+    "account": "sandbox",
+    "td_mode": "isolated",
+    "simulated_trading": true,
+    "force_ipv4": true,
+    "submit_orders": true
+  },
+  "strategy_engine": {
+    "enabled": true,
+    "strategies_dir": "strategies",
+    "default_status": "trial_candidate",
+    "submit_orders": true,
+    "allow_strategy_alerts": true,
+    "require_strategy_id": true,
+    "quarantine_invalid_strategy_alerts": true,
+    "notes": "VPS demo profile for Duo Base Dev strategy-file alerts. Each strategy must also set okx_submit_orders=true before it can submit OKX sandbox orders."
+  },
+  "assets": {
+    "SOLUSDT": {
+      "enabled": true,
+      "okx_inst_id": "SOL-USDT-SWAP",
+      "budget_usd": 1500,
+      "leverage": 2,
+      "timeframe": "3h"
+    },
+    "ETHUSDT": {
+      "enabled": true,
+      "okx_inst_id": "ETH-USDT-SWAP",
+      "budget_usd": 2000,
+      "leverage": 2,
+      "timeframe": "2h"
+    },
+    "XRPUSDT": {
+      "enabled": true,
+      "okx_inst_id": "XRP-USDT-SWAP",
+      "budget_usd": 1500,
+      "leverage": 2,
+      "timeframe": "4h"
+    },
+    "BTCUSDT": {
+      "enabled": true,
+      "okx_inst_id": "BTC-USDT-SWAP",
+      "budget_usd": 1500,
+      "leverage": 2,
+      "timeframe": "2h"
+    }
+  },
+  "risk": {
+    "allow_live_execution": true,
+    "duplicate_protection": true,
+    "paper_uses_signal_price_until_okx_fill": false
+  },
+  "notes": "Use this profile only after Duo Base Dev alerts are confirmed open-ended. This profile is OKX sandbox/demo only."
+}

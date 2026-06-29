@@ -108,7 +108,7 @@ the agent*.
  │ Operator       │  Business API   │  │ Webhook Receiver  127.0.0.1:8891          │ │
  │ phone          │◀───────────────▶│  │  /webhook  /health  /latest               │ │
  │ Telegram /     │  (messenger     │  │  auth → rate-limit → normalize → schema → │ │
- │ WhatsApp       │   gateway skill)│  │  dedupe → queue → worker                  │ │
+ │ WhatsApp       │   gateway)      │  │  dedupe → queue → worker                  │ │
  └───────────────┘                 │  └───────────┬──────────────────────┬────────┘ │
                                    │              │ readiness            │ enqueue   │
                                    │  ORCHESTRATION LAYER                 │           │
@@ -124,7 +124,7 @@ the agent*.
                                    │  │   kronos-validate   [PLAN]   │───┼──┐        │
                                    │  │   dashboard-risk    [PLAN]   │───┼──┼──┐     │
                                    │  │   tradingview-chart [PLAN]   │───┼──┼──┼─┐   │
-                                   │  │   messenger-gateway [PLAN]   │   │  │  │ │   │
+                                   │  │   telegram: hermes gateway   │   │  │  │ │   │
                                    │  └──────────────┬───────────────┘   │  │  │ │   │
                                    │   advisor seam  │ (pre-exec, opt-in) │  │  │ │   │
                                    │                 ▼                    ▼  │  │ │   │
@@ -317,7 +317,10 @@ Legend: ✓ = confirms signal, ✗ = contradicts, **?** = UNKNOWN/unavailable.
 | `kronos-validate` | [PLANNED] | Validate candle-prediction direction/conviction. | `POST <KRONOS_API_URL>/predict` |
 | `dashboard-risk` | [PLANNED] | Structured risk read from MXC dashboard. | `GET mxc-kinetic-crypto.replit.app` |
 | `tradingview-chart` | [PLANNED] | Screenshot + indicator read + chart validation. | TradingView CDP MCP tools |
-| `messenger-gateway` | [PLANNED] | Operator comms (Telegram/WhatsApp). | Telegram Bot API, WhatsApp Business API |
+
+> **Operator comms are not a skill.** Telegram operator interaction is handled via Hermes'
+> native gateway (`hermes gateway` config with `TELEGRAM_BOT_TOKEN` and
+> `TELEGRAM_ALLOWED_USERS`). No separate skill is required.
 
 ### 4.3 Skill interface contract
 
@@ -563,31 +566,16 @@ tool calls, not raw CDP.
 
 ---
 
-### 5.e `messenger-gateway` **[PLANNED]**
+### 5.e Operator comms — Hermes native gateway (not a skill)
 
-**Purpose.** Two-way operator communication over Telegram and WhatsApp: status queries,
-alerts, and confirmation prompts for agent-initiated actions.
-
-**Inputs.** Inbound operator message (text/command); outbound notifications/confirmations.
-
-**Outputs.** Delivered messages; parsed operator intents handed to the agent.
-
-**API.**
-- Telegram Bot API — `getUpdates`/webhook for inbound, `sendMessage` for outbound.
-- WhatsApp Business Cloud API — webhook inbound, `/messages` outbound.
-
-**Auth.** Telegram bot token; WhatsApp business credentials. **Sender allowlist**
-(`TELEGRAM_ALLOWED_USERS`, `WHATSAPP_ALLOWED_USERS`) — messages from unknown senders are
-dropped before reaching the agent.
-
-**Fail behavior.** Gateway down ⇒ operator comms unavailable; **execution unaffected**.
-Outbound failures are retried with backoff and logged.
-
-**Example.**
-
-> **Operator (Telegram):** "what's our pnl today?"
-> **Gateway → agent → hermx-control (GET /api) → gateway → Operator:**
-> "Daily uPnL **+$11.30** across 1 open position (SOL LONG). No closes today."
+Telegram operator interaction is handled via Hermes' native gateway (`hermes gateway`
+config with `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_USERS`). No separate skill is
+required. The gateway is read-first and loads the `hermx-control` skill so the operator
+can query positions, PnL, arm status, and the last signal in chat; it inherits the same
+hard rule that it cannot execute without an explicit inbound signal or human instruction,
+and never bypasses the gate chain. A **sender allowlist** (`TELEGRAM_ALLOWED_USERS`) drops
+messages from unknown senders before they reach the agent; if the gateway is down,
+operator comms degrade but **execution is unaffected**.
 
 ---
 
@@ -972,7 +960,7 @@ Ordered by **what unlocks the most value next**, with the build/plan boundary ex
 | Step | Deliverable | Depends on | Unlocks | Status |
 |------|-------------|------------|---------|--------|
 | **1** | `signal-memory` read endpoint + skill | executions/advisor ledgers (exist) | agent continuity; ML corpus surfaced | [PLANNED] |
-| **2** | `messenger-gateway` (Telegram first) | `hermx-control` (exists) | conversational ops — the headline UX win | [PLANNED] |
+| **2** | `hermes gateway` (Telegram first; native, not a skill) | `hermx-control` (exists) | conversational ops — the headline UX win | [PLANNED] |
 | **3** | Confirmation flow (§6.4) | step 2 | safe human-instructed relay over chat | [PLANNED] |
 | **4** | Advisor burn-in: log & review verdicts | advisor seam (exists) | verdicts validated before relying on the veto | config-only |
 | **5** | `kronos-validate` skill + `KRONOS_API_URL` | Kronos API stood up | direction/conviction confirmation | [PLANNED] |
