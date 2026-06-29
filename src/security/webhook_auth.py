@@ -44,29 +44,38 @@ def env_file_permissions_healthy(root: Path, path: Path | None = None) -> bool:
     return (mode & 0o077) == 0
 
 
-def client_ip(handler: BaseHTTPRequestHandler) -> str:
-    """Best-effort client IP, preferring Cloudflare / proxy forwarding headers."""
-    forwarded = (handler.headers.get("CF-Connecting-IP") or "").strip()
-    if forwarded:
-        return forwarded
-    xff = (handler.headers.get("X-Forwarded-For") or "").strip()
-    if xff:
-        return xff.split(",", 1)[0].strip()
+def client_ip(handler: BaseHTTPRequestHandler, trust_forwarding: bool = True) -> str:
+    """Best-effort client IP, preferring Cloudflare / proxy forwarding headers.
+
+    ``trust_forwarding`` gates the proxy headers (CF-Connecting-IP, X-Forwarded-For).
+    Those headers are attacker-spoofable when no trusted reverse proxy sits in front of
+    the receiver, so callers that bind a non-loopback interface without a known proxy
+    should pass ``trust_forwarding=False`` to fall back to the raw socket peer address.
+    """
+    if trust_forwarding:
+        forwarded = (handler.headers.get("CF-Connecting-IP") or "").strip()
+        if forwarded:
+            return forwarded
+        xff = (handler.headers.get("X-Forwarded-For") or "").strip()
+        if xff:
+            return xff.split(",", 1)[0].strip()
     if getattr(handler, "client_address", None):
         return str(handler.client_address[0])
     return "unknown"
 
 
-def rate_limit_key(handler: BaseHTTPRequestHandler) -> str:
+def rate_limit_key(handler: BaseHTTPRequestHandler, trust_forwarding: bool = True) -> str:
     """Rate-limit bucket key: always the client IP (via ``client_ip``).
 
     The previous ``X-Webhook-Key-Id`` branch was attacker-controlled -- a caller could
     rotate that header per request to mint a fresh bucket and bypass the sliding window.
-    The receiver binds 127.0.0.1, so only the reverse proxy reaches it and the true
-    client IP arrives in CF-Connecting-IP / X-Forwarded-For, which ``client_ip`` prefers.
+    When a trusted reverse proxy fronts the receiver, the true client IP arrives in
+    CF-Connecting-IP / X-Forwarded-For, which ``client_ip`` prefers. When no such proxy
+    is present (``trust_forwarding=False``), those headers are spoofable and the raw
+    socket peer address is used instead so an attacker cannot mint fresh buckets.
     Per-key limits would require a trusted/verified key id, which we do not have.
     """
-    return f"ip:{client_ip(handler)}"
+    return f"ip:{client_ip(handler, trust_forwarding=trust_forwarding)}"
 
 
 def rate_limit_allow(

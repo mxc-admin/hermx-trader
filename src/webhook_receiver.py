@@ -750,7 +750,12 @@ def liveness_watchdog_loop(stop_event: "threading.Event | None" = None, sleep=ti
 
 
 def _rate_limit_key(handler: BaseHTTPRequestHandler) -> str:
-    return _rate_limit_key_impl(handler)
+    # Only trust spoofable forwarding headers (CF-Connecting-IP / X-Forwarded-For)
+    # when bound OFF-HOST (behind a reverse proxy). On loopback there is no proxy, so
+    # an attacker could otherwise mint a fresh rate-limit bucket per request via a
+    # forged header. _LOOPBACK_BIND_HOSTS is module-level and resolved at call time.
+    trust = str(HERMX_BIND_HOST or "").strip().lower() not in _LOOPBACK_BIND_HOSTS
+    return _rate_limit_key_impl(handler, trust_forwarding=trust)
 
 
 def rate_limit_allow(source_key: str, now_seconds: float | None = None) -> tuple[bool, dict]:
