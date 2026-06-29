@@ -681,6 +681,14 @@ def _dashboard_executor(config):
         exec_cfg = dict((cfg.get("execution") or {}))
         if not exec_cfg.get("exchange"):
             exec_cfg["exchange"] = "ccxt"
+        # ccxt is the backend, not a venue. CcxtExecutor._exchange_id() only
+        # defaults to "okx" when BOTH ccxt_exchange and exchange are absent; with
+        # exchange="ccxt" it would resolve to a bogus "ccxt" venue -> getattr(ccxt,
+        # "ccxt") is None -> "unsupported_ccxt_exchange:ccxt". Pin the venue here so
+        # the dashboard executor connects to OKX (its default) after the shadow-config
+        # removal left this config empty.
+        if not exec_cfg.get("ccxt_exchange"):
+            exec_cfg["ccxt_exchange"] = "okx"
         cfg["execution"] = exec_cfg
         return ExecutorFactory.create(cfg, ROOT), None
     except Exception as exc:
