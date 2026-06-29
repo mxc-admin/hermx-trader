@@ -46,7 +46,6 @@ def _fake_executor():
 def test_demo_mode_submits_with_kill_switch_off(monkeypatch):
     """Demo mode does NOT need the kill switch armed: with HERMX_LIVE_TRADING=false
     a demo strategy still submits to the sandbox (the switch gates only live mode)."""
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_LIVE_TRADING", "false")
 
     fake = _fake_executor()
@@ -57,7 +56,6 @@ def test_demo_mode_submits_with_kill_switch_off(monkeypatch):
 
 
 def test_demo_mode_submits_with_kill_switch_unset(monkeypatch):
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
 
     fake = _fake_executor()
@@ -70,7 +68,6 @@ def test_demo_mode_submits_with_kill_switch_unset(monkeypatch):
 def test_per_strategy_submit_flag_blocks(monkeypatch):
     """The per-strategy submit flag is the paper arm: live_execution_enabled=False
     (strategy.submit_orders=false) => no executor is ever built and nothing submits."""
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     rec = _armed_record()
     rec["execution_readiness"]["live_execution_enabled"] = False
 

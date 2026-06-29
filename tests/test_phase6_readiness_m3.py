@@ -26,10 +26,9 @@ from __future__ import annotations
 import importlib
 import json
 import os
-import shutil
 from pathlib import Path
 
-from conftest import CORPUS_CONFIG, load_alert
+from conftest import load_alert, write_engine_config
 from test_phase6_strategy_schema_v2 import V2_TWIN
 
 
@@ -40,7 +39,7 @@ def _build_root_with_strategy(root: Path, strategy: dict) -> None:
     (strategies_dir / f"{strategy['strategy_id']}.json").write_text(
         json.dumps(strategy, indent=2), encoding="utf-8"
     )
-    shutil.copy(CORPUS_CONFIG, root / "shadow-config.json")
+    write_engine_config(root)
 
 
 def _load_module_at(root: Path):

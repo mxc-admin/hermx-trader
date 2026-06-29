@@ -25,7 +25,6 @@ from dashboard_core import (
     normalize_policy_decision,
     okx_swap_tickers,
     parse_dt,
-    read_jsonl,
     read_jsonl_stats,
     shadow_config,
 )
@@ -1064,151 +1063,6 @@ def okx_row_details(row, is_live=False):
     )
 
 
-def simulate(events, config):
-    fee_rate = as_float(((config.get("fees") or {}).get("taker_rate"))) or 0.0005
-    marks = mark_prices(config)
-    state = {}
-    for key, label in POLICIES:
-        state[key] = {
-            "label": label,
-            "symbols": {},
-            "rows": [],
-            "stats": {"closed": 0, "entries": 0, "skips": 0, "reduces": 0, "wins": 0, "losses": 0, "fees": 0.0, "closed_net": 0.0, "peak": 0.0, "max_dd": 0.0},
-            "assets": {},
-        }
-        for sym in SYMBOLS:
-            asset_cfg = (config.get("assets") or {}).get(sym) or {}
-            budget = as_float(asset_cfg.get("budget_usd")) or (2000.0 if sym == "ETHUSDT" else 1500.0)
-            lev = as_float(asset_cfg.get("leverage")) or 2.0
-            state[key]["symbols"][sym] = None
-            state[key]["assets"][sym] = {
-                "budget": budget,
-                "equity": budget,
-                "leverage": lev,
-                "closed": 0,
-                "entries": 0,
-                "skips": 0,
-                "reduces": 0,
-                "wins": 0,
-                "losses": 0,
-                "fees": 0.0,
-                "closed_net": 0.0,
-                "peak": 0.0,
-                "max_dd": 0.0,
-            }
-
-    for event in events:
-        sym = event.get("symbol")
-        price = as_float(event.get("ha_close"))
-        if sym not in SYMBOLS or price is None:
-            continue
-        target = target_side(event)
-        for key, _label in POLICIES:
-            d = normalize_policy_decision(event, key)
-            decision = str(d.get("decision") or "SKIP").upper()
-            weight = as_float(d.get("risk_weight")) or 0.0
-            policy = state[key]
-            asset = policy["assets"][sym]
-            pos = policy["symbols"][sym]
-            row_id = f"row-{key}-{sym}-{len(policy['rows'])}"
-            exec_meta = execution_fields(event, price)
-            actions = []
-            event_fees = 0.0
-            closed_pnl = None
-
-            if pos and pos["side"] != target:
-                pnl = position_pnl(pos, price, fee_rate)
-                closed_pnl = pnl["net"]
-                event_fees += pnl["exit_fee"]
-                asset["equity"] += closed_pnl
-                for bucket in (policy["stats"], asset):
-                    bucket["closed"] += 1
-                    bucket["closed_net"] += closed_pnl
-                    bucket["fees"] += pnl["exit_fee"]
-                    if closed_pnl > 0:
-                        bucket["wins"] += 1
-                    else:
-                        bucket["losses"] += 1
-                    bucket["peak"] = max(bucket["peak"], bucket["closed_net"])
-                    bucket["max_dd"] = min(bucket["max_dd"], bucket["closed_net"] - bucket["peak"])
-                actions.append("CLOSE_" + pos["side"].upper())
-                policy["symbols"][sym] = None
-                pos = None
-            elif pos and pos["side"] == target:
-                actions.append("DUPLICATE_SAME_DIRECTION_NO_PYRAMID")
-
-            if not pos:
-                if decision == "SKIP" or weight <= 0:
-                    for bucket in (policy["stats"], asset):
-                        bucket["skips"] += 1
-                    if not actions:
-                        actions.append("SKIP_NO_NEW_ENTRY")
-                    elif "SKIP" not in actions[-1]:
-                        actions.append("SKIP_NO_NEW_ENTRY")
-                else:
-                    notional = max(0.0, asset["equity"]) * asset["leverage"] * weight
-                    entry_fee = notional * fee_rate
-                    event_fees += entry_fee
-                    for bucket in (policy["stats"], asset):
-                        bucket["entries"] += 1
-                        bucket["fees"] += entry_fee
-                        if decision in {"REDUCE", "REDUCE_SMALL"} or weight < 1:
-                            bucket["reduces"] += 1
-                    policy["symbols"][sym] = {
-                        "side": target,
-                        "entry": price,
-                        "entry_time": event.get("time"),
-                        "entry_row_id": row_id,
-                        "execution_source": exec_meta["execution_source"],
-                        "weight": weight,
-                        "notional": notional,
-                        "entry_fee": entry_fee,
-                    }
-                    actions.append("OPEN_" + target.upper())
-
-            row = {
-                "row_id": row_id,
-                "time": event.get("time"),
-                "time_colombia": event.get("time_colombia") or colombia_time(event.get("time")),
-                "timeframe": "30m",
-                "source": event.get("source") or "historical",
-                "execution_source": exec_meta["execution_source"],
-                "execution_status": exec_meta["execution_status"],
-                "symbol": sym,
-                "signal": str(event.get("side") or "").upper(),
-                "price": price,
-                "alert_price": price,
-                "okx_price": exec_meta["okx_price"],
-                "latency_seconds": exec_meta["latency_seconds"],
-                "slippage_pct": exec_meta["slippage_pct"],
-                "decision": decision,
-                "weight": weight,
-                "score": d.get("score"),
-                "policy_action": d.get("action"),
-                "position_action": " + ".join(actions),
-                "fees": event_fees,
-                "closed_pnl": closed_pnl,
-                "equity_after": asset["equity"],
-                "reasons": d.get("reasons") or [],
-                "ctx30": event.get("ctx30") or {},
-            }
-            policy["rows"].append(row)
-
-    for key in state:
-        for sym, asset in state[key]["assets"].items():
-            pos = state[key]["symbols"][sym]
-            mark = marks.get(sym)
-            floating = position_pnl(pos, mark, fee_rate)["net"] if pos and mark else 0.0
-            asset["position"] = pos
-            asset["mark"] = mark
-            asset["floating"] = floating
-            asset["current_equity"] = asset["equity"] + floating
-        state[key]["floating"] = sum(a["floating"] for a in state[key]["assets"].values())
-        state[key]["ending_equity"] = sum(a["current_equity"] for a in state[key]["assets"].values())
-        state[key]["initial_equity"] = sum(a["budget"] for a in state[key]["assets"].values())
-    return state
-
-
 def human_age(seconds):
     if seconds is None:
         return "unknown"
@@ -2047,7 +1901,6 @@ def summary_cards(model):
     strategies = model.get("active_strategies") or []
     executor = model.get("executor") or {}
     fresh = model.get("freshness") or {}
-    cfg = model.get("config") or {}
 
     # Card 1: System status
     live_enabled, _ = live_trading_enabled()

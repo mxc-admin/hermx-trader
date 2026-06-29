@@ -33,7 +33,7 @@ SRC_DIR = REPO_ROOT / "src"
 # was retired with the shadow/position-journal removal, so PAPER_STATE_FILE is gone too.)
 MUTABLE_ATTRS = ["CONTROL_STATE_FILE", "LATEST_FILE"]
 # Paths that must NEVER follow HERMX_DATA_DIR (they stay under ROOT).
-ROOT_ANCHORED_ATTRS = ["LOG_DIR", "CONFIG_FILE", "STRATEGIES_DIR"]
+ROOT_ANCHORED_ATTRS = ["LOG_DIR", "STRATEGIES_DIR"]
 
 _RECEIVER_ATTRS = MUTABLE_ATTRS + ROOT_ANCHORED_ATTRS + ["ROOT", "DATA_DIR", "HERMX_BIND_HOST"]
 _DASHBOARD_ATTRS = ["ROOT", "STRATEGIES_DIR", "HERMX_BIND_HOST"]
@@ -118,7 +118,6 @@ def test_data_dir_relocates_only_mutable_files(state_root, tmp_path):
         assert os.path.dirname(rx[attr]) == str(data_dir), f"{attr} should follow HERMX_DATA_DIR"
     # ...while logs/config/strategies remain anchored to ROOT.
     assert rx["LOG_DIR"] == os.path.join(root, "logs")
-    assert rx["CONFIG_FILE"] == os.path.join(root, "shadow-config.json")
     assert os.path.dirname(rx["STRATEGIES_DIR"]) == root
     # And the relocation must create the directory at import time.
     assert data_dir.is_dir()
@@ -134,7 +133,6 @@ def test_data_dir_does_not_affect_logs_or_config(state_root, tmp_path):
         state_root,
     )
     assert str(data_dir) not in rx["LOG_DIR"]
-    assert str(data_dir) not in rx["CONFIG_FILE"]
     assert str(data_dir) not in rx["STRATEGIES_DIR"]
 
 

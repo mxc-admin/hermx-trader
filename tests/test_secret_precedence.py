@@ -17,7 +17,6 @@ from __future__ import annotations
 import importlib
 import os
 
-import pytest
 
 
 def _reload_with(module_name: str, env: dict, shadow_root) -> tuple:

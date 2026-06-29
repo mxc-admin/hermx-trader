@@ -36,7 +36,6 @@ from pathlib import Path
 
 import pytest
 
-import webhook_receiver as wr
 
 
 # ===========================================================================
@@ -215,7 +214,6 @@ def test_readiness_no_override_uses_strategy_file(wr):
 def test_live_override_still_blocked_by_kill_switch(wr, monkeypatch):
     """A live override builds a live, non-simulated readiness, but Gate 3 in the
     ExecutionService refuses it while HERMX_LIVE_TRADING is off (fail-closed)."""
-    monkeypatch.setattr(wr, "CONFIG", {"execution": {"exchange": "ccxt"}})
     monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
 
     wr.set_strategy_override("strat-LIVE", "live")

@@ -32,7 +32,6 @@ def _armed_record(cl: str = "cid") -> dict:
 
 
 def test_submit_timeout_maps_to_unknown(monkeypatch):
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setattr(wr, "SECRET", "phase3-secret")
     monkeypatch.setattr(wr, "HERMX_SUBMIT_TIMEOUT_SECONDS", 1.0)
 
@@ -57,7 +56,6 @@ def test_submit_timeout_maps_to_unknown(monkeypatch):
 
 
 def test_watchdog_pause_blocks_submission(monkeypatch):
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setattr(wr, "SECRET", "phase3-secret")
     wr._set_watchdog_submission_paused(True, "watchdog_degraded")
 

@@ -22,7 +22,7 @@ SRC_DIR = REPO_ROOT / "src"
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 # Redirect SHADOW_ROOT to an isolated temp dir up front, so merely importing
-# webhook_receiver (which calls mkdir / load_shadow_config at module scope)
+# webhook_receiver (which calls mkdir / load_engine_config at module scope)
 # cannot touch the real repo logs/ or paper-state.json.
 _SHADOW_ROOT = Path(tempfile.mkdtemp(prefix="hermx-test-shadow-root-"))
 (_SHADOW_ROOT / "logs").mkdir(parents=True, exist_ok=True)
@@ -58,17 +58,16 @@ def fixtures_dir() -> Path:
 # ---------------------------------------------------------------------------
 # Characterization harness (REFACTOR_PLAN.md:160 task 3, :167, :179).
 #
-# webhook_receiver binds CONFIG / STRATEGIES / ALLOWED_SYMBOLS / STRATEGY_ENGINE /
-# POLICY_KEYS and every LOG_DIR/state path from SHADOW_ROOT *at import time*. The
-# default conftest SHADOW_ROOT above is an empty dir (CONFIG=defaults,
-# STRATEGIES={}), so strategy alerts would be rejected unknown_strategy_id and no
-# corpus config would apply.
+# webhook_receiver binds STRATEGIES / ALLOWED_SYMBOLS / STRATEGY_ENGINE and every
+# LOG_DIR/state path from SHADOW_ROOT *at import time*. The default conftest
+# SHADOW_ROOT above is an empty dir (STRATEGIES={}), so strategy alerts would be
+# rejected unknown_strategy_id and no corpus config would apply.
 #
 # Chosen approach: build a fresh, *populated* temp SHADOW_ROOT per test (copy the
-# 4 corpus strategy files + the synthetic dry-run shadow-config.json), point
+# 4 corpus strategy files + write a synthetic engine-config.json), point
 # SHADOW_ROOT at it, and importlib.reload(webhook_receiver) so its globals rebind
 # to that populated root. This is the faithful approach -- it exercises the real
-# module-load binding (load_shadow_config / load_strategy_files) rather than
+# module-load binding (load_engine_config / load_strategy_files) rather than
 # monkeypatching globals after the fact. Per-test reload also gives full isolation
 # (fresh paper-state.json, seen-signals.json, logs/) so tests never touch the real
 # runtime state and never interfere with each other.
@@ -79,7 +78,32 @@ def fixtures_dir() -> Path:
 # ---------------------------------------------------------------------------
 
 CORPUS_STRATEGIES_DIR = FIXTURES_DIR / "strategies"
-CORPUS_CONFIG = FIXTURES_DIR / "config" / "shadow-config.dryrun.json"
+
+# engine-config.json is the sole config the receiver binds (STRATEGY_ENGINE +
+# advisor). shadow-config.json was removed entirely. require_strategy_id=false
+# (unlike the production VPS profile) lets the corpus exercise non-strategy alerts
+# without quarantine.
+CORPUS_ENGINE_CONFIG = {
+    "strategy_engine": {
+        "enabled": True,
+        "strategies_dir": "strategies",
+        "default_status": "trial_candidate",
+        "allow_strategy_alerts": True,
+        "require_strategy_id": False,
+        "quarantine_invalid_strategy_alerts": True,
+    },
+    "advisor": {
+        "enabled": False, "command": "hermes", "skills": "hermx-control",
+        "model": "", "timeout_seconds": 30.0,
+    },
+}
+
+
+def write_engine_config(root: Path) -> None:
+    """Write the corpus engine-config.json into a test SHADOW_ROOT."""
+    (root / "engine-config.json").write_text(
+        json.dumps(CORPUS_ENGINE_CONFIG, indent=2), encoding="utf-8"
+    )
 
 
 def _build_populated_root(root: Path) -> None:
@@ -89,21 +113,7 @@ def _build_populated_root(root: Path) -> None:
     strategies_dir.mkdir(parents=True, exist_ok=True)
     for src in sorted(CORPUS_STRATEGIES_DIR.glob("*.json")):
         shutil.copy(src, strategies_dir / src.name)
-    shutil.copy(CORPUS_CONFIG, root / "shadow-config.json")
-    # engine-config.json is the split-out home of strategy_engine + advisor (the
-    # receiver reads STRATEGY_ENGINE from it, not shadow-config.json). Derive it from
-    # the corpus strategy_engine block so the bound STRATEGY_ENGINE — notably
-    # require_strategy_id=false, which lets the corpus exercise non-strategy alerts
-    # without quarantine — is byte-identical to the pre-split behavior.
-    corpus = json.loads(CORPUS_CONFIG.read_text(encoding="utf-8"))
-    engine_cfg = {
-        "strategy_engine": corpus.get("strategy_engine", {}),
-        "advisor": corpus.get("advisor", {
-            "enabled": False, "command": "hermes", "skills": "hermx-control",
-            "model": "", "timeout_seconds": 30.0,
-        }),
-    }
-    (root / "engine-config.json").write_text(json.dumps(engine_cfg, indent=2), encoding="utf-8")
+    write_engine_config(root)
 
 
 @pytest.fixture

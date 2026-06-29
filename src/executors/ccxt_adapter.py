@@ -84,7 +84,7 @@ def _is_timeout_error(exc: Exception) -> bool:
     return "timeout" in text or "timed out" in text
 
 
-def _okx_inst_to_ccxt_symbol(inst_id: str | None) -> str | None:
+def _inst_id_to_ccxt_symbol(inst_id: str | None) -> str | None:
     text = str(inst_id or "").strip().upper()
     if not text:
         return None
@@ -106,7 +106,7 @@ def _okx_inst_to_ccxt_symbol(inst_id: str | None) -> str | None:
     return text
 
 
-def _ccxt_symbol_to_okx_inst(symbol: str | None) -> str | None:
+def _ccxt_symbol_to_inst_id(symbol: str | None) -> str | None:
     text = str(symbol or "").strip().upper()
     if not text:
         return None
@@ -311,10 +311,6 @@ class CcxtExecutor(BaseExecutor):
         if reduce_only:
             params["reduceOnly"] = True
 
-        pos_mode = str(self.execution_cfg.get("ccxt_pos_mode") or "").lower()
-        if pos_mode == "long_short_mode" and position_side in {"long", "short"}:
-            params["posSide"] = position_side
-
         return params
 
     def _reference_price(self, client, readiness: dict) -> float | None:
@@ -329,8 +325,8 @@ class CcxtExecutor(BaseExecutor):
             return price
         symbol = (
             (readiness or {}).get("ccxt_symbol")
-            or _okx_inst_to_ccxt_symbol((readiness or {}).get("inst_id") or ((readiness or {}).get("instrument") or {}).get("inst_id"))
-            or _okx_inst_to_ccxt_symbol((readiness or {}).get("symbol"))
+            or _inst_id_to_ccxt_symbol((readiness or {}).get("inst_id") or ((readiness or {}).get("instrument") or {}).get("inst_id"))
+            or _inst_id_to_ccxt_symbol((readiness or {}).get("symbol"))
         )
         if not symbol:
             return None
@@ -389,7 +385,7 @@ class CcxtExecutor(BaseExecutor):
         if not isinstance(order, dict):
             return empty_normalized_order(self.key, state="error", raw=order)
         params = order.get("info") or {}
-        inst_id = params.get("instId") or _ccxt_symbol_to_okx_inst(order.get("symbol")) or order.get("symbol")
+        inst_id = params.get("instId") or _ccxt_symbol_to_inst_id(order.get("symbol")) or order.get("symbol")
         return {
             "exchange": self.key,
             "inst_id": inst_id,
@@ -437,8 +433,8 @@ class CcxtExecutor(BaseExecutor):
 
         symbol = (
             (readiness or {}).get("ccxt_symbol")
-            or _okx_inst_to_ccxt_symbol((readiness or {}).get("inst_id") or ((readiness or {}).get("instrument") or {}).get("inst_id"))
-            or _okx_inst_to_ccxt_symbol((readiness or {}).get("symbol"))
+            or _inst_id_to_ccxt_symbol((readiness or {}).get("inst_id") or ((readiness or {}).get("instrument") or {}).get("inst_id"))
+            or _inst_id_to_ccxt_symbol((readiness or {}).get("symbol"))
         )
         direction = self._target_direction(readiness)
         if direction not in {"long", "short"}:
@@ -661,7 +657,7 @@ class CcxtExecutor(BaseExecutor):
     def get_order(self, inst_id: str, ord_id: str | None = None, cl_ord_id: str | None = None) -> dict:
         try:
             client = self._client()
-            symbol = _okx_inst_to_ccxt_symbol(inst_id) or inst_id
+            symbol = _inst_id_to_ccxt_symbol(inst_id) or inst_id
 
             if ord_id:
                 order = client.fetch_order(ord_id, symbol=symbol)
@@ -689,7 +685,7 @@ class CcxtExecutor(BaseExecutor):
     def get_open_orders(self, inst_id: str | None = None) -> list:
         try:
             client = self._client()
-            symbol = _okx_inst_to_ccxt_symbol(inst_id) if inst_id else None
+            symbol = _inst_id_to_ccxt_symbol(inst_id) if inst_id else None
             return [self._normalize_order(o) for o in (client.fetch_open_orders(symbol=symbol) or [])]
         except Exception:
             return []
@@ -703,7 +699,7 @@ class CcxtExecutor(BaseExecutor):
                 targets = []
 
             for inst_id in targets:
-                symbol = _okx_inst_to_ccxt_symbol(inst_id) or inst_id
+                symbol = _inst_id_to_ccxt_symbol(inst_id) or inst_id
                 try:
                     closed = client.fetch_closed_orders(symbol=symbol, limit=max(1, int(limit))) or []
                 except Exception:
@@ -742,7 +738,7 @@ class CcxtExecutor(BaseExecutor):
     def get_order_history_archive(self, inst_id: str | None = None, limit: int = 100) -> list:
         try:
             client = self._client()
-            symbol = _okx_inst_to_ccxt_symbol(inst_id) if inst_id else None
+            symbol = _inst_id_to_ccxt_symbol(inst_id) if inst_id else None
             return [self._normalize_order(o) for o in (client.fetch_closed_orders(symbol=symbol, limit=max(1, int(limit))) or [])]
         except Exception:
             return []
@@ -750,7 +746,7 @@ class CcxtExecutor(BaseExecutor):
     def get_positions(self, inst_id: str | None = None) -> list:
         try:
             client = self._client()
-            symbols = [_okx_inst_to_ccxt_symbol(inst_id) or inst_id] if inst_id else None
+            symbols = [_inst_id_to_ccxt_symbol(inst_id) or inst_id] if inst_id else None
             rows = client.fetch_positions(symbols) if hasattr(client, "fetch_positions") else []
             out = []
             for row in (rows or []):
@@ -761,7 +757,7 @@ class CcxtExecutor(BaseExecutor):
                 out.append(
                     {
                         "exchange": self.key,
-                        "inst_id": _ccxt_symbol_to_okx_inst(symbol_value) or symbol_value,
+                        "inst_id": _ccxt_symbol_to_inst_id(symbol_value) or symbol_value,
                         "pos": signed,
                         "pos_side": side or "net",
                         "avg_px": _to_float(row.get("entryPrice"), None),
@@ -806,7 +802,7 @@ class CcxtExecutor(BaseExecutor):
             for row in (pos_rows or []):
                 info = row.get("info") or {}
                 symbol_value = row.get("symbol")
-                inst_id = info.get("instId") or _ccxt_symbol_to_okx_inst(symbol_value) or symbol_value
+                inst_id = info.get("instId") or _ccxt_symbol_to_inst_id(symbol_value) or symbol_value
                 side = str(row.get("side") or info.get("posSide") or "").lower()
                 contracts = _to_float(row.get("contracts"), 0.0) or 0.0
                 signed = contracts if side != "short" else -contracts

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 
-import webhook_receiver as wr
 
 
 def _intent(symbol="XRPUSDT"):

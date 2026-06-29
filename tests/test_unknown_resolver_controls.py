@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from unittest import mock
 
-import webhook_receiver as wr
 
 
 def _norm_order(state, *, cl_ord_id="cl-1", ord_id="ord-1", inst_id="XRP-USDT-SWAP", acc=0.0, avg=None):
@@ -368,7 +367,6 @@ def test_planned_orphan_found_on_venue_promoted_not_rejected(wr, monkeypatch):
 
 def test_symbol_pause_blocks_submit_path(wr, monkeypatch):
     wr.pause_symbol("XRPUSDT", "manual pause test")
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_LIVE_TRADING", "1")
 
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:

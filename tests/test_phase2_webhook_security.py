@@ -8,7 +8,6 @@ from http.client import HTTPConnection
 from http.server import HTTPServer
 
 import dashboard as dash
-import webhook_receiver as wr
 
 
 def _serve(handler_cls):
@@ -160,7 +159,6 @@ def test_blank_secret_blocks_submission_regardless_of_strategy(wr, monkeypatch):
     # entire submission pipeline; strategy config can never override a missing secret.
     monkeypatch.setattr(wr, "SECRET", "")
     monkeypatch.setattr(wr, "HERMX_REQUIRE_HMAC", False)
-    monkeypatch.setattr(wr, "CONFIG", {"execution": {"exchange": "ccxt"}, "risk": {"allow_live_execution": True}})
     q = queue.Queue(maxsize=10)
     monkeypatch.setattr(wr, "PROCESS_QUEUE", q)
 

@@ -24,7 +24,6 @@ from unittest import mock
 
 import pytest
 
-import webhook_receiver as wr
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +259,6 @@ def _submit_executor(*, ok=True, mode="submit_enabled"):
 
 
 def _force_submit(wr, monkeypatch, *, stub, submit_executor=None):
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_LIVE_TRADING", "1")
     monkeypatch.setenv("HERMX_RECONCILE_ENABLED", "1")
     # Submit goes through the CCXT executor (success => tentative FILLED); the
@@ -311,8 +309,6 @@ def test_post_submit_reconcile_mismatch_overrides_stdout_and_alerts(wr, monkeypa
 
 def test_reconcile_disabled_uses_stdout_outcome(wr, monkeypatch):
     # HERMX_RECONCILE_ENABLED unset => legacy stdout-driven outcome, executor untouched.
-    cl = "mxc-xrpusdt-buy-abc0123456789de"
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_LIVE_TRADING", "1")
     monkeypatch.delenv("HERMX_RECONCILE_ENABLED", raising=False)
     exec_calls = []
@@ -374,7 +370,6 @@ def test_startup_reconcile_clean_match_no_alert(wr, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_disabled_config_no_reconcile_no_journal(wr, monkeypatch):
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     # Even if the reconcile flag is set, the blocked gate (per-strategy submit flag off)
     # returns before any submit.
     monkeypatch.setenv("HERMX_RECONCILE_ENABLED", "1")

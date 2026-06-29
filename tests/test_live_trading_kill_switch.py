@@ -63,7 +63,6 @@ def _fake_executor():
 
 def test_live_mode_blocked_when_switch_unset(wr, monkeypatch):
     """execution_mode=live + HERMX_LIVE_TRADING unset => not_submitted, never built."""
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
 
     fake = _fake_executor()
@@ -77,7 +76,6 @@ def test_live_mode_blocked_when_switch_unset(wr, monkeypatch):
 
 
 def test_live_mode_blocked_when_switch_false(wr, monkeypatch):
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_LIVE_TRADING", "false")
 
     fake = _fake_executor()
@@ -92,7 +90,6 @@ def test_live_mode_blocked_when_switch_false(wr, monkeypatch):
 
 def test_live_mode_blocked_when_simulated_trading_inconsistent(wr, monkeypatch):
     """Switch armed but readiness still says simulated => fail closed (no live/sim mix)."""
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_LIVE_TRADING", "true")
 
     for sim in (True, None):  # True, and absent (defaults to simulated)
@@ -107,7 +104,6 @@ def test_live_mode_blocked_when_simulated_trading_inconsistent(wr, monkeypatch):
 
 def test_live_mode_submits_when_switch_armed_and_not_simulated(wr, monkeypatch):
     """The only live-submit path: switch armed AND simulated_trading is False."""
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_LIVE_TRADING", "true")
 
     fake = _fake_executor()
@@ -132,7 +128,6 @@ def test_live_mode_submits_when_switch_armed_and_not_simulated(wr, monkeypatch):
 def test_non_sandbox_non_live_blocked_even_with_switch_armed(wr, monkeypatch):
     # A demo strategy that (mis)resolves to simulated_trading=False would hit a REAL
     # venue. Even with the kill switch armed it must be refused -- demo stays sandbox-only.
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_LIVE_TRADING", "true")
 
     fake = _fake_executor()
@@ -147,7 +142,6 @@ def test_non_sandbox_non_live_blocked_even_with_switch_armed(wr, monkeypatch):
 
 def test_non_sandbox_blocked_when_switch_unset(wr, monkeypatch):
     # Real-venue routing without the kill switch is blocked outright, regardless of mode.
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
 
     fake = _fake_executor()
@@ -162,7 +156,6 @@ def test_non_sandbox_blocked_when_switch_unset(wr, monkeypatch):
 
 def test_unknown_execution_mode_rejected(wr, monkeypatch):
     # A typo'd / unknown execution_mode must fail closed, never reach the executor.
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_LIVE_TRADING", "true")
 
     fake = _fake_executor()
@@ -177,7 +170,6 @@ def test_unknown_execution_mode_rejected(wr, monkeypatch):
 
 def test_blocked_results_name_the_gate(wr, monkeypatch):
     # Every blocked result surfaces the FIRST blocking gate explicitly (operator clarity).
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
 
     with mock.patch.object(wr.ExecutorFactory, "create", return_value=_fake_executor()):
@@ -187,7 +179,6 @@ def test_blocked_results_name_the_gate(wr, monkeypatch):
 
 
 def test_demo_mode_ignores_switch_unset(wr, monkeypatch):
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
 
     fake = _fake_executor()
@@ -199,7 +190,6 @@ def test_demo_mode_ignores_switch_unset(wr, monkeypatch):
 
 
 def test_demo_mode_ignores_switch_false(wr, monkeypatch):
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_LIVE_TRADING", "false")
 
     fake = _fake_executor()

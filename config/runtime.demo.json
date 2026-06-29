@@ -1,33 +1,4 @@
 {
-  "mode": "duo_base_dev_strategy_demo",
-  "primary_policy": "strategy_file_duo_base_dev",
-  "execution_timeframe": "strategy_file",
-  "chart_type": "heikin_ashi",
-  "base_notional_usd": 0,
-  "fees": {
-    "maker_rate": 0.0002,
-    "taker_rate": 0.0005,
-    "default_liquidity": "taker"
-  },
-  "funding": {
-    "enabled": false,
-    "default_rate": 0.0
-  },
-  "policies": {
-    "enabled": []
-  },
-  "execution": {
-    "mode": "demo_live",
-    "exchange": "ccxt",
-    "ccxt_exchange": "okx",
-    "ccxt_default_type": "swap",
-    "execution_policy": "strategy_file_duo_base_dev",
-    "shadow_policy": "none",
-    "route": "okx_api",
-    "account": "sandbox",
-    "td_mode": "isolated",
-    "force_ipv4": true
-  },
   "strategy_engine": {
     "enabled": true,
     "strategies_dir": "strategies",
@@ -37,40 +8,6 @@
     "quarantine_invalid_strategy_alerts": true,
     "enforce_alert_schema": false,
     "notes": "VPS demo profile for Duo Base Dev strategy-file alerts. Each strategy's submit_orders + execution_mode controls whether and how it routes orders (sandbox vs live). Set HERMX_LIVE_TRADING=true to enable live execution. enforce_alert_schema defaults to false (observe-only): when false, alerts failing the tradingview-alert JSON schema are logged+counted but still processed as before; set true to quarantine schema-invalid alerts via the existing quarantine path."
-  },
-  "assets": {
-    "SOLUSDT": {
-      "enabled": true,
-      "inst_id": "SOL-USDT-SWAP",
-      "budget_usd": 1500,
-      "leverage": 2,
-      "timeframe": "3h"
-    },
-    "ETHUSDT": {
-      "enabled": true,
-      "inst_id": "ETH-USDT-SWAP",
-      "budget_usd": 1500,
-      "leverage": 2,
-      "timeframe": "2h"
-    },
-    "XRPUSDT": {
-      "enabled": true,
-      "inst_id": "XRP-USDT-SWAP",
-      "budget_usd": 1500,
-      "leverage": 2,
-      "timeframe": "4h"
-    },
-    "BTCUSDT": {
-      "enabled": true,
-      "inst_id": "BTC-USDT-SWAP",
-      "budget_usd": 1500,
-      "leverage": 2,
-      "timeframe": "2h"
-    }
-  },
-  "risk": {
-    "duplicate_protection": true,
-    "paper_uses_signal_price_until_okx_fill": false
   },
   "notes": "Use this profile only after Duo Base Dev alerts are confirmed open-ended. This profile is OKX sandbox/demo only."
 }

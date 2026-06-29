@@ -10,7 +10,6 @@ import os
 
 ROOT = Path(os.environ.get("SHADOW_ROOT", Path(__file__).resolve().parents[1]))
 LOGS = ROOT / "logs"
-CONFIG_FILE = ROOT / "shadow-config.json"
 SYMBOLS = ["XRPUSDT", "SOLUSDT", "ETHUSDT", "BTCUSDT"]
 OKX_TICKER_CACHE = {"ts": 0.0, "data": {}}
 
@@ -106,17 +105,9 @@ def read_jsonl(path: Path, limit: int = 200) -> list[dict]:
 
 
 def shadow_config() -> dict:
-    if CONFIG_FILE.exists():
-        try:
-            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    fallback = ROOT / "config" / "runtime.demo.json"
-    if fallback.exists():
-        try:
-            return json.loads(fallback.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+    # shadow-config.json was removed entirely. Execution config now comes from
+    # engine-config.json + strategy files + CCXT; the dashboard reads ledgers, not
+    # a config blob. Retained as a no-op so existing callers keep working.
     return {}
 
 

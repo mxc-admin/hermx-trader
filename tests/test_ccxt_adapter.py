@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from executors.ccxt_adapter import CcxtExecutor, _okx_inst_to_ccxt_symbol
+from executors.ccxt_adapter import CcxtExecutor, _inst_id_to_ccxt_symbol
 
 
 class _FakeClient:
@@ -134,7 +134,6 @@ def _executor() -> CcxtExecutor:
             "exchange": "ccxt",
             "ccxt_exchange": "okx",
             "simulated_trading": True,
-            "ccxt_pos_mode": "long_short_mode",
             "td_mode": "cross",
         }
     }
@@ -142,8 +141,8 @@ def _executor() -> CcxtExecutor:
 
 
 def test_symbol_mapping_linear_and_inverse_swap():
-    assert _okx_inst_to_ccxt_symbol("BTC-USDT-SWAP") == "BTC/USDT:USDT"
-    assert _okx_inst_to_ccxt_symbol("BTC-USD-SWAP") == "BTC/USD:BTC"
+    assert _inst_id_to_ccxt_symbol("BTC-USDT-SWAP") == "BTC/USDT:USDT"
+    assert _inst_id_to_ccxt_symbol("BTC-USD-SWAP") == "BTC/USD:BTC"
 
 
 def test_execute_contract_sizing_and_close_flip_semantics(monkeypatch):
@@ -176,12 +175,14 @@ def test_execute_contract_sizing_and_close_flip_semantics(monkeypatch):
     assert close_call["side"] == "buy"
     assert close_call["amount"] == 3
     assert close_call["params"].get("reduceOnly") is True
-    assert close_call["params"].get("posSide") == "short"
+    # posSide is no longer emitted: the ccxt_pos_mode branch was dead (nothing in
+    # production ever set it) and was removed. Hedge-mode posSide is out of scope.
+    assert close_call["params"].get("posSide") is None
 
     assert open_call["side"] == "buy"
     assert open_call["amount"] == 2
     assert open_call["params"].get("reduceOnly") is None
-    assert open_call["params"].get("posSide") == "long"
+    assert open_call["params"].get("posSide") is None
 
 
 def test_get_order_history_raw_shape(monkeypatch):

@@ -54,7 +54,6 @@ def _fake_executor():
 
 
 def test_any_gate_false_means_not_submitted(monkeypatch):
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setattr(wr, "SECRET", "phase2-test-secret")
     monkeypatch.setattr(wr, "HERMX_REQUIRE_HMAC", False)
 
@@ -77,7 +76,6 @@ def test_any_gate_false_means_not_submitted(monkeypatch):
 
 
 def test_all_gates_true_can_submit(monkeypatch):
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setattr(wr, "SECRET", "phase2-test-secret")
     monkeypatch.setattr(wr, "HERMX_REQUIRE_HMAC", False)
 

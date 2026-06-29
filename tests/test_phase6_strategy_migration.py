@@ -22,13 +22,12 @@ from __future__ import annotations
 import importlib
 import json
 import os
-import shutil
 from pathlib import Path
 
 import jsonschema
 import pytest
 
-from conftest import CORPUS_CONFIG, _SHADOW_ROOT, load_alert
+from conftest import _SHADOW_ROOT, load_alert, write_engine_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = REPO_ROOT / "schemas" / "strategy.schema.json"
@@ -72,7 +71,7 @@ def _build_root_with_strategy(root: Path, strategy: dict) -> None:
     (strategies_dir / f"{strategy['strategy_id']}.json").write_text(
         json.dumps(strategy, indent=2), encoding="utf-8"
     )
-    shutil.copy(CORPUS_CONFIG, root / "shadow-config.json")
+    write_engine_config(root)
 
 
 def _load_module_at(root: Path):

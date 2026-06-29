@@ -206,7 +206,6 @@ def _run_forced_submit(wr, monkeypatch, adapter_fn):
     """Arm every gate, force submission, and capture the interleaving of order-journal
     writes vs the executor.execute() invocation. ``adapter_fn`` returns the normalized
     adapter result (or raises to simulate a submit exception). Returns (events, result)."""
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_LIVE_TRADING", "1")
 
     events: list[tuple] = []
@@ -324,7 +323,6 @@ def test_planned_record_carries_minimal_intent(wr, monkeypatch):
 
 def test_blocked_gate_writes_no_order_journal(wr, monkeypatch):
     """Blocked gate (per-strategy submit flag off): not_submitted, ZERO order-journal writes."""
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
 
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
         result = wr.execute_if_enabled(_blocked_record())
@@ -337,7 +335,6 @@ def test_blocked_gate_writes_no_order_journal(wr, monkeypatch):
 
 def test_not_submitted_branch_writes_no_order_journal(wr, monkeypatch):
     """The not_submitted branch returns before any order-journal record is written."""
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
 
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
         result = wr.execute_if_enabled(_blocked_record())

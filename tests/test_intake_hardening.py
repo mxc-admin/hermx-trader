@@ -100,12 +100,10 @@ def test_latest_file_write_uses_atomic_dump(monkeypatch, tmp_path):
 
 
 def test_latest_corrupt_returns_503_not_500(monkeypatch, tmp_path):
-    from io import BytesIO
     corrupt = tmp_path / "latest.json"
     corrupt.write_text("{ not : valid json", encoding="utf-8")
     monkeypatch.setattr(wr, "LATEST_FILE", corrupt)
 
-    output = BytesIO()
     responses = []
 
     class FakeHandler:
@@ -114,7 +112,6 @@ def test_latest_corrupt_returns_503_not_500(monkeypatch, tmp_path):
 
     handler = FakeHandler()
     # Simulate the /latest branch by calling the logic directly
-    path = "/latest"
     if not wr.LATEST_FILE.exists():
         handler._send(404, {"ok": False, "error": "no_latest_yet"})
     else:

@@ -7,14 +7,12 @@ active config explicitly enables sandbox/demo execution.
 """
 from __future__ import annotations
 
-import copy
 import hashlib
 import hmac
 import json
 import logging
 import os
 import queue
-import stat
 import subprocess
 import sys
 import tempfile
@@ -279,64 +277,11 @@ RECONCILE_STARTUP_AT: "str | None" = None
 # every newly-seen signal is appended to it. The former seen-signals.json snapshot
 # (a redundant second authority) was removed.
 SIGNALS_LEDGER = LOG_DIR / "signals.jsonl"
-CONFIG_FILE = ROOT / "shadow-config.json"
-
-
-def load_shadow_config() -> dict:
-    # Residual shadow-config: fees/funding/policies/execution/assets/risk only. The
-    # strategy_engine + advisor blocks moved to engine-config.json (webhook/config.py);
-    # the old mode/primary_policy/execution_timeframe/base_notional_usd keys are gone.
-    default = {
-        "chart_type": os.environ.get("DEFAULT_CHART_TYPE", "heikin_ashi"),
-        "fees": {
-            "maker_rate": float(os.environ.get("OKX_PERP_MAKER_FEE_RATE", "0.0002")),
-            "taker_rate": float(os.environ.get("OKX_PERP_TAKER_FEE_RATE", "0.0005")),
-            "default_liquidity": os.environ.get("PAPER_DEFAULT_LIQUIDITY", "taker").lower(),
-        },
-        "funding": {
-            "enabled": os.environ.get("PAPER_FUNDING_ENABLED", "false").lower() == "true",
-            "default_rate": float(os.environ.get("PAPER_DEFAULT_FUNDING_RATE", "0")),
-        },
-        "policies": {"enabled": ["duo_raw", "duo_regime_rsi_30m"]},
-        "execution": {
-            "enabled": False,
-            "mode": "dry_run",
-            # Exchange key understood by ExecutorFactory. Post CCXT cutover "ccxt"
-            # is the sole backend; legacy okx_* keys are aliased to it.
-            "exchange": "ccxt",
-            "ccxt_exchange": "okx",
-            "ccxt_default_type": "swap",
-            "route": "okx_api",
-            "account": "sandbox",
-        },
-        # Assets use the canonical generic instrument id key.
-        "assets": {
-            "XRPUSDT": {"enabled": True, "budget_usd": 1500, "leverage": 2, "inst_id": "XRP-USDT-SWAP", "timeframe": "30m"},
-            "SOLUSDT": {"enabled": True, "budget_usd": 1500, "leverage": 2, "inst_id": "SOL-USDT-SWAP", "timeframe": "30m"},
-            "ETHUSDT": {"enabled": True, "budget_usd": 2000, "leverage": 2, "inst_id": "ETH-USDT-SWAP", "timeframe": "30m"},
-        },
-        "risk": {"allow_live_execution": False, "duplicate_protection": True, "max_slippage_pct": 0.25, "max_daily_loss_usd": 150.0},
-    }
-    if not CONFIG_FILE.exists():
-        return default
-    try:
-        loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        merged = default | loaded
-        merged["fees"] = default["fees"] | loaded.get("fees", {})
-        merged["funding"] = default["funding"] | loaded.get("funding", {})
-        merged["policies"] = default["policies"] | loaded.get("policies", {})
-        merged["execution"] = default["execution"] | loaded.get("execution", {})
-        merged["assets"] = default["assets"] | loaded.get("assets", {})
-        merged["risk"] = default["risk"] | loaded.get("risk", {})
-        return merged
-    except Exception as exc:
-        logging.warning("Failed to load shadow config: %s", exc)
-        return default
-
-
-CONFIG = load_shadow_config()
-# Engine + advisor config now live in engine-config.json (leaf webhook/config.py),
-# split out of shadow-config.json. STRATEGY_ENGINE is sourced from it, not CONFIG.
+# Engine + advisor config live in engine-config.json (leaf webhook/config.py);
+# STRATEGY_ENGINE is sourced from it. The legacy shadow-config.json file and the
+# CONFIG global (fees/funding/policies/execution/assets/risk) were removed entirely:
+# execution backend is CCXT, fees/funding come from the venue, ALLOWED_SYMBOLS
+# derives from strategy files, and the policy decision engine is dead.
 ENGINE_CONFIG_FILE = ROOT / "engine-config.json"
 ENGINE_CONFIG = load_engine_config(ENGINE_CONFIG_FILE)
 STRATEGY_ENGINE = ENGINE_CONFIG.get("strategy_engine", {}) or {}
@@ -361,18 +306,6 @@ ALERT_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "tradingvi
 # `global` declaration, and adding/incrementing these never alters any ledger
 # record or return value, so default-OFF behavior stays byte-identical.
 ALERT_SCHEMA_METRICS = {"invalid": 0, "quarantined": 0}
-# Retained as an inert config-derived constant: POLICY_KEYS feeds control-state's
-# vestigial allowed_policies list. The policy DECISION engine that consumed it was
-# removed.
-POLICY_KEYS = tuple(CONFIG.get("policies", {}).get("enabled") or ["duo_raw", "duo_regime_rsi_30m"])
-DEFAULT_CHART_TYPE = str(CONFIG.get("chart_type") or "heikin_ashi")
-PAPER_FUNDING_ENABLED = bool(CONFIG.get("funding", {}).get("enabled", False))
-PAPER_DEFAULT_FUNDING_RATE = float(CONFIG.get("funding", {}).get("default_rate", 0.0))
-# Generic exchange money math (used by funding/fee/pnl helpers below and the
-# money-decimal characterization suite). Not tied to the removed paper engine.
-OKX_PERP_MAKER_FEE_RATE = float(CONFIG.get("fees", {}).get("maker_rate", 0.0002))
-OKX_PERP_TAKER_FEE_RATE = float(CONFIG.get("fees", {}).get("taker_rate", 0.0005))
-PAPER_DEFAULT_LIQUIDITY = str(CONFIG.get("fees", {}).get("default_liquidity", "taker")).lower()
 
 
 # canonical_timeframe lives in the shared module so the receiver and the
@@ -539,7 +472,7 @@ except Exception as exc:  # fail closed: execution simply stays disabled
     ExecutionService = None
     logging.warning("ExecutionService unavailable: %s", exc)
 
-ALLOWED_SYMBOLS = {symbol for symbol, cfg in CONFIG.get("assets", {}).items() if cfg.get("enabled", True)}
+ALLOWED_SYMBOLS = frozenset(s.get("asset") for s in STRATEGIES.values() if s.get("asset"))
 ALLOWED_SIDES = {"buy", "sell"}
 
 
@@ -1055,7 +988,7 @@ def normalize(payload: dict) -> dict:
         "side": side,
         "timeframe": timeframe,
         "tv_signal_price": as_float(first(payload, "tv_signal_price", "tv_close", "signal_price", "price", "close", default=None)),
-        "chart_type": str(first(payload, "chart_type", default=DEFAULT_CHART_TYPE)).lower(),
+        "chart_type": (lambda c: str(c).lower() if c else None)(first(payload, "chart_type", default=None)),
         "okx_mark_price": as_float(first(payload, "okx_mark_price", "mark_price", default=None)),
         "okx_last_price": as_float(first(payload, "okx_last_price", "last_price", default=None)),
         "tv_time": tv_time,
@@ -1191,11 +1124,6 @@ def default_control_state() -> dict:
         "symbol_pauses": {},
         "strategy_overrides": {},
         "allowed_assets": list(ALLOWED_SYMBOLS),
-        "allowed_policies": list(POLICY_KEYS),
-        "risk_limits": {
-            "max_daily_loss_usd": float(CONFIG.get("risk", {}).get("max_daily_loss_usd", 150.0)),
-            "max_slippage_pct": float(CONFIG.get("risk", {}).get("max_slippage_pct", 0.25)),
-        },
         "notes": "Shadow control file. Dashboard/Hermes may read this. Live execution remains disabled here.",
     }
 
@@ -1312,33 +1240,6 @@ def clear_strategy_override(strategy_id: str) -> bool:
     return True
 
 
-def fee_rate_for(liquidity: str | None = None) -> float:
-    liq = (liquidity or PAPER_DEFAULT_LIQUIDITY or "taker").lower()
-    return OKX_PERP_MAKER_FEE_RATE if liq == "maker" else OKX_PERP_TAKER_FEE_RATE
-
-
-def fee_usd(notional_usd: float, liquidity: str | None = None) -> float:
-    return float(dec_usd(D(notional_usd) * D(fee_rate_for(liquidity))))
-
-
-def pnl_pct(position_side: str, entry_price: float, exit_price: float) -> float:
-    entry = D(entry_price)
-    exit_ = D(exit_price)
-    if entry == 0 or exit_ == 0:
-        return 0.0
-    if position_side == "long":
-        return float(dec_pct((exit_ / entry - D("1")) * D("100")))
-    return float(dec_pct((entry / exit_ - D("1")) * D("100")))
-
-
-def funding_rate_from_payload(payload: dict | None = None) -> float:
-    payload = payload or {}
-    rate = as_float(first(payload, "funding_rate", "okx_funding_rate", default=None))
-    if rate is None:
-        rate = PAPER_DEFAULT_FUNDING_RATE
-    return float(dec_pct(rate or 0.0))
-
-
 def _canonical_state_json(state: dict) -> str:
     """Canonical JSON for hashing: sorted keys, compact separators. Independent of
     the pretty-printed on-disk form, so checkpoint formatting cannot affect the
@@ -1388,8 +1289,6 @@ def _fail_closed_state_write(operation: str, exc: Exception, context: dict | Non
 def build_strategy_execution_readiness(record: dict) -> dict:
     normalized = record.get("normalized") or {}
     strategy = record.get("strategy_config") or {}
-    execution_cfg = CONFIG.get("execution", {}) or {}
-    risk_cfg = CONFIG.get("risk", {}) or {}
     # execution_mode is operative: ``sandbox`` is True for demo/paper/shadow and
     # False ONLY for live. The resolved ``simulated_trading`` (= sandbox) and the
     # ``execution_mode`` flow into readiness so the ExecutionService gate can require
@@ -1426,7 +1325,7 @@ def build_strategy_execution_readiness(record: dict) -> dict:
     planned_notional = float(dec_notional(base_notional))
     # Exchange-agnostic instruction contract (Phase 6 / M3, ARCHITECTURE.md). ``td_mode``
     # below is the OKX translation of this same value, so derive both from one expression.
-    margin_mode = strategy.get("margin_mode", execution_cfg.get("td_mode", "isolated"))
+    margin_mode = strategy.get("margin_mode", "isolated")
     instrument = strategy_instrument(strategy)
     # Derive ccxt_default_type from strategy instrument.type (e.g., swap, spot, future)
     instrument_type = resolve_default_type(instrument)
@@ -2168,21 +2067,14 @@ def emit_reconcile_alert(kind: str, detail: dict) -> dict:
 
 
 def _effective_execution_config() -> dict:
-    """The execution config the write path actually resolves: CONFIG with an
-    optional HERMX_EXEC_BACKEND override applied to execution.exchange.
-
-    Submit (ExecutionService via _execution_config) and reconciliation
-    (_reconciliation_executor) BOTH resolve through this same rule, so the backend
-    used to submit an order can never diverge from the backend used to reconcile
-    it -- both default to CCXT, and an explicit HERMX_EXEC_BACKEND is honored by
-    both paths identically."""
-    cfg = dict(CONFIG or {})
-    execution_cfg = dict(cfg.get("execution") or {})
-    backend = (os.environ.get("HERMX_EXEC_BACKEND") or "").strip()
-    if backend:
-        execution_cfg["exchange"] = backend
-    cfg["execution"] = execution_cfg
-    return cfg
+    """The execution config the write path actually resolves: just the adapter
+    selector (EXEC_BACKEND, which already honors HERMX_EXEC_BACKEND). Submit
+    (ExecutionService via _execution_config) and reconciliation
+    (_reconciliation_executor) BOTH resolve through this, so the backend used to
+    submit an order can never diverge from the backend used to reconcile it. The
+    active CCXT venue + type come from the strategy instrument block at submit time
+    (resolve_execution_config), so nothing else is needed here."""
+    return {"execution": {"exchange": EXEC_BACKEND}}
 
 
 def _reconciliation_executor():
@@ -2576,7 +2468,7 @@ def _run_execution_service(record: dict, *, journal_hook=None) -> dict:
     a caller (e.g. the operator-close path) can stamp extra audit fields on the
     journaled execution row; it defaults to the plain pipeline outcome writer."""
     service = ExecutionService(
-        config=CONFIG,
+        config=_effective_execution_config(),
         root=ROOT,
         executor_factory=ExecutorFactory,
         submit_timeout_seconds=HERMX_SUBMIT_TIMEOUT_SECONDS,
@@ -2639,7 +2531,6 @@ def build_operator_close_readiness(symbol: str, strategy: dict, cl_ord_id: str) 
     resolves (execution_mode, submit_orders, sandbox, instrument) but carries
     ``close_only=True`` and a CLOSE_LONG/CLOSE_SHORT intent so the adapter flattens
     whichever side is currently open (reduceOnly), and no new position is opened."""
-    execution_cfg = CONFIG.get("execution", {}) or {}
     strategy = strategy or {}
     strategy_id = str(strategy.get("strategy_id") or "")
     execution_mode = str(strategy.get("execution_mode") or "demo").lower()
@@ -2653,7 +2544,7 @@ def build_operator_close_readiness(symbol: str, strategy: dict, cl_ord_id: str) 
         submit_orders = bool(_cs_ov["submit_orders"])
     sandbox = execution_mode != "live"  # demo/paper/shadow -> True; live -> False
     instrument = strategy_instrument(strategy)
-    margin_mode = strategy.get("margin_mode", execution_cfg.get("td_mode", "isolated"))
+    margin_mode = strategy.get("margin_mode", "isolated")
     return {
         "mode": "operator_close",
         # The flag that bypasses gate 3 (kill switch) and the symbol pause; see
@@ -2662,7 +2553,7 @@ def build_operator_close_readiness(symbol: str, strategy: dict, cl_ord_id: str) 
         "live_execution_enabled": submit_orders,
         "execution_mode": execution_mode,
         "simulated_trading": sandbox,
-        "exchange": execution_cfg.get("exchange", "okx"),
+        "exchange": EXEC_BACKEND,
         "symbol": symbol,
         "inst_id": instrument.get("inst_id"),
         "instrument": instrument,
@@ -2972,7 +2863,7 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
         record = {
             "received_at": received_at,
             "mode": "strategy_file_trial" if strategy_config else "no_strategy_match",
-            "config_snapshot": {"mode": CONFIG.get("mode"), "fees": CONFIG.get("fees"), "funding": CONFIG.get("funding"), "asset": CONFIG.get("assets", {}).get(normalized.get("symbol"))},
+            "config_snapshot": {"strategy_engine": STRATEGY_ENGINE},
             "ok": True,
             "duplicate": True,
             "dedupe": dedupe,
@@ -3006,7 +2897,6 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
             "received_at": received_at,
             "mode": "strategy_file_trial",
             "config_snapshot": {
-                "mode": CONFIG.get("mode"),
                 "strategy_engine": STRATEGY_ENGINE,
                 "strategy": {
                     "strategy_id": strategy_config.get("strategy_id"),
@@ -3026,8 +2916,6 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
             "latency": latency,
             "market_context": {
                 "chart_type": strategy_config.get("chart_type") or normalized.get("chart_type"),
-                "funding_enabled": PAPER_FUNDING_ENABLED,
-                "funding_rate": funding_rate_from_payload(payload),
             },
             "strategy_config": strategy_config,
             "strategy_decision": decision,
@@ -3050,7 +2938,7 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
     record = {
         "received_at": received_at,
         "mode": "no_strategy_match",
-        "config_snapshot": {"mode": CONFIG.get("mode"), "asset": CONFIG.get("assets", {}).get(normalized.get("symbol"))},
+        "config_snapshot": {"strategy_engine": STRATEGY_ENGINE},
         "ok": True,
         "payload": payload,
         "normalized": normalized,

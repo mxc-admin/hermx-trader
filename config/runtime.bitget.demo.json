@@ -1,33 +1,4 @@
 {
-  "mode": "duo_base_dev_strategy_demo",
-  "primary_policy": "strategy_file_duo_base_dev",
-  "execution_timeframe": "strategy_file",
-  "chart_type": "heikin_ashi",
-  "base_notional_usd": 0,
-  "fees": {
-    "maker_rate": 0.0002,
-    "taker_rate": 0.0005,
-    "default_liquidity": "taker"
-  },
-  "funding": {
-    "enabled": false,
-    "default_rate": 0.0
-  },
-  "policies": {
-    "enabled": []
-  },
-  "execution": {
-    "mode": "demo_live",
-    "exchange": "ccxt",
-    "ccxt_exchange": "bitget",
-    "ccxt_default_type": "swap",
-    "execution_policy": "strategy_file_duo_base_dev",
-    "shadow_policy": "none",
-    "route": "bitget_api",
-    "account": "demo",
-    "td_mode": "isolated",
-    "force_ipv4": true
-  },
   "strategy_engine": {
     "enabled": true,
     "strategies_dir": "strategies",
@@ -37,26 +8,6 @@
     "quarantine_invalid_strategy_alerts": true,
     "enforce_alert_schema": false,
     "notes": "Bitget demo profile. Sandboxed by default: execution_mode per strategy controls sandbox routing, so no live order is placed until Bitget's gated sandbox write test has proven the venue. Credentials resolve from BITGET_DEMO_API_KEY / BITGET_DEMO_SECRET_KEY / BITGET_DEMO_PASSPHRASE. Set HERMX_LIVE_TRADING=true to enable live execution."
-  },
-  "assets": {
-    "BTCUSDT": {
-      "enabled": true,
-      "inst_id": "BTC-USDT-SWAP",
-      "budget_usd": 1500,
-      "leverage": 2,
-      "timeframe": "2h"
-    },
-    "ETHUSDT": {
-      "enabled": true,
-      "inst_id": "ETH-USDT-SWAP",
-      "budget_usd": 1500,
-      "leverage": 2,
-      "timeframe": "2h"
-    }
-  },
-  "risk": {
-    "duplicate_protection": true,
-    "paper_uses_signal_price_until_okx_fill": false
   },
   "notes": "Bitget demo only. New venue stays DISARMED until its gated write test passes."
 }

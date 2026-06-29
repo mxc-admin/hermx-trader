@@ -43,14 +43,6 @@ def test_durable_signal_dedupe_survives_reload(wr, wr_root):
 
 def test_execute_blocks_duplicate_cl_ord_id_from_order_journal(wr, monkeypatch):
     monkeypatch.setenv("HERMX_LIVE_TRADING", "1")
-    monkeypatch.setattr(
-        wr,
-        "CONFIG",
-        {
-            "execution": {"enabled": True, "submit_orders": True, "simulated_trading": True, "force_ipv4": True},
-            "risk": {"allow_live_execution": True},
-        },
-    )
     monkeypatch.setattr(wr, "SECRET", "phase3-secret")
 
     cl = "mxcdup0000000000000000000000001"

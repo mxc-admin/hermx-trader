@@ -79,7 +79,6 @@ def _make_handler(wr, *, token=None, body=None, raw=None, content_length=None):
 def test_close_bypasses_kill_switch_when_live_trading_disabled(wr, monkeypatch):
     """A LIVE-mode close succeeds even with HERMX_LIVE_TRADING unset. Without the
     close_only bypass this exact record would be blocked ``live_trading_disabled``."""
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
 
     fake = _fake_executor()
@@ -99,7 +98,6 @@ def test_close_bypasses_kill_switch_when_live_trading_disabled(wr, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_close_blocked_when_submit_orders_false(wr, monkeypatch):
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
 
     fake = _fake_executor()
@@ -168,7 +166,6 @@ def test_close_unknown_strategy_returns_404(wr):
 # ---------------------------------------------------------------------------
 
 def test_close_is_idempotent_on_duplicate_cl_ord_id(wr, monkeypatch):
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
     strategy = _strategy(execution_mode="demo")  # demo: sandbox submit, no kill-switch concern
 

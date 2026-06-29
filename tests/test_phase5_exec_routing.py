@@ -35,7 +35,6 @@ def _record(*, live_execution_enabled=True, auth_healthy=True):
 
 def test_submission_always_routes_through_service(monkeypatch):
     """No backend toggle: every armed submission goes through ExecutionService."""
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     assert wr.ExecutionService is not None and wr.ExecutorFactory is not None
     assert wr.ExecutorFactory.available() == ["ccxt"]
 
@@ -52,7 +51,6 @@ def test_submission_always_routes_through_service(monkeypatch):
 
 def test_fails_closed_when_service_unavailable(monkeypatch):
     """ExecutionService missing => NEVER submit; not_submitted/execution_unavailable."""
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setattr(wr, "ExecutionService", None)
     service_spy = mock.Mock()
     monkeypatch.setattr(wr, "_execute_via_service", service_spy)
@@ -66,7 +64,6 @@ def test_fails_closed_when_service_unavailable(monkeypatch):
 
 def test_fails_closed_when_no_backend_registered(monkeypatch):
     """ccxt import failed => empty registry => fail closed, never submit."""
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     service_spy = mock.Mock()
     monkeypatch.setattr(wr, "_execute_via_service", service_spy)
     monkeypatch.setattr(wr.ExecutorFactory, "available", classmethod(lambda cls: []))
@@ -80,7 +77,6 @@ def test_fails_closed_when_no_backend_registered(monkeypatch):
 
 def test_gate_false_blocks_real_path(monkeypatch):
     """Per-strategy submit flag off (live_execution_enabled=False) => never submit."""
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
 
     with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
         out = wr.execute_if_enabled(_record(live_execution_enabled=False))

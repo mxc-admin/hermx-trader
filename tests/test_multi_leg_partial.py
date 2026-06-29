@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from unittest import mock
 
-import webhook_receiver as wr
 
 
 def _armed_config() -> dict:
@@ -58,7 +57,6 @@ def _partial_adapter_result() -> dict:
 
 def test_submit_partial_records_unknown_not_rejected(wr, monkeypatch):
     cl = "mxc-xrpusdt-buy-partial0000000de"
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
 
     fake = mock.Mock()
     fake.execute = mock.Mock(return_value=_partial_adapter_result())
@@ -84,7 +82,6 @@ def test_submit_partial_records_unknown_not_rejected(wr, monkeypatch):
 
 def test_submit_partial_emits_operator_alert_when_reconcile_enabled(wr, monkeypatch):
     cl = "mxc-xrpusdt-buy-partial-alert00de"
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_RECONCILE_ENABLED", "1")
     # No reconciliation executor available => tentative UNKNOWN is kept; the partial
     # alert is still emitted so an operator notices the half-executed reversal.
@@ -105,7 +102,6 @@ def test_submit_partial_emits_operator_alert_when_reconcile_enabled(wr, monkeypa
 
 def test_adapter_exception_with_reconcile_enabled_does_not_raise_unbound(wr, monkeypatch):
     cl = "mxc-xrpusdt-buy-exc000000000de"
-    monkeypatch.setattr(wr, "CONFIG", _armed_config())
     monkeypatch.setenv("HERMX_RECONCILE_ENABLED", "1")
     monkeypatch.setattr(wr, "_reconciliation_executor", lambda: None)
 
