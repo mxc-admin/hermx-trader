@@ -4,13 +4,11 @@ This module holds the byte-for-byte money math that used to live in
 webhook_receiver.py: the Decimal coercion helper ``D``, the fixed-precision
 quantizers (``dec_usd`` / ``dec_notional`` / ``dec_pct`` / ``dec_units``), their
 text formatters, the ``_USD_KEYS`` / ``_PCT_KEYS`` / ``_UNITS_KEYS`` field-name
-sets, the recursive ``canonicalize_decimal_fields`` coercion, and the
-``empty_policy_stats`` factory.
+sets, and the recursive ``canonicalize_decimal_fields`` coercion.
 
 It is a TRUE leaf: it imports only ``decimal`` from the stdlib and reads NO
 mutable global state. webhook_receiver re-exports every name here for backward
-compatibility, and webhook.position_journal imports straight from this module
-(no more late-bound ``_wr()`` lookup).
+compatibility.
 """
 from __future__ import annotations
 
@@ -128,21 +126,3 @@ def canonicalize_decimal_fields(value):
     if isinstance(value, list):
         return [canonicalize_decimal_fields(item) for item in value]
     return value
-
-
-def empty_policy_stats() -> dict:
-    return {
-        "realized_pnl_usd": 0.0,
-        "realized_gross_pnl_usd": 0.0,
-        "realized_net_pnl_usd": 0.0,
-        "realized_pnl_pct_weighted": 0.0,
-        "realized_gross_pnl_pct_weighted": 0.0,
-        "realized_net_pnl_pct_weighted": 0.0,
-        "total_fees_usd": 0.0,
-        "total_funding_usd": 0.0,
-        "closed_trades": 0,
-        "wins": 0,
-        "losses": 0,
-        "skips": 0,
-        "entries": 0,
-    }

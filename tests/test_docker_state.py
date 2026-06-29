@@ -29,8 +29,9 @@ SRC_DIR = REPO_ROOT / "src"
 
 # The mutable state snapshots Phase B moves under HERMX_DATA_DIR. (seen-signals.json
 # was retired in the JSONL ledger consolidation -- dedup state now lives in the
-# LOG_DIR-anchored signals.jsonl, so SIGNAL_STATE_FILE no longer exists.)
-MUTABLE_ATTRS = ["PAPER_STATE_FILE", "CONTROL_STATE_FILE", "LATEST_FILE"]
+# LOG_DIR-anchored signals.jsonl, so SIGNAL_STATE_FILE no longer exists; paper-state.json
+# was retired with the shadow/position-journal removal, so PAPER_STATE_FILE is gone too.)
+MUTABLE_ATTRS = ["CONTROL_STATE_FILE", "LATEST_FILE"]
 # Paths that must NEVER follow HERMX_DATA_DIR (they stay under ROOT).
 ROOT_ANCHORED_ATTRS = ["LOG_DIR", "CONFIG_FILE", "STRATEGIES_DIR"]
 

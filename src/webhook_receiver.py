@@ -38,38 +38,6 @@ from security.webhook_auth import (  # noqa: E402  pure security helpers (Phase 
     verify_webhook_hmac as _verify_webhook_hmac_impl,
     authenticate_webhook_request as _authenticate_webhook_request_impl,
 )
-from strategy.decision_math import (  # noqa: E402  pure decision math (re-exported)
-    POLICY_LABELS,
-    as_float,
-    regime_from_acc,
-    phase_from_acc_vel,
-    pulse_label,
-    risk_on,
-    no_pulse_score,
-    extract_jrsx,
-    rsi_caution,
-    base_context,
-    policy_result,
-    decide_duo_raw,
-    direction_confirms,
-    decide_v3_r75,
-    step_weight,
-    convert_weight_policy,
-    mtf_summary,
-    context_opposes,
-    single_tf_summary,
-    decide_v52_fast_1h,
-    decide_v6_regime_duo,
-    regime_rsi_points,
-    rsi_quality_points,
-    decide_duo_regime_rsi_sized,
-    decide_duo_regime_rsi_30m,
-    metric_align_points,
-    both_acc_vel_against,
-    decide_duo_conviction_sized,
-    decide_conviction_v2_candidate,
-    fmt_float,
-)
 # Phase 0b: money/decimal primitives extracted to webhook/money.py (pure leaf).
 # Re-export so existing call sites and tests keep resolving wr.D, wr.dec_usd, ...
 from webhook.money import (  # noqa: E402  F401
@@ -83,19 +51,7 @@ from webhook.money import (  # noqa: E402  F401
     notional_text,
     pct_text,
     units_text,
-    empty_policy_stats,
     canonicalize_decimal_fields,
-    _USD_KEYS,
-    _PCT_KEYS,
-    _UNITS_KEYS,
-)
-# Phase 0a: apply_effect + its private helpers extracted to
-# webhook/position_journal.py. Re-export so wr.apply_effect stays importable.
-from webhook.position_journal import (  # noqa: E402
-    apply_effect,
-    refresh_compound_stats,
-    _ensure_policy_bucket,
-    _coerce_state_numeric_fields,
 )
 # Option A: leaf-pure time + JSONL-I/O primitives extracted to webhook/timeutil.py
 # and webhook/ledger_io.py. Re-export so wr.now_iso / wr.append_jsonl / ... stay
@@ -114,6 +70,16 @@ from webhook.ledger_io import (  # noqa: E402  F401
     append_jsonl_durable,
     read_jsonl_tolerant,
 )
+
+
+def as_float(value):
+    """Best-effort float coercion for generic intake parsing (None/'' -> None)."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 PORT = int(os.environ.get("SHADOW_PORT", "8891"))
 # Address the HTTP server binds to. Default 127.0.0.1 keeps bare-host/systemd
@@ -169,36 +135,7 @@ LATEST_FILE = DATA_DIR / "latest.json"
 # Both are size-rotated (see _rotate_ledger_if_large / HERMX_LEDGER_ROTATE_MAX_BYTES).
 RAW_WEBHOOK_LEDGER = LOG_DIR / "raw-webhooks.jsonl"
 PIPELINE_LEDGER = LOG_DIR / "pipeline.jsonl"
-PAPER_STATE_FILE = DATA_DIR / "paper-state.json"
 CONTROL_STATE_FILE = DATA_DIR / "control-state.json"
-# Phase 1 task 1/2 (REFACTOR_PLAN.md:202-206): durable, append-only position
-# journal. Every paper-state transition is journaled (write-ahead, fsync'd) and,
-# under the "journal" backend, in-memory state is *derived* by replaying it so a
-# missing/corrupt snapshot rebuilds rather than silently resetting to empty (E5).
-POSITION_JOURNAL_LEDGER = LOG_DIR / "position-journal.jsonl"
-# schema_version on every record. Replay compatibility rule:
-#   * A record with schema_version <= POSITION_JOURNAL_SCHEMA_VERSION is applied
-#     by apply_effect (older shapes get version-dispatched here as they appear).
-#   * A record with schema_version > POSITION_JOURNAL_SCHEMA_VERSION is a hard
-#     error (loud log + raise): a newer writer produced a shape this reader does
-#     not understand; refuse to misinterpret it. Forward migrations bump this
-#     constant and add an explicit upgrade shim before changing the effect shape
-#     (e.g. Decimal serialization, idempotency metadata).
-POSITION_JOURNAL_SCHEMA_VERSION = 1
-# State backend selector (REFACTOR_PLAN.md:225 rollback flag). Read once at import,
-# like the other env-driven config. "legacy" (DEFAULT) = paper-state.json snapshot
-# is authoritative, byte-identical to pre-Phase-1 behavior. "journal" = the
-# position journal is authoritative and load_paper_state() rebuilds via replay.
-# The journal is written in BOTH modes (forward-compatible soak data).
-HERMX_STATE_BACKEND = (os.environ.get("HERMX_STATE_BACKEND") or "legacy").strip().lower() or "legacy"
-# Phase 1 task 7 (REFACTOR_PLAN.md:218-221): journal lifecycle = verified
-# checkpoint + segment rotation so journal-mode startup replay stays bounded and
-# disk does not grow without limit. The checkpoint stores the full paper-state
-# plus the last applied seq + a sha256 of the canonical state; on load it is only
-# trusted if that hash recomputes (verify-before-trust) and its versions are not
-# from a newer writer, otherwise it is discarded and we fall back to full replay.
-POSITION_JOURNAL_CHECKPOINT_FILE = LOG_DIR / "position-journal.checkpoint.json"
-POSITION_JOURNAL_CHECKPOINT_VERSION = 1
 # Unified operator/reconcile/state alert ledger. Every alert row carries a ``kind``
 # field ("operator", "reconcile", or "state") so the dashboard and operators can
 # filter; this merges the former operator-alerts.jsonl, reconcile-alerts.jsonl, and
@@ -206,10 +143,10 @@ POSITION_JOURNAL_CHECKPOINT_VERSION = 1
 # write that fails, e.g. ENOSPC) surface here as kind="state" AND re-raise so the
 # money path is blocked rather than proceeding on lost state.
 ALERTS_LEDGER = LOG_DIR / "alerts.jsonl"
-# Rotate the live journal segment into a sealed file once it reaches this many
+# Rotate the live ORDER-journal segment into a sealed file once it reaches this many
 # records, AFTER writing a verified checkpoint that subsumes them. Module constant
 # (env-overridable) so a test can force a checkpoint+rotation without writing
-# thousands of records; an internal _checkpoint_and_rotate() helper also forces it.
+# thousands of records.
 HERMX_JOURNAL_SEGMENT_MAX_RECORDS = int(os.environ.get("HERMX_JOURNAL_SEGMENT_MAX_RECORDS", "1000") or "1000")
 # Retention: keep the last K sealed segments for forensic replay. The verified
 # checkpoint already subsumes every sealed segment (older sealed files are
@@ -235,19 +172,16 @@ HERMX_LEDGER_ROTATE_RETENTION = int(os.environ.get("HERMX_LEDGER_ROTATE_RETENTIO
 # PLANNED -> SUBMITTED -> (FILLED | REJECTED | UNKNOWN). The PLANNED/SUBMITTED records
 # are persisted BEFORE the submit subprocess so restart reconciliation (Task 4) has
 # authoritative clOrdId keys even after a crash mid-send. UNKNOWN (timeout/crash) is a
-# first-class state that triggers reconciliation, NOT a failure. This journal uses a
-# SEPARATE monotonic seq counter from the position journal (the two must not collide).
+# first-class state that triggers reconciliation, NOT a failure.
 ORDER_JOURNAL_LEDGER = LOG_DIR / "order-journal.jsonl"
 ORDER_JOURNAL_SCHEMA_VERSION = 1
-# Order-journal lifecycle (mirrors the position-journal checkpoint+rotation, Phase 1
-# task 7). Without it _order_journal_next_seq() and latest_order_record() re-read the
-# WHOLE append-only journal on every submit -- O(n) per order, unbounded growth. The
+# Order-journal lifecycle (verified checkpoint + segment rotation, Phase 1 task 7).
+# Without it _order_journal_next_seq() and latest_order_record() re-read the WHOLE
+# append-only journal on every submit -- O(n) per order, unbounded growth. The
 # checkpoint folds the journal into the bounded "latest record per cl_ord_id" index
 # (the dedupe/idempotency authority) plus each order's origin ts, so a load rebuilds
 # from (checkpoint + live-segment tail) instead of the full history, and rotation seals
-# the live segment so disk does not grow without limit. The segment-size / retention
-# knobs are SHARED with the position journal (HERMX_JOURNAL_SEGMENT_*). Unlike the
-# position journal this is NOT gated by HERMX_STATE_BACKEND -- the order journal is the
+# the live segment so disk does not grow without limit. The order journal is the
 # submission state machine and is always active.
 ORDER_JOURNAL_CHECKPOINT_FILE = LOG_DIR / "order-journal.checkpoint.json"
 ORDER_JOURNAL_CHECKPOINT_VERSION = 1
@@ -336,10 +270,6 @@ RECONCILE_STARTUP_AT: "str | None" = None
 # every newly-seen signal is appended to it. The former seen-signals.json snapshot
 # (a redundant second authority) was removed.
 SIGNALS_LEDGER = LOG_DIR / "signals.jsonl"
-# tab-health.jsonl is written by the EXTERNAL mxc-tab-health service, not by this
-# process; it is read-only here (latest_tab_health). It is deliberately NOT folded
-# into pipeline.jsonl -- doing so would break that out-of-process producer contract.
-TAB_HEALTH_LEDGER = LOG_DIR / "tab-health.jsonl"
 CONFIG_FILE = ROOT / "shadow-config.json"
 
 
@@ -368,8 +298,6 @@ def load_shadow_config() -> dict:
             "exchange": "ccxt",
             "ccxt_exchange": "okx",
             "ccxt_default_type": "swap",
-            "execution_policy": "duo_raw",
-            "shadow_policy": "duo_regime_rsi_30m",
             "route": "okx_api",
             "account": "sandbox",
         },
@@ -451,18 +379,18 @@ ALERT_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "tradingvi
 # `global` declaration, and adding/incrementing these never alters any ledger
 # record or return value, so default-OFF behavior stays byte-identical.
 ALERT_SCHEMA_METRICS = {"invalid": 0, "quarantined": 0}
+# Retained as an inert config-derived constant: POLICY_KEYS feeds control-state's
+# vestigial allowed_policies list. The policy DECISION engine that consumed it was
+# removed.
 POLICY_KEYS = tuple(CONFIG.get("policies", {}).get("enabled") or ["duo_raw", "duo_regime_rsi_30m"])
-MTF_POLICY_KEYS = {"v52_fast_1h", "v6_regime_duo", "duo_conviction_sized", "conviction_v2_candidate", "duo_regime_rsi_sized"}
-MTF_REQUIRED = any(key in set(POLICY_KEYS) for key in MTF_POLICY_KEYS)
-PRIMARY_POLICY = str(CONFIG.get("primary_policy") or "not_selected")
-PRIMARY_POLICY_SELECTED = PRIMARY_POLICY not in ("", "none", "not_selected", "observation_only")
-PAPER_BASE_NOTIONAL_USD = float(CONFIG.get("base_notional_usd") or 10000)
-OKX_PERP_MAKER_FEE_RATE = float(CONFIG.get("fees", {}).get("maker_rate", 0.0002))
-OKX_PERP_TAKER_FEE_RATE = float(CONFIG.get("fees", {}).get("taker_rate", 0.0005))
-PAPER_DEFAULT_LIQUIDITY = str(CONFIG.get("fees", {}).get("default_liquidity", "taker")).lower()
 DEFAULT_CHART_TYPE = str(CONFIG.get("chart_type") or "heikin_ashi")
 PAPER_FUNDING_ENABLED = bool(CONFIG.get("funding", {}).get("enabled", False))
 PAPER_DEFAULT_FUNDING_RATE = float(CONFIG.get("funding", {}).get("default_rate", 0.0))
+# Generic exchange money math (used by funding/fee/pnl helpers below and the
+# money-decimal characterization suite). Not tied to the removed paper engine.
+OKX_PERP_MAKER_FEE_RATE = float(CONFIG.get("fees", {}).get("maker_rate", 0.0002))
+OKX_PERP_TAKER_FEE_RATE = float(CONFIG.get("fees", {}).get("taker_rate", 0.0005))
+PAPER_DEFAULT_LIQUIDITY = str(CONFIG.get("fees", {}).get("default_liquidity", "taker")).lower()
 
 
 # canonical_timeframe lives in the shared module so the receiver and the
@@ -615,12 +543,6 @@ sys.path.insert(0, "/root/trading-system")
 # Ensure this src/ directory is importable so the executors package resolves
 # regardless of the working directory the receiver is launched from.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-try:
-    from cdp_indicator_reader import read_indicator_values
-except Exception as exc:  # fail closed
-    read_indicator_values = None
-    logging.warning("CDP reader unavailable: %s", exc)
-
 # Exchange-agnostic execution layer. The factory selects the right adapter from
 # config["execution"]["exchange"] (okx_demo, kucoin_paper, bybit_testnet, ...).
 try:
@@ -637,12 +559,6 @@ except Exception as exc:  # fail closed: execution simply stays disabled
 
 ALLOWED_SYMBOLS = {symbol for symbol, cfg in CONFIG.get("assets", {}).items() if cfg.get("enabled", True)}
 ALLOWED_SIDES = {"buy", "sell"}
-MTF_TIMEFRAMES = ("1h",)
-ACTIVE_MTF_TIMEFRAMES = MTF_TIMEFRAMES if MTF_REQUIRED else ()
-CORE_MXC_FIELDS = ("pp_acc", "pp_vel")
-LIVE_READ_ATTEMPTS = int(os.environ.get("MXC_LIVE_READ_ATTEMPTS", "1"))
-LIVE_READ_SLEEP_SECONDS = float(os.environ.get("MXC_LIVE_READ_SLEEP_SECONDS", "1.5"))
-HEALTH_CACHE_MAX_AGE_SECONDS = float(os.environ.get("MXC_HEALTH_CACHE_MAX_AGE_SECONDS", "420"))
 
 
 def webhook_auth_config_healthy() -> bool:
@@ -1096,11 +1012,9 @@ def startup_quarantine_partial_ledgers(paths: "list[Path] | tuple[Path, ...] | N
     scan_paths = list(paths) if paths is not None else [
         RAW_WEBHOOK_LEDGER,
         PIPELINE_LEDGER,
-        POSITION_JOURNAL_LEDGER,
         ORDER_JOURNAL_LEDGER,
         ALERTS_LEDGER,
         SIGNALS_LEDGER,
-        TAB_HEALTH_LEDGER,
     ]
     summary = {"checked": 0, "quarantined": [], "errors": []}
     for path in scan_paths:
@@ -1118,107 +1032,6 @@ def startup_quarantine_partial_ledgers(paths: "list[Path] | tuple[Path, ...] | N
         if after_mtime is not None and after_mtime != before_mtime:
             summary["quarantined"].append(path.name)
     return summary
-
-
-# Monotonic journal sequence: derived once from the journal's last seq at first
-# use (REFACTOR_PLAN.md:202 "seq derived from current journal length/last seq at
-# load"), then incremented in-process. Reset to None on module (re)load. Matches
-# the existing single-threaded request handling; no cross-process locking.
-_journal_seq_cache: "int | None" = None
-
-
-def _journal_next_seq() -> int:
-    global _journal_seq_cache
-    if _journal_seq_cache is None:
-        # After a rotation the live segment is fresh/empty, so its records alone no
-        # longer reveal the true high-water mark. Derive the floor from the
-        # checkpoint's last_seq and the sealed segment seqs (encoded cheaply in the
-        # filenames, no file read) PLUS any live records, so seq stays monotonic
-        # across rotation and restart (REFACTOR_PLAN.md:220 task 7).
-        last = -1
-        cl = _checkpoint_last_seq_floor()
-        if cl is not None and cl > last:
-            last = cl
-        for seq, _path in _sealed_segment_paths():
-            if seq > last:
-                last = seq
-        for rec in read_jsonl_tolerant(POSITION_JOURNAL_LEDGER):
-            s = rec.get("seq")
-            if isinstance(s, int) and s > last:
-                last = s
-        _journal_seq_cache = last
-    _journal_seq_cache += 1
-    return _journal_seq_cache
-
-
-def mxc_core_ok(values: dict | None) -> bool:
-    return bool(values and all(values.get(field) is not None for field in CORE_MXC_FIELDS))
-
-
-def read_indicator_values_stable(symbol: str, timeframe: str) -> tuple[dict | None, str | None]:
-    """Read CDP values, retrying when TradingView has not hydrated Data Window yet."""
-    if read_indicator_values is None:
-        return None, "cdp_reader_unavailable"
-    last_values = None
-    last_error = None
-    attempts = max(1, LIVE_READ_ATTEMPTS)
-    for attempt in range(attempts):
-        try:
-            last_values = read_indicator_values(symbol, timeframe)
-            last_error = None
-            if mxc_core_ok(last_values):
-                if attempt:
-                    last_values = dict(last_values)
-                    last_values["_live_read_attempts"] = attempt + 1
-                return last_values, None
-            last_error = f"missing_core_fields:{sorted((last_values or {}).keys())}"
-        except Exception as exc:
-            last_error = str(exc)
-        if attempt < attempts - 1:
-            time.sleep(LIVE_READ_SLEEP_SECONDS)
-    if last_values is not None:
-        last_values = dict(last_values)
-        last_values["_live_read_attempts"] = attempts
-        last_values["_live_read_warning"] = last_error
-    return last_values, last_error
-
-
-def health_age_seconds(health: dict | None) -> float | None:
-    if not health:
-        return None
-    checked = parse_tv_time(health.get("checked_at"))
-    if not checked:
-        return None
-    return (datetime.now(timezone.utc) - checked).total_seconds()
-
-
-def cached_health_values(health: dict | None, symbol: str, timeframe: str) -> dict | None:
-    age = health_age_seconds(health)
-    if age is None or age > HEALTH_CACHE_MAX_AGE_SECONDS:
-        return None
-    symbol = str(symbol or "").upper()
-    for row in (health or {}).get("results") or []:
-        if row.get("symbol") == symbol and row.get("timeframe") == timeframe and row.get("ok"):
-            fields = dict(row.get("fields") or {})
-            if mxc_core_ok(fields):
-                fields["_fallback_source"] = "tab_health_cache"
-                fields["_fallback_age_seconds"] = round(age, 3)
-                return fields
-    return None
-
-
-def trigger_health_repair(reason: str, symbol: str, timeframe: str) -> None:
-    try:
-        subprocess.run(
-            ["systemctl", "start", "--no-block", "mxc-tab-health.service"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=3,
-        )
-        logging.warning("Triggered immediate tab health repair reason=%s symbol=%s timeframe=%s", reason, symbol, timeframe)
-    except Exception as exc:
-        logging.warning("Failed to trigger tab health repair reason=%s symbol=%s timeframe=%s error=%s", reason, symbol, timeframe, exc)
 
 
 def first(payload: dict, *names: str, default=""):
@@ -1385,228 +1198,6 @@ def validate_alert_schema(normalized: dict) -> tuple[bool, str | None]:
     return False, f"{loc}: {first.message}"
 
 
-def read_mtf_values(symbol: str) -> tuple[dict, dict]:
-    values_by_tf = {}
-    errors = {}
-    if not ACTIVE_MTF_TIMEFRAMES:
-        return values_by_tf, errors
-    if read_indicator_values is None:
-        return values_by_tf, {tf: "cdp_reader_unavailable" for tf in ACTIVE_MTF_TIMEFRAMES}
-    for tf in ACTIVE_MTF_TIMEFRAMES:
-        values, error = read_indicator_values_stable(symbol, tf)
-        values_by_tf[tf] = values or {}
-        if error and not mxc_core_ok(values):
-            errors[tf] = error
-    return values_by_tf, errors
-
-
-def mtf_contexts(normalized: dict, mtf_values: dict | None) -> dict:
-    out = {}
-    for tf in ACTIVE_MTF_TIMEFRAMES:
-        out[tf] = base_context(normalized, (mtf_values or {}).get(tf))
-    return out
-
-
-def latest_tab_health() -> dict | None:
-    if not TAB_HEALTH_LEDGER.exists():
-        return None
-    try:
-        lines = [line for line in TAB_HEALTH_LEDGER.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
-        return json.loads(lines[-1]) if lines else None
-    except Exception:
-        return None
-
-
-def health_gate_for(symbol: str, health: dict | None, mxc_values: dict | None, mtf_values: dict | None) -> dict:
-    symbol = str(symbol or "").upper()
-    result = {
-        "status": "unknown",
-        "primary_30m_ok": bool(mxc_values and mxc_values.get("pp_acc") is not None and mxc_values.get("pp_vel") is not None),
-        "mtf_ok": False,
-        "mtf_available_count": 0,
-        "failed_timeframes": [],
-        "source": "live_read",
-        "message": "Health derived from current read",
-    }
-    mtf_values = mtf_values or {}
-    for tf in ACTIVE_MTF_TIMEFRAMES:
-        vals = mtf_values.get(tf) or {}
-        ok = vals.get("pp_acc") is not None and vals.get("pp_vel") is not None
-        if ok:
-            result["mtf_available_count"] += 1
-        else:
-            result["failed_timeframes"].append(tf)
-    result["mtf_ok"] = result["mtf_available_count"] == len(ACTIVE_MTF_TIMEFRAMES)
-    if health:
-        summary = (health.get("summary") or {}).get(symbol)
-        if summary:
-            result["source"] = "tab_health_and_live_read"
-            # Never allow stale health to override a failed current 30m read.
-            result["primary_30m_ok"] = result["primary_30m_ok"] and bool(summary.get("primary_30m_ok", True))
-            summary_failed = {tf for tf in (summary.get("failed_timeframes") or []) if tf in ACTIVE_MTF_TIMEFRAMES}
-            result["failed_timeframes"] = sorted(set(result["failed_timeframes"]) | summary_failed)
-            result["mtf_ok"] = result["mtf_ok"] and not summary_failed
-            if summary_failed:
-                result["mtf_available_count"] = max(0, len(ACTIVE_MTF_TIMEFRAMES) - len(summary_failed))
-    if isinstance(mxc_values, dict) and mxc_values.get("_fallback_source") == "tab_health_cache":
-        result["source"] = "tab_health_cache_after_live_retry"
-        result["cache_fallback"] = True
-        result["cache_age_seconds"] = mxc_values.get("_fallback_age_seconds")
-    if not result["primary_30m_ok"]:
-        result["status"] = "primary_30m_blocked"
-        result["message"] = "30m MXC is unavailable; all policies blocked for this alert"
-    elif not result["mtf_ok"]:
-        result["status"] = "mtf_degraded"
-        result["message"] = "30m MXC is available but higher timeframe context is partial"
-    else:
-        result["status"] = "healthy"
-        if result.get("cache_fallback"):
-            result["message"] = "30m live read was incomplete; used recent tab-health snapshot"
-        elif ACTIVE_MTF_TIMEFRAMES:
-            result["message"] = "30m and MTF MXC context available"
-        else:
-            result["message"] = "30m MXC context available; MTF disabled by selected policies"
-    return result
-
-
-def apply_health_gate(policies: dict, gate: dict) -> dict:
-    status = (gate or {}).get("status")
-    if status == "primary_30m_blocked":
-        for key, policy in policies.items():
-            if key == "duo_raw":
-                policy["health_status"] = "signal_only_no_cdp"
-                policy.setdefault("reasons", []).insert(0, "Health gate: 30m MXC unavailable, but Duo raw uses the TradingView alert itself")
-                continue
-            policy["decision"] = "SKIP"
-            policy["risk_weight"] = 0
-            policy["leverage"] = 0
-            policy["action"] = "BLOCKED_BY_HEALTH"
-            policy["health_status"] = status
-            policy.setdefault("reasons", []).insert(0, "Health gate: 30m Regime unavailable, decision blocked")
-        return policies
-    if status == "mtf_degraded":
-        failed = set((gate or {}).get("failed_timeframes") or [])
-        for key in ("v5_mtf", "v51_balanced"):
-            policy = policies.get(key)
-            if not policy:
-                continue
-            current = float(policy.get("risk_weight") or 0)
-            degraded = step_weight(current, -0.25)
-            policy["risk_weight"] = degraded
-            if degraded <= 0:
-                policy["decision"] = "SKIP"
-                policy["leverage"] = 0
-                policy["action"] = "SKIP_MTF_DEGRADED"
-            else:
-                policy["decision"] = "REDUCE"
-                policy["leverage"] = 1.0
-                policy["action"] = "PARTIAL_ENTRY_MTF_DEGRADED"
-            policy["mtf_status"] = "degraded"
-            policy["health_status"] = status
-            policy.setdefault("reasons", []).insert(0, "Health gate: full MTF degraded, V5/V5.1 reduced")
-        fast = policies.get("v52_fast_1h")
-        if fast:
-            if "1h" in failed:
-                current = float(fast.get("risk_weight") or 0)
-                degraded = step_weight(current, -0.25)
-                fast["risk_weight"] = degraded
-                if degraded <= 0:
-                    fast["decision"] = "SKIP"
-                    fast["leverage"] = 0
-                    fast["action"] = "SKIP_1H_DEGRADED"
-                else:
-                    fast["decision"] = "REDUCE"
-                    fast["leverage"] = 1.0
-                    fast["action"] = "PARTIAL_ENTRY_1H_DEGRADED"
-                fast["mtf_status"] = "degraded"
-                fast["health_status"] = status
-                fast.setdefault("reasons", []).insert(0, "Health gate: 1H unavailable, V5.2 reduced")
-            else:
-                fast["health_status"] = "healthy_fast_1h"
-                fast.setdefault("reasons", []).insert(0, "Health gate: full MTF partial, but 1H is available for V5.2")
-    else:
-        for policy in policies.values():
-            policy["health_status"] = status or "unknown"
-    return policies
-
-
-def build_policies(normalized: dict, values: dict | None, mtf_values: dict | None = None) -> dict:
-    ctx = base_context(normalized, values)
-    mtf_ctxs = mtf_contexts(normalized, mtf_values)
-    out = {}
-    if "duo_raw" in POLICY_KEYS:
-        out["duo_raw"] = decide_duo_raw(normalized, ctx)
-    needs_v3 = any(key in POLICY_KEYS for key in ("v52_fast_1h", "v5_mtf", "v51_balanced"))
-    v3 = decide_v3_r75(ctx) if needs_v3 else None
-    if "v52_fast_1h" in POLICY_KEYS:
-        out["v52_fast_1h"] = decide_v52_fast_1h(ctx, v3, mtf_ctxs)
-    if "v6_regime_duo" in POLICY_KEYS:
-        out["v6_regime_duo"] = decide_v6_regime_duo(ctx, mtf_ctxs)
-    if "duo_conviction_sized" in POLICY_KEYS:
-        out["duo_conviction_sized"] = decide_duo_conviction_sized(normalized, ctx, mtf_ctxs)
-    if "conviction_v2_candidate" in POLICY_KEYS:
-        out["conviction_v2_candidate"] = decide_conviction_v2_candidate(normalized, ctx, mtf_ctxs)
-    if "duo_regime_rsi_sized" in POLICY_KEYS:
-        out["duo_regime_rsi_sized"] = decide_duo_regime_rsi_sized(normalized, ctx, mtf_ctxs)
-    if "duo_regime_rsi_30m" in POLICY_KEYS:
-        out["duo_regime_rsi_30m"] = decide_duo_regime_rsi_30m(normalized, ctx, mtf_ctxs)
-    return out
-
-
-def empty_paper_state() -> dict:
-    return {"version": 3, "updated_at": None, "policies": {}, "realistic_policies": {}, "compound_policies": {}}
-
-
-def load_paper_state() -> dict:
-    # journal backend: the journal is authoritative. Derive state from the latest
-    # VERIFIED checkpoint + only the newer live records, keeping replay bounded
-    # (REFACTOR_PLAN.md:220, :239). With no trustworthy checkpoint this falls back
-    # to a full from-empty replay -- which is byte-identical in RESULT, the core
-    # invariant (E5: a missing/corrupt snapshot rebuilds from the journal instead
-    # of silently resetting to empty).
-    if HERMX_STATE_BACKEND == "journal":
-        state = _load_from_checkpoint()
-        if state is not None:
-            return state
-        return replay_position_journal()
-    # legacy backend: byte-identical to pre-Phase-1 behavior — snapshot is the
-    # source of truth, and ANY read error returns empty (the E5 footgun we keep
-    # ONLY in legacy mode for behavioral compatibility during the soak).
-    empty = empty_paper_state()
-    if not PAPER_STATE_FILE.exists():
-        return empty
-    try:
-        state = json.loads(PAPER_STATE_FILE.read_text(encoding="utf-8"))
-        state.setdefault("version", 3)
-        state.setdefault("policies", {})
-        state.setdefault("realistic_policies", {})
-        state.setdefault("compound_policies", {})
-        return state
-    except Exception:
-        return empty
-
-
-def save_paper_state(state: dict) -> None:
-    # Atomic + durable (REFACTOR_PLAN.md:206 E4): write tmp, fsync the tmp file,
-    # then atomic-rename. Best-effort fsync of the directory so the rename itself
-    # is durable. Content is byte-identical to the previous writer (indent=2, no
-    # trailing newline) so the legacy golden snapshot is unchanged.
-    with _STATE_WRITE_LOCK:
-        fd, tmp_path = tempfile.mkstemp(prefix=f"{PAPER_STATE_FILE.name}.", suffix=".tmp", dir=str(PAPER_STATE_FILE.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps(state, indent=2, ensure_ascii=False))
-                f.flush()
-                os.fsync(f.fileno())
-            Path(tmp_path).replace(PAPER_STATE_FILE)
-            _fsync_dir(PAPER_STATE_FILE.parent)
-        finally:
-            if os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-
 def default_control_state() -> dict:
     return {
         "version": 1,
@@ -1739,30 +1330,13 @@ def clear_strategy_override(strategy_id: str) -> bool:
     return True
 
 
-def realistic_base_notional_usd(symbol: str) -> float:
-    asset = (CONFIG.get("assets") or {}).get(symbol) or {}
-    budget = float(asset.get("budget_usd") or PAPER_BASE_NOTIONAL_USD)
-    leverage = float(asset.get("leverage") or 1.0)
-    return budget * leverage
+def fee_rate_for(liquidity: str | None = None) -> float:
+    liq = (liquidity or PAPER_DEFAULT_LIQUIDITY or "taker").lower()
+    return OKX_PERP_MAKER_FEE_RATE if liq == "maker" else OKX_PERP_TAKER_FEE_RATE
 
 
-def asset_budget_usd(symbol: str) -> float:
-    asset = (CONFIG.get("assets") or {}).get(symbol) or {}
-    return float(asset.get("budget_usd") or PAPER_BASE_NOTIONAL_USD)
-
-
-def asset_leverage(symbol: str) -> float:
-    asset = (CONFIG.get("assets") or {}).get(symbol) or {}
-    return float(asset.get("leverage") or 1.0)
-
-
-def side_to_position(side: str) -> str:
-    return "long" if side == "buy" else "short"
-
-
-# Money/decimal primitives now live in webhook.money (Phase 0b leaf extraction).
-# Re-exported above via `from webhook.money import ...` for backward compatibility
-# with existing call sites and tests (wr.D, wr.dec_usd, ...).
+def fee_usd(notional_usd: float, liquidity: str | None = None) -> float:
+    return float(dec_usd(D(notional_usd) * D(fee_rate_for(liquidity))))
 
 
 def pnl_pct(position_side: str, entry_price: float, exit_price: float) -> float:
@@ -1775,15 +1349,6 @@ def pnl_pct(position_side: str, entry_price: float, exit_price: float) -> float:
     return float(dec_pct((entry / exit_ - D("1")) * D("100")))
 
 
-def fee_rate_for(liquidity: str | None = None) -> float:
-    liq = (liquidity or PAPER_DEFAULT_LIQUIDITY or "taker").lower()
-    return OKX_PERP_MAKER_FEE_RATE if liq == "maker" else OKX_PERP_TAKER_FEE_RATE
-
-
-def fee_usd(notional_usd: float, liquidity: str | None = None) -> float:
-    return float(dec_usd(D(notional_usd) * D(fee_rate_for(liquidity))))
-
-
 def funding_rate_from_payload(payload: dict | None = None) -> float:
     payload = payload or {}
     rate = as_float(first(payload, "funding_rate", "okx_funding_rate", default=None))
@@ -1792,147 +1357,11 @@ def funding_rate_from_payload(payload: dict | None = None) -> float:
     return float(dec_pct(rate or 0.0))
 
 
-def estimate_funding_usd(position: dict, payload: dict | None = None) -> float:
-    # Placeholder until OKX funding timestamps are wired. Default is 0.
-    if not PAPER_FUNDING_ENABLED:
-        return 0.0
-    rate = D(funding_rate_from_payload(payload))
-    notional = D((position or {}).get("notional_usd") or 0.0)
-    side = (position or {}).get("side")
-    # Positive funding rate usually means longs pay shorts.
-    sign = D("-1") if side == "long" else D("1")
-    return float(dec_usd(notional * rate * sign))
-
-
-def executed_price_from_signal(signal_price: float, payload: dict | None = None) -> tuple[float, float]:
-    payload = payload or {}
-    execution_price = as_float(first(payload, "okx_execution_price", "execution_price", "fill_price", "avg_fill_price", default=None))
-    if execution_price is None:
-        execution_price = float(D(signal_price))
-    signal = D(signal_price)
-    executed = D(execution_price)
-    diff_pct = D("0") if signal == 0 else dec_pct((executed / signal - D("1")) * D("100"))
-    return float(executed), float(diff_pct)
-
-
-def _record_transition(state: dict, account: str, policy: str, symbol: str, effect: dict, received_at) -> None:
-    """LIVE path: write-ahead-journal the effect (durable fsync) BEFORE applying it
-    to in-memory state, then apply via the shared apply_effect. The journal is
-    written in BOTH backends (REFACTOR_PLAN.md:225 parallel soak data); only the
-    load/authority path differs by backend."""
-    record = {
-        "schema_version": POSITION_JOURNAL_SCHEMA_VERSION,
-        "seq": _journal_next_seq(),
-        "ts": received_at,
-        "kind": "transition",
-        "account": account,
-        "policy": policy,
-        "symbol": symbol,
-        "effect": canonicalize_decimal_fields(effect),
-    }
-    # Write-ahead, fail-closed (REFACTOR_PLAN.md:221): the durable journal append
-    # must succeed BEFORE in-memory state is mutated. If it fails (e.g. ENOSPC) we
-    # surface an operator alert and re-raise so submission is blocked and state is
-    # NOT silently advanced past an unpersisted transition.
-    try:
-        append_jsonl_durable(POSITION_JOURNAL_LEDGER, record)
-    except OSError as exc:
-        _fail_closed_state_write("journal-append", exc, context={"account": account, "policy": policy, "symbol": symbol, "seq": record.get("seq")})
-        raise
-    apply_effect(state, account, policy, symbol, effect)
-
-
-def _apply_records(state: dict, records: list) -> tuple:
-    """Apply an ordered list of journal records to ``state`` via the shared
-    apply_effect. Returns (last_ts, records_consumed, last_seq). Enforces the
-    schema_version forward-compat rule (a newer writer's record is a hard error,
-    never silently misread)."""
-    last_ts = None
-    consumed = 0
-    last_seq = -1
-    for rec in records:
-        sv = rec.get("schema_version")
-        if not isinstance(sv, int) or sv > POSITION_JOURNAL_SCHEMA_VERSION:
-            logging.error("position journal: unsupported schema_version %r (reader=%d) at seq %r", sv, POSITION_JOURNAL_SCHEMA_VERSION, rec.get("seq"))
-            raise ValueError(f"position journal schema_version {sv!r} > reader {POSITION_JOURNAL_SCHEMA_VERSION}")
-        s = rec.get("seq")
-        if isinstance(s, int) and s > last_seq:
-            last_seq = s
-        if rec.get("kind") != "transition":
-            continue
-        apply_effect(state, rec["account"], rec["policy"], rec["symbol"], rec["effect"])
-        consumed += 1
-        if rec.get("ts") is not None:
-            last_ts = rec["ts"]
-    return last_ts, consumed, last_seq
-
-
-def _parse_sealed_seq(name: str):
-    """The sealed-segment seq encoded in a filename ``position-journal.<seq>.jsonl``
-    (the last seq that segment covers), or None if the name is not a sealed
-    segment. Reads the seq from the NAME so seq derivation needs no file read."""
-    prefix, suffix = "position-journal.", ".jsonl"
-    if name.startswith(prefix) and name.endswith(suffix):
-        mid = name[len(prefix):-len(suffix)]
-        if mid.isdigit():
-            return int(mid)
-    return None
-
-
-def _sealed_segment_paths() -> list:
-    """Sealed journal segments as (seq, path), ascending by seq. The live segment
-    (``position-journal.jsonl``) and the ``.corrupt`` quarantine file are excluded
-    by the naming rule; the checkpoint (``.json``) is excluded by suffix."""
-    out = []
-    for p in LOG_DIR.glob("position-journal.*.jsonl"):
-        seq = _parse_sealed_seq(p.name)
-        if seq is not None:
-            out.append((seq, p))
-    out.sort(key=lambda t: t[0])
-    return out
-
-
-def _read_all_journal_records() -> list:
-    """Every record across sealed segments (seq order) + the live segment, sorted
-    by seq. This is the full history used by a from-empty replay; rotation seals
-    contiguous seq ranges so concatenation is already seq-ordered, but we sort
-    defensively to make the replay-order invariant explicit (REFACTOR_PLAN.md:220)."""
-    records: list = []
-    for _seq, path in _sealed_segment_paths():
-        records.extend(read_jsonl_tolerant(path))
-    records.extend(read_jsonl_tolerant(POSITION_JOURNAL_LEDGER))
-    records.sort(key=lambda r: r.get("seq") if isinstance(r.get("seq"), int) else -1)
-    return records
-
-
-def replay_position_journal() -> dict:
-    """Full replay from EMPTY across ALL segments (sealed + live) via the SAME
-    apply_effect the live path uses (this is what guarantees replay == live).
-    Tolerates a truncated trailing record. This is the authoritative fallback
-    under the journal backend and the equivalence oracle the checkpoint is verified
-    against (REFACTOR_PLAN.md:202, :219, :233)."""
-    state = empty_paper_state()
-    last_ts, _consumed, _last_seq = _apply_records(state, _read_all_journal_records())
-    state["updated_at"] = last_ts
-    return state
-
-
-# ---------------------------------------------------------------------------
-# Journal lifecycle: verified checkpoint + segment rotation (Phase 1 task 7,
-# REFACTOR_PLAN.md:218-221). Keeps journal-mode startup replay bounded: a load
-# starts from the latest VERIFIED checkpoint and replays only the records newer
-# than it, instead of replaying the entire history from empty on every call.
-# ---------------------------------------------------------------------------
-
 def _canonical_state_json(state: dict) -> str:
     """Canonical JSON for hashing: sorted keys, compact separators. Independent of
     the pretty-printed on-disk form, so checkpoint formatting cannot affect the
     integrity hash."""
     return json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-
-def _state_hash(state: dict) -> str:
-    return hashlib.sha256(_canonical_state_json(state).encode("utf-8")).hexdigest()
 
 
 def _fsync_dir(path: Path) -> None:
@@ -1948,9 +1377,9 @@ def _fsync_dir(path: Path) -> None:
 
 
 def _atomic_json_dump(path: Path, obj: dict) -> None:
-    """Write JSON atomically + durably (tmp -> fsync -> replace -> dir fsync), the
-    same discipline as save_paper_state. Propagates OSError so the caller can fail
-    closed on a full disk (REFACTOR_PLAN.md:221)."""
+    """Write JSON atomically + durably (tmp -> fsync -> replace -> dir fsync).
+    Propagates OSError so the caller can fail closed on a full disk
+    (REFACTOR_PLAN.md:221)."""
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as f:
         f.write(json.dumps(obj, indent=2, ensure_ascii=False))
@@ -1972,504 +1401,6 @@ def _fail_closed_state_write(operation: str, exc: Exception, context: dict | Non
         append_jsonl(ALERTS_LEDGER, {"ts": now_iso(), "kind": "state", "alert": "STATE_WRITE_FAILED", "operation": operation, "error": str(exc), "context": context or {}})
     except Exception:
         pass
-
-
-def _read_checkpoint() -> "dict | None":
-    """Load the checkpoint with VERIFY-BEFORE-TRUST (REFACTOR_PLAN.md:219). Returns
-    the checkpoint dict only if (a) it parses, (b) its schema_version/
-    checkpoint_version are not from a newer writer, and (c) its stored state_hash
-    recomputes over the stored state. Any failure is loud and returns None, which
-    makes the caller DISCARD the checkpoint and fall back to full replay -- a
-    corrupt or forward-version checkpoint is never trusted."""
-    if not POSITION_JOURNAL_CHECKPOINT_FILE.exists():
-        return None
-    try:
-        ckpt = json.loads(POSITION_JOURNAL_CHECKPOINT_FILE.read_text(encoding="utf-8"))
-    except Exception as exc:
-        logging.error("position-journal checkpoint unreadable (%s) -- DISCARDING, full replay", exc)
-        return None
-    if not isinstance(ckpt, dict):
-        logging.error("position-journal checkpoint is not an object -- DISCARDING, full replay")
-        return None
-    sv = ckpt.get("schema_version")
-    cv = ckpt.get("checkpoint_version")
-    if not isinstance(sv, int) or sv > POSITION_JOURNAL_SCHEMA_VERSION or not isinstance(cv, int) or cv > POSITION_JOURNAL_CHECKPOINT_VERSION:
-        logging.error("position-journal checkpoint from a newer writer (schema=%r checkpoint=%r, reader schema=%d checkpoint=%d) -- DISCARDING, full replay", sv, cv, POSITION_JOURNAL_SCHEMA_VERSION, POSITION_JOURNAL_CHECKPOINT_VERSION)
-        return None
-    state = ckpt.get("state")
-    last_seq = ckpt.get("last_seq")
-    if not isinstance(state, dict) or not isinstance(last_seq, int):
-        logging.error("position-journal checkpoint missing state/last_seq -- DISCARDING, full replay")
-        return None
-    if ckpt.get("state_hash") != _state_hash(state):
-        logging.error("position-journal checkpoint state_hash MISMATCH -- DISCARDING corrupt checkpoint, full replay")
-        return None
-    return ckpt
-
-
-def _checkpoint_last_seq_floor() -> "int | None":
-    """The checkpoint's last_seq used only as a monotonic floor for seq derivation.
-    Best-effort and tolerant of a partly-corrupt checkpoint: a hash mismatch does
-    not matter here (an over-high floor only skips seq numbers, never reuses them),
-    so we read last_seq directly without the full verify."""
-    if not POSITION_JOURNAL_CHECKPOINT_FILE.exists():
-        return None
-    try:
-        ckpt = json.loads(POSITION_JOURNAL_CHECKPOINT_FILE.read_text(encoding="utf-8"))
-        ls = ckpt.get("last_seq")
-        return ls if isinstance(ls, int) else None
-    except Exception:
-        return None
-
-
-def _load_from_checkpoint() -> "dict | None":
-    """Bounded journal-mode load (REFACTOR_PLAN.md:220, :239): start from a VERIFIED
-    checkpoint's state (deep-copied so the on-disk dict is never mutated) and replay
-    ONLY the records newer than checkpoint.last_seq from the live segment. Sealed
-    segments are subsumed by the checkpoint, so they are not replayed. Returns None
-    when there is no trustworthy checkpoint, signalling a full replay.
-
-    Result invariant: identical to replay_position_journal() (full from-empty
-    replay). updated_at carries over from the checkpoint state and is only advanced
-    by newer records, matching the full-replay's last-ts semantics."""
-    ckpt = _read_checkpoint()
-    if ckpt is None:
-        return None
-    state = copy.deepcopy(ckpt["state"])
-    last_seq = ckpt["last_seq"]
-    newer = [r for r in read_jsonl_tolerant(POSITION_JOURNAL_LEDGER) if isinstance(r.get("seq"), int) and r["seq"] > last_seq]
-    newer.sort(key=lambda r: r["seq"])
-    last_ts, _consumed, _last = _apply_records(state, newer)
-    if last_ts is not None:
-        state["updated_at"] = last_ts
-    return state
-
-
-def _rotate_live_segment(last_seq: int) -> None:
-    """Seal the live segment to ``position-journal.<last_seq>.jsonl`` and start a
-    fresh empty live segment. Atomic rename; propagates OSError to fail closed.
-    Called only AFTER a verified checkpoint covering last_seq has been fsync'd, so a
-    crash between the two is safe: on restart the checkpoint replays only seq >
-    last_seq from the (still-unrotated) live segment and ignores the rest."""
-    if not POSITION_JOURNAL_LEDGER.exists():
-        return
-    sealed = LOG_DIR / f"position-journal.{last_seq}.jsonl"
-    os.replace(POSITION_JOURNAL_LEDGER, sealed)
-    POSITION_JOURNAL_LEDGER.touch()
-    _fsync_dir(LOG_DIR)
-
-
-def _enforce_segment_retention() -> None:
-    """Keep the last K sealed segments; prune older ones. Safe because the verified
-    checkpoint subsumes every sealed segment -- they are retained only for forensic
-    replay (REFACTOR_PLAN.md:221). K < 0 keeps all."""
-    if HERMX_JOURNAL_SEGMENT_RETENTION < 0:
-        return
-    sealed = _sealed_segment_paths()
-    excess = len(sealed) - HERMX_JOURNAL_SEGMENT_RETENTION
-    for _seq, path in sealed[:max(0, excess)]:
-        try:
-            path.unlink()
-        except OSError as exc:
-            logging.warning("position-journal: could not prune sealed segment %s: %s", path, exc)
-
-
-def _checkpoint_and_rotate(state: dict) -> None:
-    """Write a verified checkpoint covering everything currently journaled, then
-    rotate the live segment (REFACTOR_PLAN.md:218-221). VERIFY-BEFORE-TRUST: the
-    checkpoint is only written after asserting that a full from-empty replay equals
-    the state built from (previous checkpoint + newer live records); if they
-    diverge we refuse to checkpoint (loud, no rotation) rather than persist a state
-    we cannot prove. Fail-closed on any write OSError. ``state`` is the live
-    in-memory state (used only as a sanity oracle); the checkpoint stores the
-    from-empty replay, which is the exact thing a subsequent load reconstructs."""
-    records = _read_all_journal_records()
-    full = empty_paper_state()
-    last_ts, consumed, last_seq = _apply_records(full, records)
-    full["updated_at"] = last_ts
-    if consumed == 0:
-        return  # nothing to checkpoint yet
-    incremental = _load_from_checkpoint()
-    if incremental is None:
-        # First checkpoint: the full from-empty replay IS the authoritative state.
-        chosen = full
-    else:
-        # Verify-before-trust (REFACTOR_PLAN.md:219). The incremental state
-        # (prev *hash-verified* checkpoint + records newer than it) is the authority
-        # the load path uses. The full from-empty replay is an independent oracle to
-        # cross-check it -- but it is only a VALID oracle while the on-disk history is
-        # still complete from seq 0. Retention pruning deliberately discards sealed
-        # segments already subsumed by a checkpoint, after which a from-empty replay
-        # is necessarily incomplete and must NOT be used to "refute" the incremental
-        # state. So: if history is complete (min seq == 0) assert full == incremental
-        # (strong equivalence); once pruning has occurred, the prior checkpoint's
-        # verified hash is the trust anchor and we persist the incremental state.
-        min_seq = min((r.get("seq") for r in records if isinstance(r.get("seq"), int)), default=0)
-        if min_seq == 0:
-            if _state_hash(incremental) != _state_hash(full):
-                logging.error("position-journal checkpoint ABORTED: incremental(prev checkpoint + newer) != full replay -- refusing to persist an unverified checkpoint (last_seq=%s)", last_seq)
-                raise RuntimeError("position-journal checkpoint equivalence verification failed")
-            chosen = full
-        else:
-            chosen = incremental
-    # Sanity: the live in-memory state should also equal the chosen reconstruction
-    # (the task-1 invariant that replay == live). Log if it diverges; the verified
-    # reconstruction is authoritative.
-    if _state_hash(state) != _state_hash(chosen):
-        logging.warning("position-journal checkpoint: in-memory state != verified reconstruction (last_seq=%s); persisting the reconstruction", last_seq)
-    ckpt = {
-        "schema_version": POSITION_JOURNAL_SCHEMA_VERSION,
-        "checkpoint_version": POSITION_JOURNAL_CHECKPOINT_VERSION,
-        "last_seq": last_seq,
-        # Seqs are contiguous from 0, so the checkpoint folds in last_seq+1 records.
-        "records_consumed": last_seq + 1,
-        "state": chosen,
-        "state_hash": _state_hash(chosen),
-        "created_at": now_iso(),
-    }
-    try:
-        _atomic_json_dump(POSITION_JOURNAL_CHECKPOINT_FILE, ckpt)  # fsync'd before rotate
-        _rotate_live_segment(last_seq)
-    except OSError as exc:
-        _fail_closed_state_write("checkpoint-rotate", exc, context={"last_seq": last_seq})
-        raise
-    _enforce_segment_retention()
-
-
-def _maybe_checkpoint_and_rotate(state: dict) -> None:
-    """Journal-mode only: trigger a checkpoint+rotation once the live segment grows
-    past HERMX_JOURNAL_SEGMENT_MAX_RECORDS, keeping replay bounded and disk growth
-    capped. No-op in legacy mode (no checkpoint files are ever created there)."""
-    if HERMX_STATE_BACKEND != "journal":
-        return
-    live = read_jsonl_tolerant(POSITION_JOURNAL_LEDGER)
-    if len(live) < HERMX_JOURNAL_SEGMENT_MAX_RECORDS:
-        return
-    _checkpoint_and_rotate(state)
-
-
-def paper_apply_policy(state: dict, normalized: dict, payload: dict, policy_key: str, policy: dict, price: float, received_at: str, base_notional_usd: float, account_key: str, account_label: str, *, compound: bool = False) -> dict:
-    policies_state = state.setdefault(account_key, {})
-    ps = policies_state.setdefault(policy_key, {"label": POLICY_LABELS.get(policy_key, policy_key), "symbols": {}, "stats": empty_policy_stats()})
-    ps.setdefault("stats", empty_policy_stats())
-    sym = normalized["symbol"]
-    if compound:
-        initial = ps.setdefault("initial_equity", {})
-        equity = ps.setdefault("equity", {})
-        initial.setdefault(sym, asset_budget_usd(sym))
-        equity.setdefault(sym, initial[sym])
-        base_notional_usd = float(dec_usd(max(D("0"), D(equity.get(sym) or 0.0)) * D(asset_leverage(sym))))
-    symbols = ps.setdefault("symbols", {})
-    pos = symbols.get(sym)
-    target_side = side_to_position(normalized["side"])
-    weight_dec = D(policy.get("risk_weight") or 0.0)
-    base_notional_dec = D(base_notional_usd)
-    decision = str(policy.get("decision") or "SKIP").upper()
-    event = {
-        "received_at": received_at,
-        "paper_account": account_key,
-        "paper_account_label": account_label,
-        "base_notional_usd": float(dec_usd(base_notional_dec)),
-        "policy": policy_key,
-        "policy_label": POLICY_LABELS.get(policy_key, policy_key),
-        "symbol": sym,
-        "signal_side": normalized["side"],
-        "signal_price": price,
-        "tv_time": normalized.get("tv_time"),
-        "chart_type": normalized.get("chart_type"),
-        "okx_mark_price": normalized.get("okx_mark_price"),
-        "okx_last_price": normalized.get("okx_last_price"),
-        "okx_execution_price": None,
-        "alert_execution_diff_pct": None,
-        "decision": decision,
-        "risk_weight": float(dec_pct(weight_dec)),
-        "actions": [],
-        "realized_pnl_pct": 0.0,
-        "realized_pnl_usd": 0.0,
-    }
-    exec_price, alert_diff_pct = executed_price_from_signal(price, payload)
-    event["okx_execution_price"] = exec_price
-    event["alert_execution_diff_pct"] = alert_diff_pct
-    liquidity = str(first(payload or {}, "liquidity", "execution_liquidity", default=PAPER_DEFAULT_LIQUIDITY)).lower()
-    entry_fee_rate = fee_rate_for(liquidity)
-    # Phase 1 task 1: state mutations below are packaged as `effect`s and applied
-    # via the shared apply_effect (through _record_transition, which also journals
-    # write-ahead). The compound preamble above already seeded equity/initial_equity
-    # in-place; carrying the seed lets apply_effect reproduce that seeding on replay.
-    seed = asset_budget_usd(sym) if compound else None
-
-    def _eff(op, **extra):
-        e = {"op": op}
-        if compound:
-            e["compound"] = True
-            e["initial_equity_seed"] = seed
-        e.update(extra)
-        return e
-
-    if price is None:
-        _record_transition(state, account_key, policy_key, sym, _eff("skip"), received_at)
-        event["actions"].append("SKIP_NO_NEW_ENTRY")
-        return event
-
-    if (decision == "SKIP" or weight_dec <= 0) and not (pos and pos.get("side") != target_side):
-        _record_transition(state, account_key, policy_key, sym, _eff("skip"), received_at)
-        event["actions"].append("SKIP_NO_NEW_ENTRY")
-        return event
-
-    if pos and pos.get("side") == target_side:
-        # Duo should not duplicate often, but keep the state stable if it happens.
-        old_weight = D(pos.get("weight") or 0)
-        fields = {
-            "weight": float(dec_pct(weight_dec)),
-            "last_signal_at": received_at,
-            "last_signal_price": price,
-            "last_execution_price": exec_price,
-        }
-        _record_transition(state, account_key, policy_key, sym, _eff("adjust", fields=fields), received_at)
-        event["actions"].append(f"UPDATE_SAME_DIRECTION {float(old_weight):.2f}->{float(weight_dec):.2f}")
-        return event
-
-    if pos:
-        entry_price_dec = D(pos.get("entry_execution_price") or pos.get("entry_price") or 0)
-        qty_units_dec = D(pos.get("qty_units") or 0)
-        exec_price_dec = D(exec_price)
-        exit_notional_dec = qty_units_dec * exec_price_dec
-        pct_dec = D(pnl_pct(pos.get("side"), float(entry_price_dec), float(exec_price_dec)))
-        weighted_pct_dec = pct_dec * D(pos.get("weight") or 0)
-        gross_usd_dec = D(pos.get("notional_usd") or 0) * pct_dec / D("100")
-        entry_fee_dec = D(pos.get("entry_fee_usd") or 0)
-        exit_fee_dec = D(fee_usd(float(exit_notional_dec), liquidity))
-        total_trade_fees_dec = entry_fee_dec + exit_fee_dec
-        funding_usd_dec = D(estimate_funding_usd(pos, payload))
-        net_usd_dec = gross_usd_dec - total_trade_fees_dec + funding_usd_dec
-        net_weighted_pct_dec = (net_usd_dec / base_notional_dec) * D("100") if base_notional_dec != 0 else D("0")
-        pct = float(dec_pct(pct_dec))
-        weighted_pct = float(dec_pct(weighted_pct_dec))
-        gross_usd = float(dec_usd(gross_usd_dec))
-        entry_fee = float(dec_usd(entry_fee_dec))
-        exit_fee = float(dec_usd(exit_fee_dec))
-        total_trade_fees = float(dec_usd(total_trade_fees_dec))
-        funding_usd = float(dec_usd(funding_usd_dec))
-        net_usd = float(dec_usd(net_usd_dec))
-        net_weighted_pct = float(dec_pct(net_weighted_pct_dec))
-        trade = {
-            "closed_at": received_at,
-            "paper_account": account_key,
-            "paper_account_label": account_label,
-            "base_notional_usd": float(dec_usd(base_notional_dec)),
-            "policy": policy_key,
-            "policy_label": POLICY_LABELS.get(policy_key, policy_key),
-            "symbol": sym,
-            "side": pos.get("side"),
-            "entry_price": pos.get("entry_price"),
-            "entry_execution_price": pos.get("entry_execution_price"),
-            "exit_price": price,
-            "exit_execution_price": exec_price,
-            "alert_execution_diff_pct": alert_diff_pct,
-            "entry_at": pos.get("entry_at"),
-            "exit_tv_time": normalized.get("tv_time"),
-            "weight": pos.get("weight"),
-            "notional_usd": pos.get("notional_usd"),
-            "pnl_pct": float(dec_pct(pct)),
-            "weighted_pnl_pct": float(dec_pct(weighted_pct)),
-            "net_weighted_pnl_pct": float(dec_pct(net_weighted_pct)),
-            "gross_pnl_usd": float(dec_usd(gross_usd)),
-            "entry_fee_usd": float(dec_usd(entry_fee)),
-            "exit_fee_usd": float(dec_usd(exit_fee)),
-            "total_fees_usd": float(dec_usd(total_trade_fees)),
-            "funding_usd": float(dec_usd(funding_usd)),
-            "chart_type": normalized.get("chart_type"),
-            "okx_mark_price": normalized.get("okx_mark_price"),
-            "okx_last_price": normalized.get("okx_last_price"),
-            "pnl_usd": float(dec_usd(net_usd)),
-            "net_pnl_usd": float(dec_usd(net_usd)),
-            "fee_rate": fee_rate_for(liquidity),
-            "liquidity": liquidity,
-            "exit_signal_side": normalized["side"],
-        }
-        record_pipeline_event("paper_trade", normalized.get("signal_id"), trade)
-        # The paper_trade pipeline append above is an OUTPUT ledger, not state, so it
-        # stays in the live path and is NOT replayed. State changes below go through
-        # the effect/apply_effect path. Compute the post-close equity here (reusing
-        # the numbers above) so apply_effect just assigns it.
-        close_eff = _eff(
-            "close",
-            gross_usd=float(dec_usd(gross_usd)),
-            net_usd=float(dec_usd(net_usd)),
-            weighted_pct=float(dec_pct(weighted_pct)),
-            net_weighted_pct=float(dec_pct(net_weighted_pct)),
-            exit_fee=float(dec_usd(exit_fee)),
-            funding_usd=float(dec_usd(funding_usd)),
-            win=net_usd_dec > 0,
-        )
-        if compound:
-            cur_equity = ps.setdefault("equity", {})
-            close_eff["equity_set"] = float(dec_usd(D(cur_equity.get(sym, asset_budget_usd(sym))) + net_usd_dec))
-        _record_transition(state, account_key, policy_key, sym, close_eff, received_at)
-        event["actions"].append("CLOSE_" + str(pos.get("side", "")).upper())
-        event["closed_trade"] = trade
-        event["realized_pnl_pct"] = float(dec_pct(net_weighted_pct))
-        event["realized_pnl_usd"] = float(dec_usd(net_usd))
-        event["gross_pnl_usd"] = float(dec_usd(gross_usd))
-        event["fees_usd"] = float(dec_usd(total_trade_fees))
-        event["funding_usd"] = float(dec_usd(funding_usd))
-        # (symbol pop is performed by apply_effect for the close effect above.)
-
-    if decision == "SKIP" or weight_dec <= 0:
-        _record_transition(state, account_key, policy_key, sym, _eff("skip"), received_at)
-        event["actions"].append("SKIP_NO_NEW_ENTRY")
-        return event
-
-    if compound:
-        base_notional_dec = max(D("0"), D(ps.setdefault("equity", {}).get(sym, asset_budget_usd(sym)))) * D(asset_leverage(sym))
-        base_notional_usd = float(dec_usd(base_notional_dec))
-        event["base_notional_usd"] = base_notional_usd
-        event["equity_usd"] = float(dec_usd(ps.setdefault("equity", {}).get(sym, 0.0)))
-    notional_dec = base_notional_dec * weight_dec
-    qty_units_dec = (notional_dec / D(exec_price)) if D(exec_price) != 0 else D("0")
-    entry_fee_dec = D(fee_usd(float(notional_dec), liquidity))
-    notional = float(dec_usd(notional_dec))
-    qty_units = float(dec_units(qty_units_dec))
-    entry_fee = float(dec_usd(entry_fee_dec))
-    position = {
-        "side": target_side,
-        "entry_price": price,
-        "entry_execution_price": exec_price,
-        "alert_execution_diff_pct": alert_diff_pct,
-        "chart_type": normalized.get("chart_type"),
-        "okx_mark_price_at_entry": normalized.get("okx_mark_price"),
-        "okx_last_price_at_entry": normalized.get("okx_last_price"),
-        "entry_at": received_at,
-        "entry_tv_time": normalized.get("tv_time"),
-        "entry_signal_side": normalized.get("side"),
-        "weight": float(dec_pct(weight_dec)),
-        "base_notional_usd": float(dec_usd(base_notional_dec)),
-        "notional_usd": notional,
-        "qty_units": qty_units,
-        "entry_fee_usd": entry_fee,
-        "entry_fee_rate": entry_fee_rate,
-        "liquidity": liquidity,
-        "source_decision": decision,
-        "mtf_status": policy.get("mtf_status"),
-        "equity_usd": float(dec_usd((ps.get("equity") or {}).get(sym, 0.0))) if compound else None,
-    }
-    _record_transition(state, account_key, policy_key, sym, _eff("open", position=position, entry_fee=entry_fee), received_at)
-    event["entry_fee_usd"] = float(dec_usd(entry_fee))
-    event["actions"].append("OPEN_" + target_side.upper())
-    return event
-
-
-def apply_paper_trading(record: dict) -> list[dict]:
-    normalized = record.get("normalized") or {}
-    price = normalized.get("tv_signal_price")
-    if price is None:
-        return []
-    with _STATE_WRITE_LOCK:
-        state = load_paper_state()
-        events = []
-        realistic_base = realistic_base_notional_usd(normalized.get("symbol"))
-        for key in POLICY_KEYS:
-            policy = (record.get("policies") or {}).get(key) or {}
-            events.append(paper_apply_policy(state, normalized, record.get("payload") or {}, key, policy, float(price), record["received_at"], PAPER_BASE_NOTIONAL_USD, "policies", "Research $10k fixed"))
-            events.append(paper_apply_policy(state, normalized, record.get("payload") or {}, key, policy, float(price), record["received_at"], realistic_base, "realistic_policies", "Fixed budget x leverage"))
-            events.append(paper_apply_policy(state, normalized, record.get("payload") or {}, key, policy, float(price), record["received_at"], realistic_base, "compound_policies", "Compounding paper", compound=True))
-        state["updated_at"] = record["received_at"]
-        save_paper_state(state)
-        # Journal-mode lifecycle (REFACTOR_PLAN.md:218-221): once the live segment is
-        # large enough, write a verified checkpoint and rotate, so the next load replays
-        # only the bounded live tail. No-op in legacy mode. A write failure here fails
-        # closed (raises) -- this runs BEFORE execute_okx_if_enabled in build_record, so
-        # a blocked checkpoint also blocks submission.
-        _maybe_checkpoint_and_rotate(state)
-        return events
-
-
-def find_policy_event(events: list[dict], policy_key: str, account_key: str = "realistic_policies") -> dict | None:
-    for event in events or []:
-        if event.get("paper_account") == account_key and event.get("policy") == policy_key:
-            return event
-    return None
-
-
-def build_okx_execution_readiness(record: dict, paper_events: list[dict]) -> dict:
-    """Prepare the future OKX order intent without sending any exchange order."""
-    normalized = record.get("normalized") or {}
-    execution_cfg = CONFIG.get("execution", {}) or {}
-    risk_cfg = CONFIG.get("risk", {}) or {}
-    execution_policy = str(execution_cfg.get("execution_policy") or "duo_raw")
-    shadow_policy = str(execution_cfg.get("shadow_policy") or "duo_regime_rsi_30m")
-    execution_event = find_policy_event(paper_events, execution_policy)
-    shadow_event = find_policy_event(paper_events, shadow_policy)
-    asset_cfg = CONFIG.get("assets", {}).get(normalized.get("symbol"), {}) or {}
-    inst_id = asset_cfg.get("inst_id")
-    # The shadow / duo_raw path is observe-only: only a per-strategy submit_orders
-    # flag arms submission, and that lives on the strategy-file path. The dead config
-    # arming flags (execution.enabled / risk.allow_live_execution) are gone.
-    live_allowed = False
-    signal_identity = _signal_identity(normalized)
-    # Distinct clOrdId per leg (close vs open) so a reversal's second leg is not
-    # rejected as a duplicate. ``client_order_id`` stays the OPEN-leg id.
-    client_order_id_close = stable_client_order_id(signal_identity, role="close")
-    client_order_id_open = stable_client_order_id(signal_identity, role="open")
-    client_order_id = client_order_id_open
-    weight = float((execution_event or {}).get("risk_weight") or 0.0)
-    base_notional = float((execution_event or {}).get("base_notional_usd") or realistic_base_notional_usd(normalized.get("symbol")))
-    planned_notional = float(dec_notional(D(base_notional) * D(weight)))
-    plan = {
-        "mode": "live_order_enabled" if live_allowed else "dry_run_no_order",
-        "live_execution_enabled": live_allowed,
-        "execution_policy": execution_policy,
-        "execution_policy_label": POLICY_LABELS.get(execution_policy, execution_policy),
-        "shadow_policy": shadow_policy,
-        "shadow_policy_label": POLICY_LABELS.get(shadow_policy, shadow_policy),
-        "exchange": execution_cfg.get("exchange", "okx"),
-        "route": execution_cfg.get("route", "okx_api"),
-        "account": execution_cfg.get("account", "sandbox"),
-        "symbol": normalized.get("symbol"),
-        "inst_id": inst_id,
-        "expected_leverage": asset_cfg.get("leverage"),
-        "td_mode": execution_cfg.get("td_mode", "cross"),
-        "timeframe": normalized.get("timeframe"),
-        "tv_time": normalized.get("tv_time"),
-        "signal_side": normalized.get("side"),
-        "signal_price": normalized.get("tv_signal_price"),
-        "execution_intent": {
-            "policy": execution_policy,
-            "decision": (execution_event or {}).get("decision"),
-            "risk_weight": weight,
-            "actions": (execution_event or {}).get("actions", []),
-            "base_notional_usd": base_notional,
-            "planned_notional_usd": planned_notional,
-            "paper_execution_price": (execution_event or {}).get("okx_execution_price"),
-            "alert_execution_diff_pct": (execution_event or {}).get("alert_execution_diff_pct"),
-            "client_order_id": client_order_id,
-            "client_order_id_open": client_order_id_open,
-            "client_order_id_close": client_order_id_close,
-        },
-        "shadow_comparison": {
-            "policy": shadow_policy,
-            "decision": (shadow_event or {}).get("decision"),
-            "risk_weight": (shadow_event or {}).get("risk_weight"),
-            "actions": (shadow_event or {}).get("actions", []),
-            "paper_execution_price": (shadow_event or {}).get("okx_execution_price"),
-            "realized_pnl_usd": (shadow_event or {}).get("realized_pnl_usd"),
-        },
-        "okx_fill": {
-            "status": "not_sent_shadow" if not live_allowed else "ready_to_send_when_executor_enabled",
-            "order_id": None,
-            "client_order_id": client_order_id,
-            "avg_fill_price": None,
-            "filled_size": None,
-            "fee_usd": None,
-            "slippage_pct": None,
-            "position_after_order": None,
-        },
-        "block_reason": None if live_allowed else "OKX execution disabled: dry-run shadow only",
-    }
-    # The separate execution-plan.jsonl ledger was removed entirely (constant + sweep
-    # entry): nothing consumed it. The authoritative submission outcome is recorded to
-    # pipeline.jsonl (stage="execution"), which the dashboard reads.
-    return plan
 
 
 def build_strategy_execution_readiness(record: dict) -> dict:
@@ -2607,11 +1538,10 @@ def order_state_can_transition(old: "str | None", new: str) -> bool:
     return new in _ORDER_STATE_TRANSITIONS.get(old, frozenset())
 
 
-# Monotonic seq for the ORDER journal -- a SEPARATE counter from _journal_next_seq
-# (the position journal). Derived once from the checkpoint floor + sealed-segment seqs
-# + live tail at first use, then incremented in-process; reset to None on module
-# (re)load. Survives rotation+restart because the floor folds in the checkpoint and the
-# sealed filenames (encoded seq, no file read), mirroring _journal_next_seq.
+# Monotonic seq for the ORDER journal. Derived once from the checkpoint floor +
+# sealed-segment seqs + live tail at first use, then incremented in-process; reset to
+# None on module (re)load. Survives rotation+restart because the floor folds in the
+# checkpoint and the sealed filenames (encoded seq, no file read).
 _order_journal_seq_cache: "int | None" = None
 
 # In-memory index rebuilt once (lazily) from the bounded tail and updated on every
@@ -3252,77 +2182,6 @@ def emit_reconcile_alert(kind: str, detail: dict) -> dict:
     return record
 
 
-def _expected_positions_from_state(state: dict) -> dict:
-    """PURE: derive the locally-EXPECTED position per symbol from paper/journal state.
-
-    Returns ``symbol -> {direction: long|short|mixed, policies: [account:policy, ...]}``
-    for every symbol any paper policy bucket currently holds. Flat symbols are absent.
-    'mixed' marks symbols held both long and short across policies (sign-incomparable)."""
-    out: dict = {}
-    for account_key in ("policies", "realistic_policies", "compound_policies"):
-        for policy_key, ps in (state.get(account_key) or {}).items():
-            for symbol, pos in ((ps or {}).get("symbols") or {}).items():
-                if not isinstance(pos, dict):
-                    continue
-                direction = pos.get("side") or pos.get("direction") or "long"
-                cur = out.setdefault(symbol, {"direction": direction, "policies": []})
-                if cur["direction"] != direction:
-                    cur["direction"] = "mixed"
-                cur["policies"].append(f"{account_key}:{policy_key}")
-    return out
-
-
-def _symbol_inst_map_from_orders(records: list) -> dict:
-    """PURE: build symbol -> inst_id from order-journal intents (latest wins). The
-    paper state keys positions by symbol; the exchange keys them by instId, so this
-    bridges the two for the startup position comparison."""
-    out: dict = {}
-    for rec in records:
-        intent = rec.get("intent") or {}
-        symbol, inst = intent.get("symbol"), intent.get("inst_id")
-        if symbol and inst:
-            out[symbol] = inst
-    return out
-
-
-def reconcile_positions_once(executor, expected: dict, symbol_to_inst: dict) -> list:
-    """Compare local expected positions against OKX /account/positions (:210/:215).
-    Emits a RECONCILE_MISMATCH alert per divergent symbol and returns the list of
-    mismatch details. OBSERVE-ONLY: detects + alerts, never trades."""
-    by_inst: dict = {}
-    for p in executor.get_positions() or []:
-        inst = p.get("inst_id")
-        if inst is not None:
-            by_inst[inst] = _reconcile_float(p.get("pos"), 0.0)
-
-    inst_to_symbol = {inst: sym for sym, inst in symbol_to_inst.items()}
-    symbols = set(expected) | {inst_to_symbol[i] for i in by_inst if i in inst_to_symbol}
-
-    mismatches: list = []
-    for symbol in sorted(symbols):
-        inst = symbol_to_inst.get(symbol)
-        exch_pos = by_inst.get(inst, 0.0) if inst else 0.0
-        exch_dir = "long" if exch_pos > 0 else "short" if exch_pos < 0 else "flat"
-        local = expected.get(symbol)
-        local_dir = local["direction"] if local else "flat"
-        local_flat, exch_flat = local_dir == "flat", exch_dir == "flat"
-        divergent = (local_flat != exch_flat) or (
-            not local_flat and not exch_flat and local_dir != "mixed" and local_dir != exch_dir
-        )
-        if divergent:
-            detail = {
-                "symbol": symbol,
-                "inst_id": inst,
-                "local_direction": local_dir,
-                "exchange_direction": exch_dir,
-                "exchange_pos": exch_pos,
-                "policies": (local or {}).get("policies", []),
-            }
-            emit_reconcile_alert(RECONCILE_ALERT_MISMATCH, detail)
-            mismatches.append(detail)
-    return mismatches
-
-
 def _effective_execution_config() -> dict:
     """The execution config the write path actually resolves: CONFIG with an
     optional HERMX_EXEC_BACKEND override applied to execution.exchange.
@@ -3359,16 +2218,14 @@ def _reconciliation_executor():
 
 def reconcile_startup(executor=None) -> dict:
     """One-time startup reconcile bootstrap (:215, acceptance :236). OBSERVE-ONLY:
-
-      (a) reconcile every still-open order (load_open_orders) against the exchange and,
-          where the venue reports a terminal outcome and the journal state legally
-          allows it, write the authoritative terminal transition;
-      (b) compare local expected positions (paper/journal) vs OKX positions for traded
-          symbols and emit RECONCILE_MISMATCH on divergence.
+    reconcile every still-open order (load_open_orders) against the exchange and,
+    where the venue reports a terminal outcome and the journal state legally allows
+    it, write the authoritative terminal transition.
 
     Sets RECONCILE_STARTUP_COMPLETE + RECONCILE_STARTUP_AT for FUTURE enforcement; it
-    does NOT auto-trade and does NOT hard-block submission in this task. Returns a
-    summary dict (also useful for tests)."""
+    does NOT auto-trade and does NOT hard-block submission in this task. ``summary``
+    keeps an (always-empty) ``position_mismatches`` list for backward-compatible shape.
+    Returns a summary dict (also useful for tests)."""
     global RECONCILE_STARTUP_COMPLETE, RECONCILE_STARTUP_AT
     if executor is None:
         executor = _reconciliation_executor()
@@ -3414,14 +2271,6 @@ def reconcile_startup(executor=None) -> dict:
                 "cl_ord_id": cl, "from": cur_state, "outcome": recon_state,
                 "reason": outcome["reason"], "wrote_transition": wrote,
             })
-
-        try:
-            state = load_paper_state()
-            expected = _expected_positions_from_state(state)
-            sym_map = _symbol_inst_map_from_orders(load_open_orders())
-            summary["position_mismatches"] = reconcile_positions_once(executor, expected, sym_map)
-        except Exception as exc:  # pragma: no cover - tolerant
-            summary["errors"].append(f"reconcile_positions: {exc}")
 
     RECONCILE_STARTUP_COMPLETE = True
     RECONCILE_STARTUP_AT = now_iso()
@@ -4076,13 +2925,6 @@ def execute_okx_with_advisor(record: dict) -> dict:
     return execute_okx_if_enabled(record)
 
 
-def primary_decision_from_policies(policies: dict) -> dict:
-    if PRIMARY_POLICY_SELECTED and PRIMARY_POLICY in policies:
-        return policies[PRIMARY_POLICY]
-    # Compatibility fallback for the legacy top-level decision field. The actual
-    # dashboard and ledger keep every policy side by side while primary is unset.
-    return policies.get("duo_raw") or policies.get("v52_fast_1h") or policies.get("v6_regime_duo") or {}
-
 def build_record(payload: dict, received_at_override: str | None = None) -> tuple[int, dict]:
     normalized = normalize(payload)
     if normalized["side"] not in ALLOWED_SIDES:
@@ -4144,8 +2986,8 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
     if duplicate:
         record = {
             "received_at": received_at,
-            "mode": "strategy_file_trial" if strategy_config else "vps_parallel_shadow",
-            "config_snapshot": {"mode": CONFIG.get("mode"), "primary_policy": PRIMARY_POLICY, "base_notional_usd": PAPER_BASE_NOTIONAL_USD, "fees": CONFIG.get("fees"), "funding": CONFIG.get("funding"), "asset": CONFIG.get("assets", {}).get(normalized.get("symbol"))},
+            "mode": "strategy_file_trial" if strategy_config else "no_strategy_match",
+            "config_snapshot": {"mode": CONFIG.get("mode"), "fees": CONFIG.get("fees"), "funding": CONFIG.get("funding"), "asset": CONFIG.get("assets", {}).get(normalized.get("symbol"))},
             "ok": True,
             "duplicate": True,
             "dedupe": dedupe,
@@ -4216,57 +3058,26 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
         _atomic_json_dump(LATEST_FILE, record)
         return 200, record
 
-    health = latest_tab_health()
-    mxc_values = None
-    mxc_error = None
-    if read_indicator_values is not None:
-        mxc_values, mxc_error = read_indicator_values_stable(normalized["symbol"], normalized["timeframe"])
-        if not mxc_core_ok(mxc_values):
-            cached = cached_health_values(health, normalized["symbol"], normalized["timeframe"])
-            if cached:
-                mxc_values = cached
-                mxc_error = f"live_read_incomplete_used_health_cache:{mxc_error}"
-            else:
-                trigger_health_repair("primary_live_read_incomplete", normalized["symbol"], normalized["timeframe"])
-
-    mtf_values = {}
-    mtf_errors = {}
-    if read_indicator_values is not None:
-        mtf_values, mtf_errors = read_mtf_values(normalized["symbol"])
-        for tf in ACTIVE_MTF_TIMEFRAMES:
-            if not mxc_core_ok(mtf_values.get(tf)):
-                cached = cached_health_values(health, normalized["symbol"], tf)
-                if cached:
-                    mtf_values[tf] = cached
-                    mtf_errors[tf] = f"live_read_incomplete_used_health_cache:{mtf_errors.get(tf)}"
-
-    health_gate = health_gate_for(normalized["symbol"], health, mxc_values, mtf_values)
-    policies = build_policies(normalized, mxc_values, mtf_values)
-    policies = apply_health_gate(policies, health_gate)
-    decision = primary_decision_from_policies(policies)
+    # No strategy file matched. The legacy shadow/policy engine (mxc reads, policy
+    # decisions, paper trading) that used to process these generic alerts has been
+    # removed, so a non-strategy alert is now an observe-only no-op: it is recorded
+    # but never decisioned or executed.
     record = {
         "received_at": received_at,
-        "mode": "vps_parallel_shadow",
-        "config_snapshot": {"mode": CONFIG.get("mode"), "primary_policy": PRIMARY_POLICY, "base_notional_usd": PAPER_BASE_NOTIONAL_USD, "fees": CONFIG.get("fees"), "funding": CONFIG.get("funding"), "asset": CONFIG.get("assets", {}).get(normalized.get("symbol"))},
+        "mode": "no_strategy_match",
+        "config_snapshot": {"mode": CONFIG.get("mode"), "asset": CONFIG.get("assets", {}).get(normalized.get("symbol"))},
         "ok": True,
         "payload": payload,
         "normalized": normalized,
         "duplicate": False,
         "dedupe": dedupe,
         "latency": latency,
-        "market_context": {"chart_type": normalized.get("chart_type"), "okx_mark_price": normalized.get("okx_mark_price"), "okx_last_price": normalized.get("okx_last_price"), "funding_enabled": PAPER_FUNDING_ENABLED, "funding_rate": funding_rate_from_payload(payload)},
-        "mxc_values": mxc_values,
-        "mxc_error": mxc_error,
-        "mtf_values": mtf_values,
-        "mtf_errors": mtf_errors,
-        "health_gate": health_gate,
-        "decision": decision,
-        "policies": policies,
+        "market_context": {"chart_type": normalized.get("chart_type"), "okx_mark_price": normalized.get("okx_mark_price"), "okx_last_price": normalized.get("okx_last_price")},
+        "strategy_config": None,
+        "decision": {},
+        "policies": {},
+        "paper_events": [],
     }
-    paper_events = apply_paper_trading(record)
-    record["paper_events"] = paper_events
-    record["execution_readiness"] = build_okx_execution_readiness(record, paper_events)
-    record["okx_execution"] = execute_okx_if_enabled(record)
     record_raw_webhook("webhook", {"received_at": record["received_at"], "payload": payload, "normalized": normalized})
     record_pipeline_event("decision", normalized.get("signal_id"), record)
     _atomic_json_dump(LATEST_FILE, record)

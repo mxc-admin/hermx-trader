@@ -22,7 +22,6 @@ from dashboard_core import (
     build_combined_events,
     colombia_time,
     display_time,
-    merged_replay_state,
     normalize_policy_decision,
     okx_swap_tickers,
     parse_dt,
@@ -596,10 +595,9 @@ def backfill_state():
 
 
 def load_events():
-    merged = merged_replay_state()
     backfill = backfill_state()
     live_rows = real_decisions()
-    _historical_with_live, hist_only, live = build_combined_events(merged, live_rows)
+    _historical_with_live, hist_only, live = build_combined_events({}, live_rows)
 
     live_record_by_key = {}
     for record in live_rows:
@@ -1426,56 +1424,8 @@ def health_payload():
     }
 
 
-def policy_totals(policy):
-    st = policy["stats"]
-    total = policy["ending_equity"] - policy["initial_equity"]
-    closed = int(st["closed"])
-    return {
-        "Initial": money(policy["initial_equity"], 0),
-        "Now": money(policy["ending_equity"], 2),
-        "Total PnL": money(total, 2),
-        "Closed PnL": money(st["closed_net"], 2),
-        "Floating": money(policy["floating"], 2),
-        "Win rate": pct((st["wins"] / closed * 100.0) if closed else None),
-        "Trades": str(int(st["entries"])),
-        "Fees": money(st["fees"], 2),
-        "Max DD": money(st["max_dd"], 2),
-    }
-
-
 def metric_cards(items):
     return '<div class="metrics">' + ''.join(f'<div class="metric"><span>{esc(k)}</span><b>{esc(v)}</b></div>' for k, v in items.items()) + '</div>'
-
-
-def asset_card(policy_key, policy, sym):
-    asset = policy["assets"][sym]
-    pos = asset.get("position")
-    pos_html = badge("FLAT", "muted")
-    if pos:
-        pos_html = badge(pos["side"].upper(), side_kind(pos["side"])) + f' <span class="sub">entry {num(pos["entry"], 4)} / {num(pos["weight"], 2)}x</span>'
-    rows = [r for r in policy["rows"] if r["symbol"] == sym]
-    closed = int(asset["closed"])
-    wr = pct((asset["wins"] / closed * 100.0) if closed else None)
-    return f"""
-    <section class="asset-card">
-      <div class="asset-head">
-        <h3>{esc(sym)}</h3>
-        <div>{badge(money(asset['budget'], 0) + " budget", "neutral")} {badge(str(int(asset['leverage'])) + "x", "neutral")}</div>
-      </div>
-      <div class="position-line">{pos_html}</div>
-      {metric_cards({
-        "Trades": str(int(asset["entries"])),
-        "Initial": money(asset["budget"], 0),
-        "Now": money(asset["current_equity"], 2),
-        "Closed": money(asset["closed_net"], 2),
-        "Floating": money(asset["floating"], 2),
-        "Win rate": wr,
-        "Fees": money(asset["fees"], 2),
-        "Max DD": money(asset["max_dd"], 2),
-      })}
-      <div class="table-wrap">{asset_table(rows[-80:])}</div>
-    </section>
-    """
 
 
 def reason_details(row):
@@ -1513,53 +1463,6 @@ def asset_table(rows):
       <thead><tr><th>Fecha</th><th>TF</th><th>Signal</th><th>Precio</th><th>Position action</th><th>Trade effect</th><th>Why</th><th>Weight</th><th>Fees</th><th>PnL</th><th>Budget after</th></tr></thead>
       <tbody>{''.join(body)}</tbody>
     </table>
-    """
-
-
-def shadow_asset_card(policy_key, policy, sym):
-    asset = policy["assets"][sym]
-    meta = ASSET_META.get(sym, {"name": sym, "logo": ""})
-    pos = asset.get("position")
-    if pos:
-        pos_kind = str(pos.get("side") or "").lower()
-        pos_html = f'<span class="position-pill {esc(pos_kind)}">{esc(pos_kind.upper())}</span> <span class="sub">entry {num(pos.get("entry"), 4)} / {num(pos.get("weight"), 2)}x</span>'
-    else:
-        pos_html = '<span class="position-pill flat">FLAT</span>'
-    closed = int(asset["closed"])
-    wr = pct((asset["wins"] / closed * 100.0) if closed else None)
-    return f"""
-    <section class="asset-card clean-card" data-symbol="{esc(sym)}">
-      <div class="asset-head">
-        <div class="asset-title">
-          <img class="asset-logo" src="{esc(meta.get('logo'))}" alt="{esc(meta.get('name'))} logo" loading="lazy">
-          <div>
-            <h3>{esc(sym)}</h3>
-            <p>{esc(meta.get('name'))}</p>
-          </div>
-        </div>
-        <div>{badge(money(asset['budget'], 0) + " budget", "neutral")} {badge(str(int(asset['leverage'])) + "x", "neutral")}</div>
-      </div>
-      <div class="card-status">
-        <div>
-          <span class="label">Shadow position</span>
-          <div class="position-line">{pos_html} {badge("paper replay", "neutral")}</div>
-        </div>
-        <div class="live-price">
-          <span class="label">Mark used</span>
-          <b>{num(asset.get("mark"), 4)}</b>
-        </div>
-      </div>
-      {metric_cards({
-        "Trades": str(int(asset["entries"])),
-        "Initial budget": money(asset["budget"], 0),
-        "Strategy now": money(asset["current_equity"], 2),
-        "Strategy closed": money(asset["closed_net"], 2),
-        "Strategy floating": money(asset["floating"], 2),
-        "Win rate": wr,
-        "Fees": money(asset["fees"], 2),
-        "Max DD": money(asset["max_dd"], 2),
-      })}
-    </section>
     """
 
 
@@ -1640,42 +1543,6 @@ def okx_live_card(config, okx_live, sym, first_trade_time=None):
         "PnL now": money(total_pnl, 2),
       })}
     </section>
-    """
-
-
-def shadow_vs_okx_table(policy, okx_live):
-    body = []
-    for sym in SYMBOLS:
-        asset = policy["assets"][sym]
-        shadow_pos = asset.get("position") or {}
-        okx_pos = ((okx_live or {}).get("positions") or {}).get(sym) or {}
-        shadow_side = str(shadow_pos.get("side") or "FLAT").upper()
-        okx_side = str(okx_pos.get("side") or "UNKNOWN").upper()
-        floating = as_float(asset.get("floating")) or 0.0
-        okx_upl = as_float(okx_pos.get("upl"))
-        diff = (okx_upl - floating) if okx_upl is not None else None
-        body.append(f"""
-        <tr>
-          <td><b>{esc(sym)}</b></td>
-          <td>{badge(shadow_side, side_kind(shadow_side))}</td>
-          <td>{num(shadow_pos.get('entry'), 4)}</td>
-          <td>{money(shadow_pos.get('notional'), 0)}</td>
-          <td>{badge(okx_side, side_kind(okx_side))}</td>
-          <td>{num(okx_pos.get('avg_px'), 4)}</td>
-          <td>{money(okx_pos.get('notional_usd'), 0)}</td>
-          <td>{money(floating, 2)}</td>
-          <td>{money(okx_upl, 2)}</td>
-          <td>{money(diff, 2)}</td>
-          <td>{esc(okx_pos.get('margin_mode') or '-')} / {esc(okx_pos.get('leverage') or '-')}x</td>
-        </tr>
-        """)
-    return f"""
-    <div class="table-wrap compact-table">
-      <table>
-        <thead><tr><th>Asset</th><th>Shadow pos</th><th>Shadow entry</th><th>Shadow notional</th><th>OKX pos</th><th>OKX avg</th><th>OKX notional</th><th>Shadow floating</th><th>OKX UPL</th><th>Diff</th><th>OKX mode</th></tr></thead>
-        <tbody>{''.join(body)}</tbody>
-      </table>
-    </div>
     """
 
 
@@ -1776,20 +1643,6 @@ def okx_demo_live_section(config, okx_live, okx_executions):
         </div>
         <div class="table-wrap unified-log">{okx_execution_table(okx_executions, live_info)}</div>
       </section>
-    </section>
-    """
-
-
-def okx_comparison_only_section(policy, okx_live):
-    return f"""
-    <section class="subsection comparison-section">
-      <div class="log-head">
-        <div>
-          <h3>Shadow vs OKX Diff</h3>
-          <p>This policy is not submitting OKX orders. The table compares its shadow state with the actual OKX demo account driven by Duo Crypto Full.</p>
-        </div>
-      </div>
-      {shadow_vs_okx_table(policy, okx_live)}
     </section>
     """
 
@@ -2154,64 +2007,6 @@ def strategy_trial_tab(strategies, alerts, okx_live, okx_executions):
         <div class="table-wrap unified-log">{strategy_alert_table(alerts)}</div>
       </section>
       {order_state_section()}
-    </section>
-    """
-
-
-def paper_replay_section(policy_key, policy):
-    live_row_ids = {
-        pos.get("entry_row_id")
-        for pos in (policy.get("symbols") or {}).values()
-        if isinstance(pos, dict) and pos.get("entry_row_id")
-    }
-    return f"""
-    <section class="subsection shadow-section">
-      <div class="log-head">
-        <div>
-          <h3>Shadow / Paper Replay</h3>
-          <p>May 1 to current replay plus new webhook alerts. This is the strategy accounting, not the OKX account.</p>
-        </div>
-      </div>
-      {metric_cards(policy_totals(policy))}
-      <div class="asset-grid">{''.join(shadow_asset_card(policy_key, policy, sym) for sym in SYMBOLS)}</div>
-      <section class="trade-log-card nested">
-        <div class="log-head">
-          <h3>Strategy Trade Log</h3>
-          <p>All XRP, SOL and ETH signals for this strategy, sorted by signal time. Click Decision to inspect Regime/RSI context.</p>
-        </div>
-        <div class="table-wrap unified-log">{trade_log(policy["rows"], live_row_ids)}</div>
-      </section>
-    </section>
-    """
-
-
-def policy_tab(policy_key, policy, okx_live, okx_executions, config):
-    desc = POLICY_DESCRIPTIONS.get(policy_key, "")
-    second_label = "OKX Demo Live" if policy_key == "duo_raw" else "Comparison"
-    second_id = f"{policy_key}-okx" if policy_key == "duo_raw" else f"{policy_key}-comparison"
-    second_panel = (
-        okx_demo_live_section(config, okx_live, okx_executions) + okx_comparison_only_section(policy, okx_live)
-        if policy_key == "duo_raw"
-        else okx_comparison_only_section(policy, okx_live)
-    )
-    return f"""
-    <section class="tab-panel" id="{esc(policy_key)}">
-      <div class="section-head">
-        <div>
-          <h2>{esc(policy['label'])}</h2>
-          <p>{esc(desc)}</p>
-        </div>
-      </div>
-      <nav class="subtabs" data-parent="{esc(policy_key)}">
-        <button class="subtab-btn" data-parent="{esc(policy_key)}" data-target="{esc(policy_key)}-paper">Paper Replay</button>
-        <button class="subtab-btn" data-parent="{esc(policy_key)}" data-target="{esc(second_id)}">{esc(second_label)}</button>
-      </nav>
-      <section class="subtab-panel" data-parent="{esc(policy_key)}" id="{esc(policy_key)}-paper">
-        {paper_replay_section(policy_key, policy)}
-      </section>
-      <section class="subtab-panel" data-parent="{esc(policy_key)}" id="{esc(second_id)}">
-        {second_panel}
-      </section>
     </section>
     """
 

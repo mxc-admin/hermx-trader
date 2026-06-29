@@ -1,8 +1,0 @@
-{
-  "_fixture_note": "Clean empty paper-state seed (load_paper_state version-3 shape). Used by the paper round-trip characterization test to assert a deterministic starting point before the buy->sell sequence. Stored under a non-gitignored name; the harness copies it into the temp SHADOW_ROOT as paper-state.json when a test requests a pre-seeded state.",
-  "version": 3,
-  "updated_at": null,
-  "policies": {},
-  "realistic_policies": {},
-  "compound_policies": {}
-}

@@ -332,19 +332,12 @@ def test_reconcile_disabled_uses_stdout_outcome(wr, monkeypatch):
 # (g) startup bootstrap: open-order reconcile + position mismatch + flag.
 # ---------------------------------------------------------------------------
 
-def test_startup_reconcile_open_orders_and_position_mismatch(wr, monkeypatch):
+def test_startup_reconcile_open_orders(wr, monkeypatch):
     cl = "mxc-xrpusdt-buy-startup00000001"
     # Seed an OPEN (SUBMITTED) order in the journal with a symbol/inst intent.
     intent = {"symbol": "XRPUSDT", "side": "buy", "inst_id": "XRP-USDT-SWAP", "planned_notional_usd": 1500.0, "policy": "weighted_v1"}
     wr.record_order_state(cl, wr.ORDER_STATE_PLANNED, intent=intent, prev_state=None)
     wr.record_order_state(cl, wr.ORDER_STATE_SUBMITTED, intent=intent, prev_state=wr.ORDER_STATE_PLANNED)
-
-    # Local paper state holds a LONG XRPUSDT position; exchange is FLAT => mismatch.
-    wr.save_paper_state({
-        "version": 3,
-        "policies": {"weighted_v1": {"label": "w", "symbols": {"XRPUSDT": {"direction": "long"}}, "stats": {}}},
-        "realistic_policies": {}, "compound_policies": {},
-    })
 
     stub = StubExecutor(order=norm_order("filled", cl_ord_id=cl, acc=10.0, avg=0.5), positions=[])
     summary = wr.reconcile_startup(executor=stub)
@@ -361,56 +354,19 @@ def test_startup_reconcile_open_orders_and_position_mismatch(wr, monkeypatch):
     assert records[-1]["state"] == wr.ORDER_STATE_FILLED
     assert records[-1]["detail"]["startup_reconcile"] is True
 
-    # Position divergence emitted a RECONCILE_MISMATCH alert (does NOT auto-trade).
-    assert len(summary["position_mismatches"]) == 1
-    assert summary["position_mismatches"][0]["symbol"] == "XRPUSDT"
-    alerts = wr.read_jsonl_tolerant(wr.ALERTS_LEDGER)
-    pos_mism = [a for a in alerts if a.get("kind") == "reconcile" and a["alert"] == "RECONCILE_MISMATCH" and a["detail"].get("symbol") == "XRPUSDT"]
-    assert pos_mism and pos_mism[0]["detail"]["local_direction"] == "long"
-    assert pos_mism[0]["detail"]["exchange_direction"] == "flat"
+    # position_mismatches retains a backward-compatible (always-empty) shape now that
+    # the paper/journal position comparison has been removed.
+    assert summary["position_mismatches"] == []
 
 
 def test_startup_reconcile_clean_match_no_alert(wr, monkeypatch):
-    # Flat local + flat exchange + no open orders => clean, no mismatch (:236).
-    wr.save_paper_state({"version": 3, "policies": {}, "realistic_policies": {}, "compound_policies": {}})
+    # Flat exchange + no open orders => clean, no mismatch (:236).
     stub = StubExecutor(positions=[])
     summary = wr.reconcile_startup(executor=stub)
     assert wr.RECONCILE_STARTUP_COMPLETE is True
     assert summary["open_orders"] == []
     assert summary["position_mismatches"] == []
     assert not wr.ALERTS_LEDGER.exists()
-
-
-def test_expected_positions_pure_helper(wr):
-    state = {
-        "policies": {"p1": {"symbols": {"XRPUSDT": {"direction": "long"}}}},
-        "realistic_policies": {"p2": {"symbols": {"XRPUSDT": {"direction": "short"}}}},
-        "compound_policies": {},
-    }
-    expected = wr._expected_positions_from_state(state)
-    # Held long by one policy and short by another => 'mixed' (sign-incomparable).
-    assert expected["XRPUSDT"]["direction"] == "mixed"
-    assert sorted(expected["XRPUSDT"]["policies"]) == ["policies:p1", "realistic_policies:p2"]
-
-
-def test_expected_positions_prefers_side_over_direction(wr):
-    state = {
-        "policies": {"p1": {"symbols": {"XRPUSDT": {"side": "short", "direction": "long"}}}},
-        "realistic_policies": {},
-        "compound_policies": {},
-    }
-    expected = wr._expected_positions_from_state(state)
-    assert expected["XRPUSDT"]["direction"] == "short"
-
-
-def test_expected_positions_uses_side_when_direction_absent(wr):
-    state = {
-        "policies": {"p1": {"symbols": {"XRPUSDT": {"side": "short"}}}},
-        "realistic_policies": {},
-        "compound_policies": {},
-    }
-    expected = wr._expected_positions_from_state(state)
-    assert expected["XRPUSDT"]["direction"] == "short"
 
 
 # ---------------------------------------------------------------------------
@@ -516,18 +472,6 @@ def test_startup_reconcile_submitted_to_rejected_observe_only(wr):
     assert wr.load_open_orders() == []  # REJECTED is terminal
 
 
-def test_startup_reconcile_position_mismatch_never_trades(wr):
-    # Local LONG vs exchange FLAT => alert only; the observe-only stub proves no trade.
-    wr.save_paper_state({
-        "version": 3,
-        "policies": {"weighted_v1": {"label": "w", "symbols": {"XRPUSDT": {"direction": "long"}}, "stats": {}}},
-        "realistic_policies": {}, "compound_policies": {},
-    })
-    stub = ObserveOnlyStub(positions=[])
-    summary = wr.reconcile_startup(executor=stub)
-    assert len(summary["position_mismatches"]) == 1  # detected + alerted, not corrected
-
-
 def test_post_submit_reconcile_is_observe_only(wr, monkeypatch):
     # The SUBMIT goes through the (separate) CCXT submit executor; the post-submit
     # RECONCILIATION executor is read-only and must never be asked to trade.
@@ -575,36 +519,3 @@ def test_startup_not_found_orphan_stays_unknown_not_rejected(wr):
     assert len(open_orders) == 1 and open_orders[0]["state"] == wr.ORDER_STATE_SUBMITTED
 
 
-def test_startup_position_reconcile_uses_symbols_from_sealed_segments(wr, monkeypatch):
-    # After the order journal ROTATES, the open order's latest record lives in a sealed
-    # segment, NOT the live segment. reconcile_startup must source its symbol->inst map
-    # from load_open_orders() (checkpoint + live tail), not the live segment alone, or it
-    # goes blind to the symbol and silently fails to detect the position divergence.
-    monkeypatch.setattr(wr, "HERMX_JOURNAL_SEGMENT_MAX_RECORDS", 4)
-    intent = {"symbol": "XRPUSDT", "side": "buy", "inst_id": "XRP-USDT-SWAP", "planned_notional_usd": 1500.0, "policy": "weighted_v1"}
-    cl = "mxc-xrpusdt-buy-sealed00000001"
-    wr.record_order_state(cl, wr.ORDER_STATE_PLANNED, intent=intent, prev_state=None)
-    wr.record_order_state(cl, wr.ORDER_STATE_SUBMITTED, intent=intent, prev_state=wr.ORDER_STATE_PLANNED)
-    # Two filler PLANNED orders trip the cap (4 records) -> checkpoint + rotate. The
-    # XRPUSDT SUBMITTED record is now sealed; the live segment no longer carries it.
-    for fc in ("mxc-filler-aaaaaaaaaaaaaaaaa1", "mxc-filler-bbbbbbbbbbbbbbbbb2"):
-        wr.record_order_state(fc, wr.ORDER_STATE_PLANNED,
-                              intent={"symbol": "ETHUSDT", "side": "buy", "inst_id": "ETH-USDT-SWAP"}, prev_state=None)
-
-    assert wr.ORDER_JOURNAL_CHECKPOINT_FILE.exists()
-    # The whole point: the live segment is blind to XRPUSDT after rotation, but the
-    # checkpoint-aware reader still sees it (this is what the fix switches sym_map to).
-    assert wr._symbol_inst_map_from_orders(wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)) == {}
-    assert wr._symbol_inst_map_from_orders(wr.load_open_orders())["XRPUSDT"] == "XRP-USDT-SWAP"
-
-    # Local paper state is flat; the exchange holds a LONG XRP position => divergence that
-    # is only detectable if the symbol map came from the (sealed) open order.
-    wr.save_paper_state({"version": 3, "policies": {}, "realistic_policies": {}, "compound_policies": {}})
-    stub = ObserveOnlyStub(order=norm_not_found(), pending=[], archive=[],
-                           positions=[norm_position("XRP-USDT-SWAP", 10.0)])
-    summary = wr.reconcile_startup(executor=stub)
-
-    xrp = [m for m in summary["position_mismatches"] if m["symbol"] == "XRPUSDT"]
-    assert xrp, "sealed-segment symbol must be reconciled via load_open_orders()"
-    assert xrp[0]["inst_id"] == "XRP-USDT-SWAP"
-    assert xrp[0]["exchange_direction"] == "long" and xrp[0]["local_direction"] == "flat"

@@ -82,20 +82,19 @@ def test_strategy_alert_writes_both_ledgers(wr, wr_root, monkeypatch):
     assert exec_rows[0]["okx_execution"]["mode"] == "submit_enabled"
 
 
-def test_shadow_alert_writes_both_ledgers_no_submit(wr, wr_root, monkeypatch):
-    """Shadow path: build_okx_execution_readiness + execute_okx_if_enabled. The duo
-    shadow readiness is dry-run under the demo config (no live execution keys), so it
-    is not_submitted and the stubbed executor is never reached."""
+def test_no_strategy_match_alert_is_observe_only_no_execution(wr, wr_root, monkeypatch):
+    """Generic (non-strategy) alert: the legacy shadow/policy engine that used to paper-
+    trade these was removed, so the alert is recorded observe-only with no okx_execution,
+    no execution pipeline row, and no execution-plan ledger."""
     _stub_executor(monkeypatch, wr)
 
     status, record = wr.build_record(load_alert("shadow/btcusdt_shadow_buy.json"), RECEIVED_AT)
     assert status == 200
+    assert record["mode"] == "no_strategy_match"
+    assert "okx_execution" not in record
 
-    exec_rows = _pipeline_stage(wr_root, "execution")
-    assert exec_rows
-    # The dead execution-plan.jsonl write was removed (see strategy-path test).
     assert not (wr_root / "logs" / "execution-plan.jsonl").exists()
-    assert exec_rows[0]["okx_execution"]["mode"] == "not_submitted"
+    assert _pipeline_stage(wr_root, "execution") == []
 
 
 def test_execute_okx_directly_appends_execution_ledger(wr, wr_root, monkeypatch):

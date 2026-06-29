@@ -80,7 +80,6 @@ def fixtures_dir() -> Path:
 
 CORPUS_STRATEGIES_DIR = FIXTURES_DIR / "strategies"
 CORPUS_CONFIG = FIXTURES_DIR / "config" / "shadow-config.dryrun.json"
-CORPUS_PAPER_SEED = FIXTURES_DIR / "state" / "paper-state.seed.json"
 
 
 def _build_populated_root(root: Path) -> None:
@@ -124,14 +123,6 @@ def wr(wr_root, monkeypatch):
         else:
             os.environ["SHADOW_ROOT"] = str(_SHADOW_ROOT)
         importlib.reload(module)
-
-
-@pytest.fixture
-def seed_paper_state(wr_root):
-    """Copy the empty paper-state seed into the active root and return it."""
-    dst = wr_root / "paper-state.json"
-    shutil.copy(CORPUS_PAPER_SEED, dst)
-    return dst
 
 
 @pytest.fixture

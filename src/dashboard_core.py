@@ -214,10 +214,6 @@ def okx_swap_tickers() -> dict:
         return OKX_TICKER_CACHE.get("data") or {}
 
 
-def merged_replay_state() -> dict:
-    return {}
-
-
 def build_combined_events(merged: dict, live_rows: list[dict]):
     live = []
     for record in live_rows:

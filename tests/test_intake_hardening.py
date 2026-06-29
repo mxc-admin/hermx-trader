@@ -89,7 +89,6 @@ def test_armed_and_available_alert_schema_no_alert(wr, monkeypatch):
 
 
 def test_latest_file_write_uses_atomic_dump(monkeypatch, tmp_path):
-    import src.webhook_receiver as wr
     calls = []
     monkeypatch.setattr(wr, "_atomic_json_dump", lambda p, d: calls.append((p, d)))
     monkeypatch.setattr(wr, "LATEST_FILE", tmp_path / "latest.json")
@@ -101,7 +100,6 @@ def test_latest_file_write_uses_atomic_dump(monkeypatch, tmp_path):
 
 
 def test_latest_corrupt_returns_503_not_500(monkeypatch, tmp_path):
-    import src.webhook_receiver as wr
     from io import BytesIO
     corrupt = tmp_path / "latest.json"
     corrupt.write_text("{ not : valid json", encoding="utf-8")
@@ -131,7 +129,6 @@ def test_latest_corrupt_returns_503_not_500(monkeypatch, tmp_path):
 
 def test_server_is_threading_with_handler_timeout():
     from http.server import ThreadingHTTPServer as StdThreadingHTTPServer
-    import src.webhook_receiver as wr
     assert wr.ThreadingHTTPServer is StdThreadingHTTPServer
     assert isinstance(wr.Handler.timeout, (int, float))
     assert wr.Handler.timeout > 0
