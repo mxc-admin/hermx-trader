@@ -65,3 +65,13 @@
 - **Decision:** Strategy file changes take effect via an explicit reload endpoint.
 - **Alternatives:** mtime poll / file watcher (rejected — race with in-flight signals).
 - **Rationale:** Explicit reload is deterministic and sub-second, with no race against signals being processed mid-reload.
+
+### Config splits into three sources of truth
+- **Decision:** Runtime config lives in `engine-config.json` (strategy_engine + advisor), per-strategy config lives in `strategies/*.json` (instrument, leverage, budget, execution_mode), exchange metadata comes from CCXT (fees, funding, venue details)
+- **Alternatives:** Monolithic `shadow-config.json` with all keys merged; or two files with exchange data still hardcoded
+- **Rationale:** Separating concerns prevents config drift. Strategy files are the single source for per-instrument settings. CCXT is the single source for exchange reality. `engine-config.json` is minimal and stable.
+
+### ALLOWED_SYMBOLS derives from STRATEGIES, not a config blob
+- **Decision:** `ALLOWED_SYMBOLS = frozenset(s.get("asset") for s in STRATEGIES.values())` instead of `CONFIG["assets"].keys()`
+- **Alternatives:** Keep a global `assets` block in config
+- **Rationale:** If a strategy file defines an asset, it's allowed by definition. No separate allow-list to maintain. Removes a class of "strategy exists but asset not in config" failures.

@@ -8,16 +8,33 @@ __pycache__
 *.pyc
 .pytest_cache
 *.egg-info
+.ruff_cache
 
 # VCS + dev artifacts
 .git
 .gitignore
 tests/
-node_modules
 *.log
 
-# Runtime state (persisted via the hermx-data volume, not the image)
+# Node / Next.js — stage 1 reinstalls + rebuilds from lockfile + source only.
+node_modules
+dashboard-ui/node_modules
+dashboard-ui/.next
+dashboard-ui/out
+dashboard-ui/tsconfig.tsbuildinfo
+
+# Runtime state (persisted via named volumes, never the image)
 /data
 logs/
 runtime/
 exports/
+
+# Operator-generated, host-only (never baked)
+WEBHOOK_URL.txt
+DASHBOARD_URL.txt
+ENABLED_STRATEGIES.txt
+HERMX_SECRET.txt
+control-state.json
+latest.json
+seen-signals.json
+paper-state.json

@@ -10,6 +10,9 @@ globs: ["**/*"]
 ### normalize() is non-deterministic for time-less payloads
 When a payload has no `tv_time`, `normalize()` falls back to `now_iso()`, yielding a different `signal_id` each call. On replay this breaks dedupe. Fix: drop time-less payloads on replay (never re-derive their id from wall-clock).
 
+### Dashboard regression when deleting a config source
+Deleting a config file or reducing a config function to `return {}` can break downstream consumers that relied on it for defaults. The `_dashboard_executor` set `exchange="ccxt"` when config was empty, but `"ccxt"` is a backend name — not a venue — so `CcxtExecutor._exchange_id()` returned `"ccxt"` instead of falling back to `"okx"`, causing `getattr(ccxt, "ccxt")` → `None`. When removing a config source, audit every consumer for masked defaults, especially where `or` chains mix backend and venue names.
+
 ## Anti-Patterns (populated by /learn)
 <!-- Entries added here as anti-patterns are identified -->
 

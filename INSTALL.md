@@ -597,7 +597,8 @@ not used**. Key properties of the default compose:
 - **Two named volumes** — `hermx-data` holds the append-only ledgers/logs (`/app/logs`,
   receiver rw, dashboard ro); `hermx-state` holds the four mutable state snapshots
   (`/app/data`: `paper-state.json`, `control-state.json`, `seen-signals.json`,
-  `latest.json`, receiver only).
+  `latest.json`). The dashboard shares `hermx-state` **rw** so live mode overrides it
+  writes to `control-state.json` land in the same volume the receiver reads.
 - **Hardened dashboard** — `read_only: true`, `cap_drop: [ALL]`, `tmpfs: /tmp`.
 - **Public ingress via Tailscale** — the `tailscale` sidecar joins your tailnet as
   `hermx` using `TS_AUTHKEY` from `.env` and proxies traffic per
@@ -620,6 +621,8 @@ not used**. Key properties of the default compose:
 
 With `.env`, `engine-config.json`, and `TS_AUTHKEY` in place:
 
+> Source clones build locally; for a repo-less install use Option C below.
+
 ```bash
 docker compose up -d --build
 docker compose ps
@@ -639,6 +642,50 @@ and your ledgers/state/node identity survive).
 > That file keeps `network_mode: host` and has no tunnel sidecar. Docker Desktop for
 > Mac does **not** implement `network_mode: host` the way Linux does, so the fallback
 > is Linux-only; the default bridge compose works anywhere Docker runs.
+
+### Option C — Docker package (no repo clone)
+
+For a fresh VPS where you want HermX without cloning the source. One command pulls the
+published image, seeds an `/opt/hermx` install dir from it, walks you through `.env`, and
+starts the stack:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mxc-admin/hermx-trader/main/scripts/install-docker.sh | bash
+```
+
+You will be prompted for: the exchange (1–8), its demo/sandbox/testnet credentials, and a
+Tailscale auth key. A `HERMX_SECRET` is generated for you. `HERMX_LIVE_TRADING=false` is
+written by default — nothing reaches a live exchange.
+
+What ends up on the VPS (`/opt/hermx/`):
+
+```
+/opt/hermx/
+├── docker-compose.yml          # extracted from the image
+├── docker-compose.host.yml     # host-networking fallback
+├── .env                        # your secrets (chmod 600)
+├── engine-config.json          # baked baseline; edit to tune the strategy engine
+├── strategies/                 # seeded from the image; edit these post-install
+│   ├── btcusdt_duo_base_dev_2h.json ...
+└── config/tailscale/serve.json # tailscale sidecar serve/funnel config
+```
+Named volumes (survive updates): `hermx_hermx-data`, `hermx_hermx-state`, `hermx_tailscale-state`.
+
+Verify, update, and edit:
+
+```bash
+cd /opt/hermx
+docker compose ps
+curl -sf http://127.0.0.1:8891/health && echo " receiver OK"
+curl -sf http://127.0.0.1:8098/health && echo " dashboard OK"
+
+# Update to a new release (state is preserved by the named volumes):
+docker compose pull && docker compose up -d
+
+# Edit strategies / engine config, then apply:
+nano strategies/btcusdt_duo_base_dev_2h.json
+docker compose restart
+```
 
 #### Migrating an existing Docker deployment
 

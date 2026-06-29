@@ -70,3 +70,17 @@
 - **Verdict:** REJECTED
 - **Reason:** Race conditions with in-flight signals (a reload mid-signal yields inconsistent strategy state). An explicit reload endpoint is deterministic and sub-second.
 - **Date:** June 2026
+
+### Preserving shadow-config.json as read-only fallback
+- **What:** Keep `shadow-config.json` for legacy callers while migrating to `engine-config.json`
+- **Tested:** grep audit showed zero remaining reads of `shadow-config.json` in `src/`
+- **Verdict:** REJECTED
+- **Reason:** The receiver, dashboard, and executor already read `engine-config.json`. A fallback file the system ignores creates silent divergence — the installer would produce a broken setup. Delete entirely and update all callers in one pass.
+- **Date:** June 2026
+
+### Preserving DEFAULT_CHART_TYPE, POLICY_KEYS, and synthetic fee/funding constants
+- **What:** Keep `DEFAULT_CHART_TYPE="heikin_ashi"`, `POLICY_KEYS`, `PERP_MAKER_FEE_RATE`, etc. as env-overridable defaults
+- **Tested:** Code review with user — questioned necessity of each constant
+- **Verdict:** REJECTED
+- **Reason:** `DEFAULT_CHART_TYPE` was never consumed by production (normalize uses payload or None). `POLICY_KEYS` served a dead policy engine. Fee/funding constants are fiction — CCXT provides real per-venue values. All deleted.
+- **Date:** June 2026

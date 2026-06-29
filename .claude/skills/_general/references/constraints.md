@@ -33,3 +33,9 @@ The strategy JSON schema forbids unknown keys. Adding provenance/metadata fields
 
 ### Two strategies on the same inst_id fight over one netted position
 The exchange nets per `inst_id`; the dashboard keys positions by symbol. Two strategies on the same instrument contend over a single netted position with no per-strategy separation.
+
+### "ccxt" is a backend name, not a venue name
+`CcxtExecutor._exchange_id()` resolves `ccxt_exchange or exchange or "okx"`. Setting `exchange="ccxt"` (the backend) without `ccxt_exchange="okx"` (the venue) causes `getattr(ccxt, "ccxt")` → `None` → `ValueError("unsupported_ccxt_exchange:ccxt")`. Always distinguish backend from venue in execution config.
+
+### Empty shadow_config() breaks dashboard executor
+After reducing `dashboard_core.shadow_config()` to `return {}`, `_dashboard_executor` lost its source for `ccxt_exchange` default. The fallback logic (`exchange="ccxt"`) masked the built-in `"okx"` default because `"ccxt"` was truthy. Removing a config source requires auditing all consumers for masked defaults.

@@ -1,54 +1,28 @@
-# HermX — two services from one image, plus a Tailscale sidecar.
-#
+# HermX — two services from one published image, plus a Tailscale sidecar.
 #   receiver  -> src/webhook_receiver.py  (TradingView webhook intake + execution)
-#   dashboard -> src/dashboard.py         (read-only operator dashboard)
-#   tailscale -> Tailscale node (public https Funnel -> receiver:8891; tailnet-only
-#               serve -> dashboard:8098). This is the user's actual tunnel; there is
-#               no cloudflared sidecar.
+#   dashboard -> src/dashboard.py         (operator dashboard; also writes mode overrides)
+#   tailscale -> public https Funnel -> receiver:8891; tailnet-only serve -> dashboard:8098
 #
-# Networking: default bridge. Each service binds 0.0.0.0 INSIDE its container
-# (HERMX_BIND_HOST=0.0.0.0) and host port publishing is pinned to 127.0.0.1, so
-# the ports are reachable from the host (and the install verify probe) but never
-# exposed on a public interface. Public ingress is handled exclusively by the
-# Tailscale sidecar, which reaches the receiver over the compose network.
-#
-# The tailscale sidecar authenticates with an ephemeral/reusable auth key
-# (TS_AUTHKEY in .env) and proxies traffic per config/tailscale/serve.json
-# (TS_SERVE_CONFIG): 443 is public via Funnel -> receiver:8891, and 8443 is
-# tailnet-only -> dashboard:8098. It runs in userspace-networking mode, so it
-# needs no extra host capabilities or /dev/net/tun (works on Linux and Docker
-# Desktop for Mac).
-#
-# Operators only need to fill in .env (cp setup/env.example .env) before running:
-#   docker compose up -d
-#
-# Host-networking fallback (no sidecar; the host's own Tailscale reaches the
-# receiver/dashboard on 127.0.0.1):
-#   docker compose -f docker-compose.host.yml up -d
+# Package model: the image is pulled from GHCR, not built locally. Bind-mounts point at
+# files the installer seeded into the install dir (engine-config.json, strategies/,
+# config/tailscale/serve.json). Override the tag with `HERMX_IMAGE` in .env if needed.
 
 services:
   receiver:
-    build: .
-    image: hermx:latest
+    image: ${HERMX_IMAGE:-ghcr.io/mxc-admin/hermx-trader:latest}
     command: ["python", "src/webhook_receiver.py"]
     restart: always
     env_file: .env
     environment:
-      # Bridge networking: bind all interfaces inside the container.
       - HERMX_BIND_HOST=0.0.0.0
-      # Mutable state snapshots live on the dedicated hermx-state volume.
       - HERMX_DATA_DIR=/app/data
     ports:
-      # Loopback-only on the host; public access goes through the tailscale sidecar.
       - "127.0.0.1:8891:8891"
     volumes:
-      # Operator's runtime config + strategies, read-only (edits happen on host).
       - ./engine-config.json:/app/engine-config.json:ro
       - ./strategies:/app/strategies:ro
-      # Append-only ledgers persist across container restarts (writable).
-      - hermx-data:/app/logs
-      # Mutable state snapshots (paper-state, control-state, seen-signals, latest).
-      - hermx-state:/app/data
+      - hermx-data:/app/logs            # append-only ledgers (rw)
+      - hermx-state:/app/data           # mutable snapshots (rw)
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8891/health"]
       interval: 30s
@@ -57,29 +31,29 @@ services:
       retries: 3
 
   dashboard:
-    build: .
-    image: hermx:latest
+    image: ${HERMX_IMAGE:-ghcr.io/mxc-admin/hermx-trader:latest}
     command: ["python", "src/dashboard.py"]
     restart: always
     env_file: .env
     environment:
       - HERMX_BIND_HOST=0.0.0.0
+      # MUST match the receiver so control-state.json overrides write to the shared
+      # volume and the receiver actually sees them (dashboard.py:57 + 2497-2518).
+      - HERMX_DATA_DIR=/app/data
     ports:
       - "127.0.0.1:8098:8098"
     depends_on:
       - receiver
-    # Read-only consumer: harden the container surface.
-    read_only: true
+    read_only: true            # root fs read-only; mounted volumes below stay writable
     cap_drop:
       - ALL
     tmpfs:
       - /tmp
     volumes:
-      # Same config + strategies the receiver sees, read-only.
       - ./engine-config.json:/app/engine-config.json:ro
       - ./strategies:/app/strategies:ro
-      # Dashboard reads the same ledgers the receiver writes (read-only).
-      - hermx-data:/app/logs:ro
+      - hermx-data:/app/logs:ro         # reads receiver's ledgers (ro)
+      - hermx-state:/app/data           # rw: dashboard writes control-state.json here
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8098/health"]
       interval: 30s
@@ -89,30 +63,18 @@ services:
 
   tailscale:
     image: tailscale/tailscale:latest
-    # Tailnet node name -> https://hermx.<tailnet>.ts.net.
     hostname: hermx
     restart: always
     environment:
-      # Reusable/ephemeral auth key from the Tailscale admin console. Only this
-      # key is passed in — NOT the full .env (keeps exchange secrets out of the
-      # tailscale container).
       - TS_AUTHKEY=${TS_AUTHKEY}
-      # Persisted node identity/state (defaults to the mounted volume below).
       - TS_STATE_DIR=${TS_STATE_DIR:-/var/lib/tailscale}
-      # Userspace networking: no NET_ADMIN / /dev/net/tun needed for serve+funnel.
       - TS_USERSPACE=true
-      # Funnel receiver (public) + serve dashboard (tailnet-only).
       - TS_SERVE_CONFIG=/config/serve.json
     volumes:
       - tailscale-state:/var/lib/tailscale
       - ./config/tailscale/serve.json:/config/serve.json:ro
-    # depends on nothing — it just needs the receiver/dashboard reachable on the
-    # compose network by the time traffic arrives.
 
 volumes:
-  # Append-only ledger files (shadow-webhooks, decisions, executions, journal, ...).
   hermx-data:
-  # Mutable state snapshots written by the receiver (the four JSON state files).
   hermx-state:
-  # Tailscale node identity/state (survives container restarts; avoids re-auth).
   tailscale-state:

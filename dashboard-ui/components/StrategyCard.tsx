@@ -57,8 +57,8 @@ function ModePill({
             disabled={isLocked || pending}
             onClick={() => !isLocked && onSelect(m)}
             style={{
-              padding: '3px 10px',
-              fontSize: 11,
+              padding: '8px 14px',
+              fontSize: 13,
               fontWeight: isActive ? 700 : 400,
               background: isActive ? 'var(--bg-hover, rgba(255,255,255,0.08))' : 'transparent',
               color: isActive ? modeColor[m] : isLocked ? 'var(--text-muted)' : 'var(--text-secondary)',
@@ -72,7 +72,7 @@ function ModePill({
               transition: 'background 0.15s',
             }}
           >
-            {isLocked && <span style={{ fontSize: 10 }}>🔒</span>}
+            {isLocked && <span style={{ fontSize: 12 }}>🔒</span>}
             {modeLabel[m]}
           </button>
         )
