@@ -132,3 +132,93 @@ def test_same_symbol_ordering_fuzz_under_interleaved_load(wr, monkeypatch):
 
     xrp_ids = [pid for sym, pid, _ in processed if sym == "XRPUSDT"]
     assert xrp_ids == list(range(30))
+
+
+def test_burned_ticket_advances_run_and_unblocks_symbol(wr):
+    """Predecessor finishes BEFORE burn → RUN arrives via _advance, drain skips hole."""
+    sym = "ADAUSDT"
+    _, t0 = wr._reserve_symbol_ticket(sym)
+    wr._advance_symbol_ticket_turn(sym, t0)         # RUN -> 1
+    _, t1 = wr._reserve_symbol_ticket(sym)          # burn this
+    wr._burn_symbol_ticket(sym, t1)
+    assert wr._SYMBOL_TICKET_RUN[sym] == 2
+    _, t2 = wr._reserve_symbol_ticket(sym)
+    assert wr._symbol_ticket_is_turn(sym, t2)       # not stalled
+
+
+def test_burn_when_run_already_sitting_on_hole(wr):
+    """RUN already == burned ticket when burn recorded → _burn_symbol_ticket drains immediately."""
+    sym = "BTCUSDT"
+    _, t0 = wr._reserve_symbol_ticket(sym)
+    wr._advance_symbol_ticket_turn(sym, t0)         # RUN -> 1
+    _, t1 = wr._reserve_symbol_ticket(sym)          # RUN already == 1
+    wr._burn_symbol_ticket(sym, t1)
+    assert wr._SYMBOL_TICKET_RUN[sym] == 2
+
+
+def test_consecutive_burns_skipped_either_order(wr):
+    """Two consecutive burns, record in both forward and reverse order, both drain."""
+    for sym, order in (("ETHUSDT", "fwd"), ("LTCUSDT", "rev")):
+        _, t0 = wr._reserve_symbol_ticket(sym)
+        wr._advance_symbol_ticket_turn(sym, t0)     # RUN -> 1
+        _, t1 = wr._reserve_symbol_ticket(sym)      # 1 burn
+        _, t2 = wr._reserve_symbol_ticket(sym)      # 2 burn
+        if order == "fwd":
+            wr._burn_symbol_ticket(sym, t1)
+            wr._burn_symbol_ticket(sym, t2)
+        else:
+            wr._burn_symbol_ticket(sym, t2)
+            wr._burn_symbol_ticket(sym, t1)
+        _, t3 = wr._reserve_symbol_ticket(sym)
+        assert wr._SYMBOL_TICKET_RUN[sym] == 3
+        assert wr._symbol_ticket_is_turn(sym, t3)
+
+
+def test_burn_does_not_skip_valid_inflight_tickets(wr):
+    """THE SAFETY INVARIANT: high burned ticket must NOT advance RUN past lower in-flight ones."""
+    sym = "SOLUSDT"
+    _, t0 = wr._reserve_symbol_ticket(sym)   # in flight
+    _, t1 = wr._reserve_symbol_ticket(sym)   # in flight
+    _, t2 = wr._reserve_symbol_ticket(sym)   # in flight
+    _, t3 = wr._reserve_symbol_ticket(sym)   # burned
+    wr._burn_symbol_ticket(sym, t3)
+    assert wr._SYMBOL_TICKET_RUN[sym] == 0   # NOT jumped to 4
+    assert wr._symbol_ticket_is_turn(sym, t0)
+    wr._advance_symbol_ticket_turn(sym, t0)  # -> 1
+    wr._advance_symbol_ticket_turn(sym, t1)  # -> 2
+    wr._advance_symbol_ticket_turn(sym, t2)  # -> 3, then drain skips burned 3 -> 4
+    assert wr._SYMBOL_TICKET_RUN[sym] == 4
+
+
+def test_burn_isolated_per_symbol(wr):
+    """A burn on one symbol must not touch another symbol's RUN."""
+    wr._burn_symbol_ticket("AAAUSDT", 0)
+    _, other = wr._reserve_symbol_ticket("BBBUSDT")
+    assert wr._symbol_ticket_is_turn("BBBUSDT", other)
+    assert wr._SYMBOL_TICKET_RUN["AAAUSDT"] == 1
+
+
+def test_worker_pool_survives_burned_ticket(wr, monkeypatch):
+    """End-to-end through worker_loop: a burn between two real items must not stall."""
+    q: queue.Queue = queue.Queue()
+    monkeypatch.setattr(wr, "PROCESS_QUEUE", q)
+    processed, lk = [], threading.Lock()
+
+    def fake_process(payload, intake):
+        with lk:
+            processed.append(payload["id"])
+
+    monkeypatch.setattr(wr, "process_payload_async", fake_process)
+    _start_workers(wr, 2)
+    time.sleep(0.02)
+
+    q.put(wr._queue_work_item({"symbol": "XRPUSDT", "id": 0}, "t0"))
+    sym, tk = wr._reserve_symbol_ticket("XRPUSDT")     # intake queue.Full path:
+    wr._burn_symbol_ticket(sym, tk)                      #   reserved, never enqueued
+    q.put(wr._queue_work_item({"symbol": "XRPUSDT", "id": 2}, "t2"))
+
+    done = threading.Thread(target=q.join, daemon=True)
+    done.start()
+    done.join(timeout=5.0)
+    assert not done.is_alive(), "queue.join() hung — symbol stalled on burned ticket"
+    assert processed == [0, 2]

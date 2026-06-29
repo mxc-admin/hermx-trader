@@ -539,6 +539,7 @@ _SYMBOL_TICKET_LOCK = threading.Lock()
 _SYMBOL_TICKET_TURN = threading.Condition()
 _SYMBOL_TICKET_NEXT: dict[str, int] = {}
 _SYMBOL_TICKET_RUN: dict[str, int] = {}
+_SYMBOL_BURNED_TICKETS: set[tuple[str, int]] = set()  # (symbol, ticket) reserved but never enqueued (queue.Full); protected by _SYMBOL_TICKET_LOCK
 _WORKER_HEARTBEATS: dict[str, float] = {}
 _RESOLVER_HEARTBEAT: float | None = None
 _WATCHDOG_LOCK = threading.Lock()
@@ -658,11 +659,37 @@ def _symbol_ticket_is_turn(symbol: str, ticket: int) -> bool:
         return int(_SYMBOL_TICKET_RUN.get(symbol) or 0) == int(ticket)
 
 
+def _drain_burned_tickets_locked(symbol: str) -> None:
+    """Caller MUST hold _SYMBOL_TICKET_TURN. Advances RUN past any contiguous run
+    of burned (reserved-but-never-enqueued) tickets starting at the current RUN."""
+    with _SYMBOL_TICKET_LOCK:
+        run = int(_SYMBOL_TICKET_RUN.get(symbol) or 0)
+        advanced = False
+        while (symbol, run) in _SYMBOL_BURNED_TICKETS:
+            _SYMBOL_BURNED_TICKETS.discard((symbol, run))
+            run += 1
+            advanced = True
+        if advanced:
+            _SYMBOL_TICKET_RUN[symbol] = run
+
+
 def _advance_symbol_ticket_turn(symbol: str, ticket: int) -> None:
     with _SYMBOL_TICKET_TURN:
         current = int(_SYMBOL_TICKET_RUN.get(symbol) or 0)
         if current <= int(ticket):
             _SYMBOL_TICKET_RUN[symbol] = int(ticket) + 1
+        _drain_burned_tickets_locked(symbol)
+        _SYMBOL_TICKET_TURN.notify_all()
+
+
+def _burn_symbol_ticket(symbol: str, ticket: int) -> None:
+    """Record a ticket that was reserved but never enqueued (queue.Full) and
+    immediately drain it if RUN is already sitting on the hole."""
+    key = str(symbol or "").strip().upper() or "_UNKNOWN"
+    with _SYMBOL_TICKET_TURN:
+        with _SYMBOL_TICKET_LOCK:
+            _SYMBOL_BURNED_TICKETS.add((key, int(ticket)))
+        _drain_burned_tickets_locked(key)
         _SYMBOL_TICKET_TURN.notify_all()
 
 
@@ -4002,14 +4029,18 @@ def _record_execution_outcome(_ledger, row: dict) -> None:
     record_pipeline_event("execution", None, row)
 
 
-def _execute_okx_via_service(record: dict) -> dict:
+def _run_execution_service(record: dict, *, journal_hook=None) -> dict:
+    """Construct the controlled ExecutionService with the standard money-safety hook
+    wiring and run one submission. ``journal_hook`` overrides the append_jsonl hook so
+    a caller (e.g. the operator-close path) can stamp extra audit fields on the
+    journaled execution row; it defaults to the plain pipeline outcome writer."""
     service = ExecutionService(
         config=CONFIG,
         root=ROOT,
         executor_factory=ExecutorFactory,
         submit_timeout_seconds=HERMX_SUBMIT_TIMEOUT_SECONDS,
         hooks={
-            "append_jsonl": _record_execution_outcome,
+            "append_jsonl": journal_hook or _record_execution_outcome,
             "execution_ledger": PIPELINE_LEDGER,
             "webhook_auth_config_healthy": webhook_auth_config_healthy,
             "watchdog_submission_state": _watchdog_submission_state,
@@ -4035,6 +4066,120 @@ def _execute_okx_via_service(record: dict) -> dict:
         },
     )
     return service.execute(record)
+
+
+def _execute_okx_via_service(record: dict) -> dict:
+    return _run_execution_service(record)
+
+
+# ---------------------------------------------------------------------------
+# Operator-instructed close (POST /api/close).
+# A close is a RISK-REDUCING flatten an operator triggers out-of-band (e.g. via
+# Telegram). It routes through the SAME controlled ExecutionService as a normal
+# submit, so the write-ahead journal, idempotency, auth-health and watchdog gates
+# all still run. Two gates are deliberately bypassed via the readiness
+# ``close_only`` flag (see ExecutionService.execute): the global kill switch and
+# the per-symbol pause. Both exist to stop NEW risk; a close only reduces it, and
+# blocking it would trap an operator who needs to flatten during exactly the state
+# those gates flag. The single per-strategy submit_orders flag still arms it.
+# ---------------------------------------------------------------------------
+
+
+def _operator_close_cl_ord_id(symbol: str, strategy_id: str) -> str:
+    """Deterministic per-(symbol, strategy, UTC-day) close id. Idempotent: a repeat
+    close for the same symbol/strategy on the same day collides on the order-journal
+    dedupe key and is refused ``duplicate_cl_ord_id`` rather than double-submitted."""
+    day = datetime.now(timezone.utc).strftime("%Y%m%d")
+    return f"operator_close_{symbol}_{strategy_id}_{day}"
+
+
+def build_operator_close_readiness(symbol: str, strategy: dict, cl_ord_id: str) -> dict:
+    """Readiness for an operator close. Mirrors the live values the signal path
+    resolves (execution_mode, submit_orders, sandbox, instrument) but carries
+    ``close_only=True`` and a CLOSE_LONG/CLOSE_SHORT intent so the adapter flattens
+    whichever side is currently open (reduceOnly), and no new position is opened."""
+    execution_cfg = CONFIG.get("execution", {}) or {}
+    strategy = strategy or {}
+    strategy_id = str(strategy.get("strategy_id") or "")
+    execution_mode = str(strategy.get("execution_mode") or "demo").lower()
+    # Honor the same live control-state override the signal path checks, so an
+    # operator who has flipped mode/arming in the dashboard sees it reflected here.
+    _cs_ov = (load_control_state().get("strategy_overrides") or {}).get(strategy_id)
+    if isinstance(_cs_ov, dict) and _cs_ov.get("execution_mode"):
+        execution_mode = str(_cs_ov["execution_mode"]).lower()
+    submit_orders = bool(strategy.get("submit_orders", strategy.get("okx_submit_orders", False)))
+    if isinstance(_cs_ov, dict) and "submit_orders" in _cs_ov:
+        submit_orders = bool(_cs_ov["submit_orders"])
+    sandbox = execution_mode != "live"  # demo/paper/shadow -> True; live -> False
+    instrument = strategy_instrument(strategy)
+    margin_mode = strategy.get("margin_mode", execution_cfg.get("td_mode", "isolated"))
+    return {
+        "mode": "operator_close",
+        # The flag that bypasses gate 3 (kill switch) and the symbol pause; see
+        # ExecutionService.execute. Every other gate still applies.
+        "close_only": True,
+        "live_execution_enabled": submit_orders,
+        "execution_mode": execution_mode,
+        "simulated_trading": sandbox,
+        "exchange": execution_cfg.get("exchange", "okx"),
+        "symbol": symbol,
+        "inst_id": instrument.get("inst_id"),
+        "instrument": instrument,
+        "strategy_id": strategy_id,
+        "asset": strategy.get("asset") or symbol,
+        "margin_mode": margin_mode,
+        "td_mode": margin_mode,
+        "leverage": strategy.get("leverage"),
+        "signal_side": None,
+        "execution_intent": {
+            "policy": f"operator_close:{strategy_id}",
+            "decision": "CLOSE",
+            # Emit both close legs; the adapter closes whichever side is open and
+            # skips the other (reduceOnly on the close that fires).
+            "actions": ["CLOSE_LONG", "CLOSE_SHORT"],
+            "reduce_only": True,
+            "client_order_id": cl_ord_id,
+            "client_order_id_close": cl_ord_id,
+        },
+        "okx_fill": {"client_order_id": cl_ord_id},
+        "block_reason": None,
+    }
+
+
+def execute_operator_close(symbol: str, strategy: dict, *, operator=None, reason=None) -> dict:
+    """Build a close readiness record and submit it through the controlled service.
+    Returns the service result with the deterministic ``cl_ord_id`` and the close
+    ``submitted_at`` timestamp attached (underscore-prefixed, so they never collide
+    with adapter result keys). The journaled execution row is stamped with
+    ``kind="operator_close"`` plus the operator/reason audit trail."""
+    strategy_id = str((strategy or {}).get("strategy_id") or "")
+    cl_ord_id = _operator_close_cl_ord_id(symbol, strategy_id)
+    submitted_at = now_iso()
+    readiness = build_operator_close_readiness(symbol, strategy, cl_ord_id)
+    record = {"received_at": submitted_at, "execution_readiness": readiness}
+
+    journal_extra = {
+        "kind": "operator_close",
+        "operator": operator,
+        "reason": reason,
+        "symbol": symbol,
+        "strategy_id": strategy_id,
+        "cl_ord_id": cl_ord_id,
+    }
+
+    def _journal(_ledger, row: dict) -> None:
+        record_pipeline_event("execution", None, {**row, **journal_extra})
+
+    if (
+        ExecutionService is None
+        or ExecutorFactory is None
+        or not ExecutorFactory.available()
+    ):
+        result = {"ok": True, "mode": "not_submitted", "reason": "execution_unavailable"}
+        _journal(None, {"received_at": submitted_at, "okx_execution": result})
+    else:
+        result = _run_execution_service(record, journal_hook=_journal)
+    return {**result, "_cl_ord_id": cl_ord_id, "_submitted_at": submitted_at}
 
 
 def execute_okx_if_enabled(record: dict) -> dict:
@@ -4505,8 +4650,76 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, {"ok": False, "error": "not_found"})
 
+    def _handle_operator_close(self) -> None:
+        """POST /api/close -- operator-instructed flatten. Authenticated by the
+        dashboard token (X-Dashboard-Token == HERMX_SECRET, constant-time, fail closed
+        if the secret is blank). Routes through the controlled close path, which
+        bypasses ONLY the kill switch + symbol pause (a close reduces risk)."""
+        provided = (self.headers.get("X-Dashboard-Token") or "").strip()
+        # Fail closed: a blank server secret can never authenticate a close.
+        if not SECRET or not hmac.compare_digest(provided, SECRET):
+            self._send(401, {"ok": False, "error": "unauthorized"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            if length < 0:
+                raise ValueError("negative content length")
+        except ValueError:
+            self._send(400, {"ok": False, "error": "invalid_content_length"})
+            return
+        if length > max(1, HERMX_MAX_BODY_BYTES):
+            self._send(413, {"ok": False, "error": "payload_too_large", "max_body_bytes": max(1, HERMX_MAX_BODY_BYTES)})
+            return
+        try:
+            raw = self.rfile.read(length) if length else b""
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+            if not isinstance(body, dict):
+                raise ValueError("body must be a JSON object")
+        except Exception as exc:
+            self._send(400, {"ok": False, "error": "invalid_json", "detail": str(exc)})
+            return
+        symbol = str(body.get("symbol") or "").strip()
+        strategy_id = str(body.get("strategy_id") or "").strip()
+        operator = body.get("operator")
+        reason = body.get("reason")
+        if not symbol:
+            self._send(400, {"ok": False, "error": "missing_symbol"})
+            return
+        if not strategy_id:
+            self._send(400, {"ok": False, "error": "missing_strategy_id", "symbol": symbol})
+            return
+        strategy = STRATEGIES.get(strategy_id)
+        if not strategy:
+            self._send(404, {"ok": False, "error": "unknown_strategy_id", "symbol": symbol, "strategy_id": strategy_id})
+            return
+        try:
+            result = execute_operator_close(symbol, strategy, operator=operator, reason=reason)
+        except Exception as exc:  # unexpected server-side failure only
+            logging.exception("operator close failed")
+            self._send(500, {"ok": False, "error": redact_secrets(str(exc)), "symbol": symbol})
+            return
+        mode = result.get("mode")
+        if mode == "not_submitted":
+            # An expected control outcome (blocked gate / idempotent duplicate), not an error.
+            self._send(200, {"ok": False, "mode": "not_submitted", "reason": result.get("reason"), "symbol": symbol})
+        elif result.get("ok"):
+            self._send(200, {
+                "ok": True,
+                "mode": "submitted",
+                "symbol": symbol,
+                "cl_ord_id": result.get("_cl_ord_id"),
+                "submitted_at": result.get("_submitted_at"),
+            })
+        else:
+            # Adapter reported a non-ok outcome (e.g. submit_exception/rejected): an
+            # expected, journaled execution result -- surface it without a 500.
+            self._send(200, {"ok": False, "mode": mode, "reason": result.get("reason") or result.get("error"), "symbol": symbol})
+
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path in {"/api/close", "/shadow/api/close"}:
+            self._handle_operator_close()
+            return
         if parsed.path not in {"/webhook", "/shadow/webhook"}:
             self._send(404, {"ok": False, "error": "not_found"})
             return
@@ -4537,9 +4750,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         intake_received_at = now_iso()
         record_raw_webhook("intake", {"received_at": intake_received_at, "payload": payload, "path": parsed.path})
+        work_item = _queue_work_item(payload, intake_received_at)
         try:
-            PROCESS_QUEUE.put_nowait(_queue_work_item(payload, intake_received_at))
+            PROCESS_QUEUE.put_nowait(work_item)
         except queue.Full:
+            _burn_symbol_ticket(work_item[2], work_item[3])
             emit_operator_alert(
                 ALERT_QUEUE_SATURATION,
                 {
