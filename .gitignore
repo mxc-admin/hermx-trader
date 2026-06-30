@@ -48,3 +48,6 @@ dashboard-ui/tsconfig.tsbuildinfo
 # .windsurf/rules/*, .windsurf/workflows/*
 # CLAUDE.md, AGENTS.md, verify_install.sh
 
+
+# Per-deploy snapshots (config + transaction state)
+.deploy-backups/
