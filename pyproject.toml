@@ -1,0 +1,42 @@
+# HermX tooling config.
+#
+# The runtime is deliberately stdlib-heavy (see requirements.txt); this file holds
+# ONLY optional developer/security-tool configuration. It intentionally has no
+# [build-system] / [project] table — HermX is run from source, not pip-installed.
+#
+# Security scanners are optional extras: `pip install -r requirements-security.txt`.
+# The self-contained audit (scripts/security-audit.py) runs on stdlib alone and
+# only *uses* these tools when they are present.
+
+[tool.bandit]
+# Bandit does NOT auto-discover this file; scripts/security-audit.py passes
+# `-c pyproject.toml` only when this section exists. To run bandit by hand:
+#   ./.venv/bin/python -m bandit -c pyproject.toml -r src deploy scripts -ll -iii
+#
+# NOTE: severity/confidence thresholds (-ll/-iii) are CLI-only — bandit ignores
+# them here. This section carries path/skip selection only.
+exclude_dirs = [
+    ".venv",
+    "tests",
+    "dashboard-ui",
+    "node_modules",
+    ".git",
+    "logs",
+]
+skips = [
+    "B101",  # assert_used — pytest relies on assert; not a production concern
+]
+
+[tool.detect-secrets]
+# Baseline lives at .secrets.baseline (managed by the detect-secrets pre-commit
+# hook). Regenerate after upgrading detect-secrets:
+#   ./.venv/bin/python -m detect_secrets scan --baseline .secrets.baseline
+
+[tool.ruff.lint]
+# Optional: if ruff is installed, enable the flake8-bandit "S" security ruleset
+# on top of the defaults. `./.venv/bin/python -m ruff check --select S src`.
+extend-select = ["S"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately use assert (S101) and embedded fake credentials (S105/S106).
+"tests/**" = ["S101", "S105", "S106", "S107"]

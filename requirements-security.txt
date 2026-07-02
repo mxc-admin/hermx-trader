@@ -1,0 +1,30 @@
+# Optional security-scanner extras for the HermX security audit.
+#
+#   ./.venv/bin/pip install -r requirements-security.txt
+#
+# These are NOT runtime deps. scripts/security-audit.py runs on the standard
+# library alone and only *invokes* these tools when they are importable —
+# without them the corresponding checks report "skipped", never "fail". Install
+# them to upgrade the audit from heuristic-only to full SAST + CVE + entropy
+# secret scanning.
+
+# Python static security analysis (SAST). Enables the `static` check.
+bandit>=1.7.9,<2
+
+# Dependency CVE scanning (PyPA, no auth required, OSV/PyPI data). Enables `deps`.
+pip-audit>=2.7.3,<3
+
+# Working-tree secret scanning + baseline. Enables `secrets` (detect-secrets pass)
+# and backs the .pre-commit-config.yaml detect-secrets hook. Pinned to match the
+# pre-commit rev (v1.5.0) so the baseline plugin set stays consistent.
+detect-secrets==1.5.0
+
+# Optional Rust-fast lint with the flake8-bandit "S" security ruleset. Not invoked
+# by the audit script, but honored via pyproject.toml [tool.ruff.lint] if you run
+# `./.venv/bin/python -m ruff check --select S src` in CI.
+# ruff>=0.6,<1
+
+# For git-HISTORY secret scanning (secrets already committed), install one of the
+# following out-of-band (Go/Homebrew binaries, not pip):
+#   gitleaks git . --report-format json --report-path gitleaks.json
+#   trufflehog git file://. --only-verified --fail --json
