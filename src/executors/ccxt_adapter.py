@@ -472,7 +472,12 @@ class CcxtExecutor(BaseExecutor):
             or _inst_id_to_ccxt_symbol((readiness or {}).get("symbol"))
         )
         direction = self._target_direction(readiness)
-        if direction not in {"long", "short"}:
+        # A close-only flatten (operator close) carries explicit CLOSE_LONG/CLOSE_SHORT
+        # actions and has no target direction — the direction gate is a fallback guard
+        # for the open path only, so skip it here. Do NOT synthesize a dummy direction:
+        # _expanded_actions would turn a "nothing to close" case into an OPEN of that side.
+        close_only = bool((readiness or {}).get("close_only"))
+        if not close_only and direction not in {"long", "short"}:
             return self.normalized_result(
                 ok=False,
                 mode="submit_failed",

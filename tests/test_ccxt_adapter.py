@@ -362,6 +362,69 @@ def test_okx_params_unchanged_regression_guard(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Operator close (close_only) regression: no target_direction must not fail.
+# ---------------------------------------------------------------------------
+
+
+class _FakeLongClient(_FakeClient):
+    """OKX-style contract sizing but reports an OPEN LONG position, mirroring the
+    reported bug (LONG BTC operator close)."""
+
+    def fetch_positions(self, symbols=None):
+        sym = symbols[0] if symbols else "BTC/USDT:USDT"
+        return [
+            {
+                "symbol": sym,
+                "side": "long",
+                "contracts": 3,
+                "entryPrice": 60500.0,
+                "unrealizedPnl": 12.0,
+                "info": {"instId": "BTC-USDT-SWAP", "posSide": "long", "mgnMode": "cross", "lever": "2"},
+            }
+        ]
+
+
+def test_operator_close_long_without_target_direction(monkeypatch):
+    """Regression: build_operator_close_readiness sets signal_side=None and no
+    target_direction, relying on explicit CLOSE_LONG/CLOSE_SHORT actions. The adapter
+    must NOT reject this as submit_failed/invalid_direction when close_only is set."""
+    ex = _executor()
+    fake = _FakeLongClient()
+    monkeypatch.setattr(ex, "_client", lambda: fake)
+
+    # Shape matches build_operator_close_readiness output.
+    readiness = {
+        "close_only": True,
+        "signal_side": None,
+        "inst_id": "BTC-USDT-SWAP",
+        "td_mode": "cross",
+        "execution_intent": {
+            "policy": "operator_close:strat-1",
+            "decision": "CLOSE",
+            "actions": ["CLOSE_LONG", "CLOSE_SHORT"],
+            "reduce_only": True,
+            "client_order_id": "operator_close_BTC-USDT-SWAP_strat-1_20260702",
+            "client_order_id_close": "operator_close_BTC-USDT-SWAP_strat-1_20260702",
+        },
+    }
+
+    out = ex.execute(readiness)
+
+    # The old bug returned this exact failure before any order was attempted.
+    assert out["mode"] != "submit_failed"
+    assert out["payload"].get("error") != "invalid_direction"
+    assert out["ok"] is True
+    # Only the CLOSE_LONG leg fires (reduceOnly sell); CLOSE_SHORT is skipped.
+    assert len(fake.calls) == 1
+    close_call = fake.calls[0]
+    assert close_call["side"] == "sell"
+    assert close_call["amount"] == 3
+    assert close_call["params"].get("reduceOnly") is True
+    # No synthesized direction leaked into the result payload for a close.
+    assert out["payload"].get("target_direction") == ""
+
+
+# ---------------------------------------------------------------------------
 # Tier-2 adapter auth wiring (Binance, Bitget, Gate)
 # ---------------------------------------------------------------------------
 
