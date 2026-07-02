@@ -375,6 +375,10 @@ Tailscale Funnel (`--bg`, survives reboots) provides public HTTPS at a unique st
 
 Every install is fully isolated: its own Tailscale tailnet/URL, its own `.env`, its own `strategies/`, its own ledgers. There is no shared infrastructure or multi-tenant surface between installs.
 
+### 8.4 Cron monitoring
+
+HermX monitoring uses the Hermes gateway's built-in cron scheduler rather than a custom daemon. Five read-only jobs run via pre-check gate scripts that read HermX state (logs, `/api`) and wake an LLM agent only when conditions change. The gate scripts live in `deploy/hermes-scripts/`; `deploy/install-cron-monitors.sh` provisions them idempotently. See `docs/HERMES_CRON_MONITOR_DESIGN.md` for the full design.
+
 ---
 
 ## 9. Extension Guide
@@ -462,6 +466,8 @@ Intelligence is **purely additive** and lives *outside* the money path. Pattern:
 | `strategies/*.json` | Sanctioned strategy files keyed by `strategy_id` |
 | `deploy/hermx-receiver.service`, `hermx-dashboard.service` | systemd units (`Restart=always`) |
 | `deploy/install-services.sh` | One-command systemd install |
+| `deploy/install-cron-monitors.sh` | Provisioning script — registers skills, copies gate scripts, creates 5 monitor cron jobs |
+| `deploy/hermes-scripts/*.py` | Pre-check gate scripts + shared library for the Hermes cron monitor layer |
 | `docker-compose.yml`, `Dockerfile` | Single image, two services, host network, persistent ledger volume |
 | `setup/env.example` | Annotated `.env` template (copy → `.env`) |
 | `tests/` | Characterization + gated integration tests (kill switch, gate precedence, idempotency, order state machine, reconciliation, per-venue paper integration, schema/migration, advisor, dashboard) |

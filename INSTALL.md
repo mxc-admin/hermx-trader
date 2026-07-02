@@ -803,13 +803,46 @@ hermes gateway setup     # one-time wizard — select Telegram
 hermes gateway start     # managed service (or `hermes gateway` for foreground)
 ```
 
-### 6.5 Test it
+### 6.5 Install the cron monitors
+
+The Hermes gateway includes a built-in cron scheduler. Install the HermX monitor jobs once the gateway is running:
+
+```bash
+bash deploy/install-cron-monitors.sh
+```
+
+Dry-run first to see what it will do:
+```bash
+HERMX_CRON_DRY_RUN=1 bash deploy/install-cron-monitors.sh
+```
+
+After it runs, restart the gateway so it picks up the new env keys:
+```bash
+hermes gateway restart
+```
+
+Verify the jobs are registered:
+```bash
+hermes cron list
+```
+
+This registers five read-only monitors (all fail-closed, no money-path access):
+- `hermx-weekly` — weekly status/positions/signal digest (Mon 09:00 UTC)
+- `hermx-daily` — daily status/positions/signal digest (08:00 UTC)
+- `hermx-reconcile` — stuck orders and reconcile alerts (every 5m)
+- `hermx-health-check` — dashboard/receiver liveness (every 5m)
+- `hermx-signal-late` — zero-intake detection (every 30m, 3-day threshold)
+
+Pause a noisy monitor with `/cron pause <name>`. Full design: `docs/HERMES_CRON_MONITOR_DESIGN.md`.
+
+### 6.6 Test it
 
 Ask the user to message their bot in Telegram: **"are you there?"** and confirm a sane reply.
 
 **✅ Verify Phase 6:** `hermes skills list` shows `hermx-control` **and** the `hermx-*`
-slash-command skills enabled, `hermes doctor` is clean, and the Telegram bot responds. Full
-details: `setup/09-hermes-agent.md`; slash-command reference: `docs/hermx-slash-commands.md`.
+slash-command skills enabled, `hermes doctor` is clean, `hermes cron list` shows the 5 hermx
+monitor jobs, and the Telegram bot responds. Full details: `setup/09-hermes-agent.md`;
+slash-command reference: `docs/hermx-slash-commands.md`.
 
 ---
 
@@ -932,6 +965,7 @@ Run every check and report status to the user:
 - [ ] **Synthetic webhook accepted** and visible on the dashboard
 - [ ] **Live switch still off** — `grep HERMX_LIVE_TRADING .env` shows `false` (or unset)
 - [ ] **Hermes agent running** (if installed) — `hermes skills list | grep hermx-control`
+- [ ] Monitors installed (`hermes cron list` shows 5 jobs)
 - [ ] **Telegram bot responding** (if installed) — replies to "are you there?"
 
 Then print the final summary (fill in the real values):
