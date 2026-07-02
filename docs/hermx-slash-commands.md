@@ -1,12 +1,12 @@
 # HermX Slash Commands — Operator Quick Reference
 
-One-page reference for the HermX slash-command skills: read-only status/diagnostics plus guarded, reduce-only mutations over loopback. No command ever calls an exchange directly or sets an order size.
+One-page reference for the HermX slash-command skills: read-only status/diagnostics plus guarded, reduce-only mutations over loopback. No command places or sizes an order; the only command that talks to an exchange at all is `/hx-exchange`, and only its opt-in `status --live` probe does, purely to read a balance.
 
 ## Quick reference
 
 | Command | Type | What it does | Safety guard |
 |---|---|---|---|
-| `/hx-help` | read | Lists all 10 commands, or explains one (`/hx-help <command>`) with syntax + examples | Pure text: no HTTP, no writes, no mutations |
+| `/hx-help` | read | Lists all 11 commands, or explains one (`/hx-help <command>`) with syntax + examples | Pure text: no HTTP, no writes, no mutations |
 | `/hx-status` | read | Armed?, mode, dashboard/receiver up, last alert, strategy count | Read failure → DOWN/UNKNOWN, never "not armed" |
 | `/hx-positions` | read | Open positions: side, size, entry, mark, UPL | Failed/stale/degraded read → UNKNOWN, never "flat" |
 | `/hx-strategy-list` | read | All strategies + `file_mode` vs `effective_mode`, paused | Corrupt strategy file → UNKNOWN fields, no crash |
@@ -17,6 +17,7 @@ One-page reference for the HermX slash-command skills: read-only status/diagnost
 | `/hx-emergency-stop kill\|flatten\|demo\|pause-symbol` | mutate | Global kill / flatten all / force strategy to demo / pause a symbol | Dry-run + explicit `yes`; UNKNOWN never rendered as flat |
 | `/hx-restart [force]` | mutate | Health-checks dashboard + receiver; restarts the down service(s) via systemd (fallback `bash run.sh --skip-tests`, then `docker compose restart`) | Both up → does nothing; explicit `yes` required; live host warned positions briefly unmonitored |
 | `/hx-upgrade [--no-pull\|--no-tests\|--no-ui]` | mutate | Runs `bash deploy/deploy.sh`: pull + deps + UI build + tests + restart, with auto-rollback on health-check failure | Dry-run preview (HEAD + plan) + explicit `yes`; services restart, live positions briefly unmonitored; failure → `.deploy-backups/` |
+| `/hx-exchange <sub> <exchange> [--demo\|--live]` | read+mutate | Manage exchange API keys (`list`, `status`, `add`, `update`, `remove`) by dispatching `scripts/exchange.sh` on the VPS over SSH | Never handles a key (captured by `read -s` on the VPS, never an argument); `ssh -t` for mutations; `--live` needs a typed `yes`; adding keys ≠ arming |
 
 ## Commands
 
@@ -94,6 +95,12 @@ One-page reference for the HermX slash-command skills: read-only status/diagnost
 - **Guard:** always dry-run first (shows current HEAD + what the deploy will do) and requires explicit `yes`; services restart, so a live host is warned open positions may be briefly unmonitored; only operator-supplied flags are passed through; non-zero exit or health-stays-down → FAILED/UNKNOWN, never "upgraded OK", with a pointer to the run's backup under `.deploy-backups/`; deploy/lifecycle only — no strategy edits, no `/webhook`, no `/api/close`, no sizing.
 - **Example:** `rtk claude -p "/hx-upgrade" --permission-mode dontAsk`
 
+### `/hx-exchange` — manage exchange credentials (read + mutating, SSH)
+- **Syntax:** `/hx-exchange list` · `/hx-exchange status <exchange> [--demo|--live]` · `/hx-exchange add|update|remove <exchange> --demo|--live`
+- **Does:** dispatches the standalone `scripts/exchange.sh` on the VPS over SSH. `list`/`status` read (credential presence, resolver `OK`/`PARTIAL`/`MISSING`, precedence + adapter-wiring warnings, optional `--live` `fetch_balance` probe). `add`/`update`/`remove` write `.env` (backed up to `.env.bak`, upserted, `chmod 600`). Supports okx, kucoin, bybit, binance, bitget, gate, hyperliquid, coinbase (coinbase live/spot only — no ccxt sandbox).
+- **Guard:** the skill **never handles a credential** — every key is captured by `read -s` **inside the script** on the VPS, never as a command argument, never echoed or relayed. Mutations run under `ssh -t` (need a TTY); `add`/`update`/`remove` require an explicit `--demo`/`--live`; `--live` needs a typed `yes, add live <exchange>`; `remove` needs a typed `yes, remove <env> <exchange>` and warns about strategies on that venue. Adding keys does **not** arm the system — `HERMX_LIVE_TRADING` + strategy `execution_mode` still gate live. Unreachable SSH → UNKNOWN, never "set/removed".
+- **Example:** `rtk claude -p "/hx-exchange status bybit --live" --permission-mode dontAsk`
+
 ## Shared invariants
 - **UNKNOWN, never "flat".** Any read failure, `okx_live.ok == false`, `executor.degraded`, or `freshness.no_data` → UNKNOWN. Only a healthy, non-degraded, empty book is genuinely FLAT.
 - **Mutations require preview + confirmation.** Every mutating command dry-runs first and needs an explicit `yes` before any write.
@@ -103,7 +110,7 @@ One-page reference for the HermX slash-command skills: read-only status/diagnost
 - **Freshness is bounded on bar time (`tv_time`), not server time.** A current clock after an outage does not mean fresh data.
 
 ## Setup
-- **Where the skills live:** `skills/hermx-help/`, `hermx-status/`, `hermx-positions/`, `hermx-strategy-list/`, `hermx-trace/`, `hermx-tv-alerts/`, `hermx-strategy-mode/`, `hermx-close/`, `hermx-restart/`, `hermx-upgrade/` (each a `SKILL.md`), plus `skills/emergency-stop.md`. Shared code + contract live in `skills/hermx-ops/`.
+- **Where the skills live:** `skills/hermx-help/`, `hermx-status/`, `hermx-positions/`, `hermx-strategy-list/`, `hermx-trace/`, `hermx-tv-alerts/`, `hermx-strategy-mode/`, `hermx-close/`, `hermx-restart/`, `hermx-upgrade/`, `hermx-exchange/` (each a `SKILL.md`), plus `skills/emergency-stop.md`. Shared code + contract live in `skills/hermx-ops/`; the credential manager `/hx-exchange` dispatches `scripts/exchange.sh` on the VPS over SSH (not loopback).
 - **Load in Hermes:** each `SKILL.md` carries `metadata.hermes` (tags, `related_skills`, config with loopback defaults `dashboard=http://127.0.0.1:8098`, `receiver=http://127.0.0.1:8891`). Invoke as `claude -p "/<skill-name> <args>" --permission-mode dontAsk`.
 - **`HERMX_SECRET`:** required **only when `HERMX_DASH_AUTH` is on**. When set, requests send `X-Dashboard-Token: {HERMX_SECRET}` (from the HermX `.env`). On loopback with auth off (the host default) no header is needed. A `401` is a read failure → UNKNOWN, not "flat". The `/api/close` and control-write endpoints fail closed without a matching token.
 

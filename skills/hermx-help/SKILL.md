@@ -8,7 +8,7 @@ platforms: [linux, macos]
 metadata:
   hermes:
     tags: [trading, hermx, help, docs, read-only, operations]
-    related_skills: [hermx-control, hermx-status, hermx-positions, hermx-strategy-list, hermx-trace, hermx-tv-alerts, hermx-strategy-mode, hermx-close, emergency-stop, hermx-restart, hermx-upgrade]
+    related_skills: [hermx-control, hermx-status, hermx-positions, hermx-strategy-list, hermx-trace, hermx-tv-alerts, hermx-strategy-mode, hermx-close, emergency-stop, hermx-restart, hermx-upgrade, hermx-exchange]
     config:
       - key: hermx.dashboard_base
         description: "HermX dashboard base URL (loopback)"
@@ -36,14 +36,14 @@ operator at the shared helper
   `close`, `/hx-close`, `CLOSE`, `/Close` all resolve to `/hx-close`.
 - Accept common aliases: `estop`/`kill` → `/hx-emergency-stop`, `strategies`/`list`
   → `/hx-strategy-list`, `mode` → `/hx-strategy-mode`, `deploy` → `/hx-upgrade`,
-  `alerts`/`tv` → `/hx-tv-alerts`.
+  `alerts`/`tv` → `/hx-tv-alerts`, `exchange`/`keys`/`creds` → `/hx-exchange`.
 - Unknown arg → say so, then print the overview so the operator can pick.
 
 ## All commands (`/hx-help`)
 
-Ten commands: five read-only diagnostics, five guarded mutations. None sets an
-order size; none calls an exchange directly. Every mutation dry-runs then needs an
-explicit `yes`.
+Eleven commands: five read-only diagnostics, five guarded mutations, plus
+`/hx-exchange` (exchange-credential management — reads plus guarded SSH mutations).
+None places or sizes an order. Every mutation confirms before it writes.
 
 **Read-only**
 - **`/hx-status`** — armed?, mode, dashboard/receiver up, last alert, strategy count.
@@ -68,6 +68,8 @@ explicit `yes`.
   `/hx-restart`
 - **`/hx-upgrade`** — pull + deps + UI + tests + restart with auto-rollback.
   `/hx-upgrade`
+- **`/hx-exchange`** — add/update/remove/validate exchange API keys via SSH-dispatched
+  `scripts/exchange.sh` (the skill never handles a key). `/hx-exchange add okx --demo`
 
 Ask `/hx-help <command>` for syntax, guards, and examples on any one.
 
@@ -222,6 +224,26 @@ Ask `/hx-help <command>` for syntax, guards, and examples on any one.
   - `rtk claude -p "/hx-upgrade --no-tests" --permission-mode dontAsk`
   - Health check fails post-deploy → deploy.sh rolls back; report ROLLED BACK.
 
+### `/hx-exchange`
+- **Type:** mutating (exchange-credential management, dispatched over SSH).
+- **Syntax:** `/hx-exchange list` · `/hx-exchange status <exchange> [--demo|--live]` ·
+  `/hx-exchange add|update|remove <exchange> --demo|--live`
+- **Does:** runs the standalone `scripts/exchange.sh` on the VPS over SSH. `list`/`status`
+  read (credential presence, resolver `OK`/`PARTIAL`/`MISSING`, precedence + adapter-wiring
+  warnings, optional `--live` `fetch_balance` probe); `add`/`update`/`remove` upsert `.env`
+  (backed up to `.env.bak`, `chmod 600`). Exchanges: okx, kucoin, bybit, binance, bitget,
+  gate, hyperliquid, coinbase (coinbase live/spot only — no ccxt sandbox).
+- **Guards:** the skill **never handles a credential** — each key is captured by `read -s`
+  **inside the script** on the VPS, never as an argument, never echoed. Mutations run under
+  `ssh -t`; `add`/`update`/`remove` need an explicit `--demo`/`--live`; `--live` needs a
+  typed `yes, add live <exchange>`; `remove` needs `yes, remove <env> <exchange>`.
+  **Adding keys does not arm the system** — `HERMX_LIVE_TRADING` + strategy `execution_mode`
+  still gate live. Unreachable SSH → UNKNOWN, never "set/removed".
+- **Examples:**
+  - `rtk claude -p "/hx-exchange list" --permission-mode dontAsk`
+  - `rtk claude -p "/hx-exchange add okx --demo" --permission-mode dontAsk`
+  - "are the Bybit live keys valid?" → `/hx-exchange status bybit --live`
+
 ## Shared invariants (apply to every command)
 - **UNKNOWN, never "flat".** Any read failure, `okx_live.ok == false`,
   `executor.degraded`, or `freshness.no_data` → UNKNOWN. Only a healthy, non-degraded,
@@ -241,7 +263,7 @@ Ask `/hx-help <command>` for syntax, guards, and examples on any one.
 - Keep output terse and chat-formatted: markdown bullets and short paragraphs.
 
 ## Verification checklist
-- [ ] `/hx-help` (no arg) lists all **ten** commands, each with a one-liner + example.
+- [ ] `/hx-help` (no arg) lists all **eleven** commands, each with a one-liner + example.
 - [ ] `/hx-help close`, `/hx-help /hx-close`, `/hx-help CLOSE` all resolve to the `/hx-close` detail.
 - [ ] Aliases (`estop`, `kill`, `deploy`, `mode`, `list`, `alerts`, `tv`) map to the right command.
 - [ ] An unknown arg reports "unknown command" then falls back to the overview.

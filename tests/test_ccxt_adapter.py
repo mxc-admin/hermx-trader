@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+import types
 from pathlib import Path
 
+import executors.ccxt_adapter as ccxt_adapter
 from executors.ccxt_adapter import (
     CcxtExecutor,
     _inst_id_to_ccxt_symbol,
@@ -357,6 +359,85 @@ def test_okx_params_unchanged_regression_guard(monkeypatch):
     assert open_params.get("tdMode") == "cross"
     assert "cloid" not in open_params
     assert fake.calls[1]["price"] is None
+
+
+# ---------------------------------------------------------------------------
+# Tier-2 adapter auth wiring (Binance, Bitget, Gate)
+# ---------------------------------------------------------------------------
+
+
+class _FakeAuthExchange:
+    """Captures constructor kwargs so tests can assert credential injection."""
+
+    def __init__(self, kwargs):
+        self.captured_kwargs = dict(kwargs)
+
+    def set_sandbox_mode(self, flag):
+        self.captured_kwargs["_sandbox"] = flag
+
+
+def _install_fake_ccxt(monkeypatch, **exchanges):
+    fake = types.SimpleNamespace(**exchanges)
+    monkeypatch.setattr(ccxt_adapter, "ccxt", fake)
+
+
+def _auth_executor(exchange_id: str, simulated: bool = True) -> CcxtExecutor:
+    cfg = {
+        "execution": {
+            "exchange": "ccxt",
+            "ccxt_exchange": exchange_id,
+            "simulated_trading": simulated,
+        }
+    }
+    return CcxtExecutor(cfg, Path("."))
+
+
+def test_ccxt_adapter_binance_auth_kwargs(monkeypatch):
+    _install_fake_ccxt(monkeypatch, binance=_FakeAuthExchange)
+    # demo mode -> testnet creds preferred over plain.
+    monkeypatch.setenv("BINANCE_TESTNET_API_KEY", "binance-testnet-key")
+    monkeypatch.setenv("BINANCE_TESTNET_SECRET_KEY", "binance-testnet-secret")
+    monkeypatch.setenv("BINANCE_API_KEY", "binance-live-key")
+    monkeypatch.setenv("BINANCE_SECRET_KEY", "binance-live-secret")
+
+    ex = _auth_executor("binance", simulated=True)
+    client = ex._client()
+
+    assert client.captured_kwargs["apiKey"] == "binance-testnet-key"
+    assert client.captured_kwargs["secret"] == "binance-testnet-secret"
+    assert client.captured_kwargs["options"]["defaultType"] == "future"
+
+
+def test_ccxt_adapter_bitget_auth_kwargs(monkeypatch):
+    _install_fake_ccxt(monkeypatch, bitget=_FakeAuthExchange)
+    monkeypatch.setenv("BITGET_DEMO_API_KEY", "bitget-demo-key")
+    monkeypatch.setenv("BITGET_DEMO_SECRET_KEY", "bitget-demo-secret")
+    monkeypatch.setenv("BITGET_DEMO_PASSPHRASE", "bitget-demo-pass")
+
+    ex = _auth_executor("bitget", simulated=True)
+    client = ex._client()
+
+    assert client.captured_kwargs["apiKey"] == "bitget-demo-key"
+    assert client.captured_kwargs["secret"] == "bitget-demo-secret"
+    assert client.captured_kwargs["password"] == "bitget-demo-pass"
+
+
+def test_ccxt_adapter_gate_auth_kwargs(monkeypatch):
+    _install_fake_ccxt(monkeypatch, gate=_FakeAuthExchange)
+    # live mode -> plain creds preferred over testnet.
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "true")
+    monkeypatch.setenv("GATE_API_KEY", "gate-live-key")
+    monkeypatch.setenv("GATE_SECRET_KEY", "gate-live-secret")
+    monkeypatch.setenv("GATE_TESTNET_API_KEY", "gate-testnet-key")
+    monkeypatch.setenv("GATE_TESTNET_SECRET_KEY", "gate-testnet-secret")
+
+    ex = _auth_executor("gate", simulated=False)
+    client = ex._client()
+
+    assert client.captured_kwargs["apiKey"] == "gate-live-key"
+    assert client.captured_kwargs["secret"] == "gate-live-secret"
+    # live mode never enables sandbox.
+    assert "_sandbox" not in client.captured_kwargs
 
 
 def test_symbol_mapping_usdc_suffix():

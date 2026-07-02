@@ -202,6 +202,20 @@ class CcxtExecutor(BaseExecutor):
                     "privateKey": creds.get("HYPERLIQUID_PRIVATE_KEY", ""),
                 }
             )
+        elif exchange_id == "binance":
+            default_type = self.execution_cfg.get("ccxt_default_type", "future")
+            kwargs["apiKey"] = creds.get("BINANCE_API_KEY", "")
+            kwargs["secret"] = creds.get("BINANCE_SECRET_KEY", "")
+            kwargs.setdefault("options", {})["defaultType"] = default_type
+        elif exchange_id == "bitget":
+            kwargs["apiKey"] = creds.get("BITGET_API_KEY", "")
+            kwargs["secret"] = creds.get("BITGET_SECRET_KEY", "")
+            kwargs["password"] = creds.get("BITGET_PASSPHRASE", "")
+        elif exchange_id in ("gate", "gateio"):
+            kwargs["apiKey"] = creds.get("GATE_API_KEY", "")
+            kwargs["secret"] = creds.get("GATE_SECRET_KEY", "")
+        # coinbase: set_sandbox_mode() raises in ccxt 4.5.61 (no test URL). Live/spot only.
+        # Credentials resolved but not wired — add elif when ccxt adds coinbase sandbox support.
 
         client = exchange_cls(kwargs)
 
