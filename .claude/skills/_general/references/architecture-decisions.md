@@ -68,7 +68,7 @@
 
 ### Config splits into three sources of truth
 - **Decision:** Runtime config lives in `engine-config.json` (strategy_engine + advisor), per-strategy config lives in `strategies/*.json` (instrument, leverage, budget, execution_mode), exchange metadata comes from CCXT (fees, funding, venue details)
-- **Alternatives:** Monolithic `shadow-config.json` with all keys merged; or two files with exchange data still hardcoded
+- **Alternatives:** Monolithic `shadow-config.json` with all keys merged (dead code — retained for historical context only); or two files with exchange data still hardcoded
 - **Rationale:** Separating concerns prevents config drift. Strategy files are the single source for per-instrument settings. CCXT is the single source for exchange reality. `engine-config.json` is minimal and stable.
 
 ### ALLOWED_SYMBOLS derives from STRATEGIES, not a config blob

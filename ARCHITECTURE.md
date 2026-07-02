@@ -436,10 +436,10 @@ Intelligence is **purely additive** and lives *outside* the money path. Pattern:
 | Path | Role |
 |---|---|
 | `src/webhook_receiver.py` | TradingView intake → auth/rate-limit/normalize/schema/dedupe → queue/workers → strategy match → readiness → execution + reconciliation; HTTP `:8891` |
+| `src/webhook/money.py` | Pure money/decimal leaf: `Decimal` coercion (`D`), fixed-precision quantizers/formatters (`dec_usd`/`dec_notional`/`dec_pct`/`dec_units`), and recursive `canonicalize_decimal_fields`; re-exported by `webhook_receiver` for backward compatibility |
 | `src/dashboard.py` | Read-only operator dashboard + `/api` + `/health`; HTTP `:8098` |
 | `src/dashboard_core.py` | Dashboard data plumbing: tolerant ledger reads, OKX ticker cache, per-ledger read stats |
 | `src/hermx_shared.py` | Single source of truth for `canonical_timeframe()` (shared by receiver + dashboard) |
-| `src/strategy/decision_math.py` | Pure policy/decision math (Duo Base & related policies), re-exported by the receiver |
 | `src/execution/service.py` | `ExecutionService` — the single money-safety chokepoint (7 invariants); `resolve_execution_config` |
 | `src/executors/base.py` | `BaseExecutor` contract + normalized fill/order/position/balance shapes |
 | `src/executors/ccxt_adapter.py` | `CcxtExecutor` — sole execution backend: write path + normalized read/query contract |
@@ -448,6 +448,7 @@ Intelligence is **purely additive** and lives *outside* the money path. Pattern:
 | `src/skills/hermes_execution.py` | `HermesRelayAdapter` — internal relay adapter (reference seam), not a Hermes Agent skill; delegates all safety to the service |
 | `src/security/credentials.py` | Per-exchange namespaced credential resolution + `redact_secrets` |
 | `src/security/webhook_auth.py` | Pure auth/rate-limit/HMAC/replay helpers |
+| `deploy/deploy.sh` | Config-safe deploy script: snapshot, pull, pip install, UI build, test gate, restart, auto-rollback |
 | `skills/hermx-control/SKILL.md` | Agent skill: loopback reads + signal relay, with hard money-safety rules (older single-skill model) |
 | `skills/hermx-{status,positions,strategy-list,trace,strategy-mode,close,restart,upgrade,help}/SKILL.md` | Slash-command skills — one dynamic Hermes command each (see `docs/hermx-slash-commands.md`) |
 | `skills/hermx-ops/` | Shared helper (`lib/hermx_ops.py`) + canonical API contract (`references/api-contract.md`) for the slash commands |

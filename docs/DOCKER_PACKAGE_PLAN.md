@@ -501,7 +501,7 @@ info "Update later:   (cd $INSTALL_DIR && docker compose pull && docker compose 
   `pick_exchange` copies a venue profile to `engine-config.json` — but every profile is
   byte-equivalent to the baked baseline (only `strategy_engine`; venue is `.env`-driven).
   So the package script seeds the baked baseline and skips the profile copy. **No dead
-  `shadow-config.json` reference anywhere.**
+  `shadow-config.json` (dead code) reference anywhere — confirmed absent.**
 - `cp -r /app/strategies/. /seed/strategies/` (trailing `/.`) copies contents, not the
   dir, so re-runs are idempotent and don't nest.
 - `--entrypoint sh` overrides the image's default `python` CMD for the seed container.

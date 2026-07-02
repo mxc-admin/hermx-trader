@@ -20,9 +20,10 @@ The agent uses only the local loopback API that already runs:
   there is no size/notional/leverage field — the receiver computes notional from the
   strategy file).
 
-> Port note: the receiver listens on `SHADOW_PORT` (default 8891 everywhere — code,
-> `setup/env.example`, the scripts, and this skill). If you override `SHADOW_PORT` in
-> your `.env`, update the skill's port to match. See `INSTALL.md` (Phase 2 / Phase 5).
+> Port note: the receiver listens on `SHADOW_PORT` (legacy naming — the code still
+> reads this env var for backward compatibility; default 8891 everywhere — code,
+> `setup/env.example`, the scripts, and this skill). If you override the legacy `SHADOW_PORT`
+> in your `.env`, update the skill's port to match. See `INSTALL.md` (Phase 2 / Phase 5).
 
 ## Steps
 
@@ -137,8 +138,7 @@ configured provider + credentials) and can use the `hermx-control` skill to read
 local API before its verdict. It is **not** a bare LLM call. Requires the `hermes` binary
 on the receiver's `PATH` (step 1) and the skill registered (step 3).
 
-It is OFF by default. Defaults are built in; env vars override and an optional
-`shadow-config.json` `advisor` block can be added if you want file-based overrides:
+It is OFF by default. Defaults are built in; env vars override. (Note: `shadow-config.json` is dead code — not a config source; file-based overrides live in the `advisor` block of `engine-config.json`, loaded via `load_engine_config()`.) The env vars:
 
 ```
 HERMX_ADVISOR_ENABLED=true        # single live-veto switch (default OFF); a 'skip' blocks the trade

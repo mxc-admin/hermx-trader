@@ -303,7 +303,7 @@ dashboard token. Send it as the `X-Dashboard-Token` header, or as the Bearer / B
 **(d) Ports — defaults are correct; change only if a port is already taken**
 
 ```text
-SHADOW_PORT=8891            # webhook receiver (loopback)
+SHADOW_PORT=8891            # webhook receiver (loopback) — legacy naming; code still reads SHADOW_PORT for backward compatibility
 CLEAN_DASHBOARD_PORT=8098   # dashboard (loopback)
 ```
 
@@ -552,6 +552,18 @@ curl -sf http://127.0.0.1:8098/health && echo " dashboard OK"
 ```
 
 Follow logs if needed: `journalctl -u hermx-receiver -f` (Ctrl-C to stop).
+
+To update a running systemd/bare-metal host later, use the config-safe deploy script rather than
+a raw `git pull`:
+
+```bash
+cd /opt/hermx
+bash deploy/deploy.sh
+```
+
+`deploy/deploy.sh` snapshots operator config, pulls, runs `pip install`, rebuilds the UI, runs the
+offline test gate, restarts the services, and **auto-rolls back** to the prior commit if the
+post-restart health check fails.
 
 #### A · Mac / local (foreground)
 
@@ -961,7 +973,7 @@ order is blocked (`live_trading_disabled`). Never enable live unless the user ex
 ## Troubleshooting
 
 - **Port already in use** (`Address already in use`): find the holder with `sudo lsof -i :8891`
-  (or `:8098`), stop it, or change `SHADOW_PORT` / `CLEAN_DASHBOARD_PORT` in `.env` — then re-point
+  (or `:8098`), stop it, or change the legacy `SHADOW_PORT` / `CLEAN_DASHBOARD_PORT` in `.env` — then re-point
   Tailscale Funnel (`sudo tailscale funnel --bg <newport>`) and any agent config.
 - **Tailscale not authenticated / no public URL**: re-run `sudo tailscale up --hostname=hermx`,
   finish the browser login, enable Funnel, then `sudo tailscale funnel --bg 8891`. Check
