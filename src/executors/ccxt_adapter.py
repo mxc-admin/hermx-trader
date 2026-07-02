@@ -112,6 +112,10 @@ def _inst_id_to_ccxt_symbol(inst_id: str | None) -> str | None:
     if text.endswith("USDT") and "-" not in text and "/" not in text:
         base = text[:-4]
         return f"{base}/USDT"
+    # SOLUSDC -> SOL/USDC (Hyperliquid quotes in USDC)
+    if text.endswith("USDC") and "-" not in text and "/" not in text:
+        base = text[:-4]
+        return f"{base}/USDC"
     return text
 
 
@@ -155,7 +159,8 @@ class CcxtExecutor(BaseExecutor):
         if exchange_cls is None:
             raise ValueError(f"unsupported_ccxt_exchange:{exchange_id}")
 
-        creds = resolve_exchange_credentials(exchange_id, os.environ)
+        mode = "live" if not bool(self.execution_cfg.get("simulated_trading", True)) else "demo"
+        creds = resolve_exchange_credentials(exchange_id, os.environ, mode=mode)
         # `timeout` (ms) bounds every ccxt HTTP call (including create_order) so a
         # hung submit raises RequestTimeout and is mapped to mode "submit_timeout"
         # -> UNKNOWN (invariant 5) instead of hanging.
@@ -683,12 +688,27 @@ class CcxtExecutor(BaseExecutor):
                 return self._normalize_order(order)
 
             if cl_ord_id:
+                # On Hyperliquid, fetch_closed_orders lags right after a fill, so the
+                # scan below sees not_found and the UNKNOWN-resolver spams
+                # RECONCILE_MISMATCH until the symbol pauses. fetch_order accepts the
+                # cloid against the live orderStatus endpoint (immediate), so try that
+                # first. The clientOrderId returned by the scan endpoints is the hashed
+                # cloid — not the raw HermX id — so the scan must compare against it too.
+                is_hyperliquid = self._exchange_id() == "hyperliquid"
+                match_id = _to_hyperliquid_cloid(str(cl_ord_id)) if is_hyperliquid else str(cl_ord_id)
+                if is_hyperliquid:
+                    try:
+                        order = client.fetch_order(match_id, symbol=symbol)
+                        if order:
+                            return self._normalize_order(order)
+                    except Exception:
+                        pass
                 for order in (client.fetch_open_orders(symbol=symbol) or []):
-                    if str(order.get("clientOrderId") or "") == str(cl_ord_id):
+                    if str(order.get("clientOrderId") or "") == match_id:
                         return self._normalize_order(order)
                 try:
                     for order in (client.fetch_closed_orders(symbol=symbol, limit=200) or []):
-                        if str(order.get("clientOrderId") or "") == str(cl_ord_id):
+                        if str(order.get("clientOrderId") or "") == match_id:
                             return self._normalize_order(order)
                 except Exception:
                     pass

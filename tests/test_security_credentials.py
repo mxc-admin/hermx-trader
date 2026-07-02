@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from security.credentials import redact_secrets, resolve_executor_env
+from security.credentials import (
+    redact_secrets,
+    resolve_exchange_credentials,
+    resolve_executor_env,
+)
 
 
 def test_resolve_executor_env_scopes_credentials_to_selected_exchange():
@@ -21,6 +25,106 @@ def test_resolve_executor_env_scopes_credentials_to_selected_exchange():
     assert env["HERMX_LIVE_TRADING"] == "false"
     assert "KUCOIN_PAPER_API_KEY" not in env
     assert "UNRELATED_SECRET" not in env
+
+
+def test_resolve_okx_demo_prefers_demo_keys():
+    env = {
+        "OKX_API_KEY": "okx-live-key",
+        "OKX_SECRET_KEY": "okx-live-secret",
+        "OKX_PASSPHRASE": "okx-live-pass",
+        "OKX_DEMO_API_KEY": "okx-demo-key",
+        "OKX_DEMO_SECRET_KEY": "okx-demo-secret",
+        "OKX_DEMO_PASSPHRASE": "okx-demo-pass",
+    }
+    creds = resolve_exchange_credentials("okx", env, mode="demo")
+    assert creds["OKX_API_KEY"] == "okx-demo-key"
+    assert creds["OKX_SECRET_KEY"] == "okx-demo-secret"
+    assert creds["OKX_PASSPHRASE"] == "okx-demo-pass"
+
+
+def test_resolve_okx_live_prefers_plain_keys():
+    env = {
+        "OKX_API_KEY": "okx-live-key",
+        "OKX_SECRET_KEY": "okx-live-secret",
+        "OKX_PASSPHRASE": "okx-live-pass",
+        "OKX_DEMO_API_KEY": "okx-demo-key",
+        "OKX_DEMO_SECRET_KEY": "okx-demo-secret",
+        "OKX_DEMO_PASSPHRASE": "okx-demo-pass",
+    }
+    creds = resolve_exchange_credentials("okx", env, mode="live")
+    assert creds["OKX_API_KEY"] == "okx-live-key"
+    assert creds["OKX_SECRET_KEY"] == "okx-live-secret"
+    assert creds["OKX_PASSPHRASE"] == "okx-live-pass"
+
+
+def test_resolve_okx_default_mode_is_demo():
+    env = {"OKX_API_KEY": "okx-live-key", "OKX_DEMO_API_KEY": "okx-demo-key"}
+    creds = resolve_exchange_credentials("okx", env)
+    assert creds["OKX_API_KEY"] == "okx-demo-key"
+
+
+def test_resolve_kucoin_demo_vs_live():
+    env = {
+        "KUCOIN_API_KEY": "kucoin-live-key",
+        "KUCOIN_SECRET": "kucoin-live-secret",
+        "KUCOIN_PASSPHRASE": "kucoin-live-pass",
+        "KUCOIN_PAPER_API_KEY": "kucoin-paper-key",
+        "KUCOIN_PAPER_SECRET": "kucoin-paper-secret",
+        "KUCOIN_PAPER_PASSPHRASE": "kucoin-paper-pass",
+    }
+    demo = resolve_exchange_credentials("kucoin", env, mode="demo")
+    assert demo["KUCOIN_API_KEY"] == "kucoin-paper-key"
+    assert demo["KUCOIN_SECRET"] == "kucoin-paper-secret"
+    assert demo["KUCOIN_PASSPHRASE"] == "kucoin-paper-pass"
+
+    live = resolve_exchange_credentials("kucoin", env, mode="live")
+    assert live["KUCOIN_API_KEY"] == "kucoin-live-key"
+    assert live["KUCOIN_SECRET"] == "kucoin-live-secret"
+    assert live["KUCOIN_PASSPHRASE"] == "kucoin-live-pass"
+
+
+def test_resolve_bybit_demo_vs_live():
+    env = {
+        "BYBIT_API_KEY": "bybit-live-key",
+        "BYBIT_SECRET_KEY": "bybit-live-secret",
+        "BYBIT_TESTNET_API_KEY": "bybit-testnet-key",
+        "BYBIT_TESTNET_SECRET_KEY": "bybit-testnet-secret",
+    }
+    demo = resolve_exchange_credentials("bybit", env, mode="demo")
+    assert demo["BYBIT_API_KEY"] == "bybit-testnet-key"
+    assert demo["BYBIT_SECRET_KEY"] == "bybit-testnet-secret"
+
+    live = resolve_exchange_credentials("bybit", env, mode="live")
+    assert live["BYBIT_API_KEY"] == "bybit-live-key"
+    assert live["BYBIT_SECRET_KEY"] == "bybit-live-secret"
+
+
+def test_resolve_hyperliquid_live_returns_pair_when_both_present():
+    env = {
+        "HYPERLIQUID_WALLET_ADDRESS": "0xlive",
+        "HYPERLIQUID_PRIVATE_KEY": "live-pk",
+    }
+    creds = resolve_exchange_credentials("hyperliquid", env, mode="live")
+    assert creds["HYPERLIQUID_WALLET_ADDRESS"] == "0xlive"
+    assert creds["HYPERLIQUID_PRIVATE_KEY"] == "live-pk"
+
+
+def test_resolve_hyperliquid_live_fails_closed_on_partial():
+    env = {"HYPERLIQUID_WALLET_ADDRESS": "0xlive"}  # no private key
+    creds = resolve_exchange_credentials("hyperliquid", env, mode="live")
+    assert creds == {}
+
+
+def test_resolve_hyperliquid_demo_prefers_testnet_pair():
+    env = {
+        "HYPERLIQUID_WALLET_ADDRESS": "0xlive",
+        "HYPERLIQUID_PRIVATE_KEY": "live-pk",
+        "HYPERLIQUID_TESTNET_WALLET_ADDRESS": "0xtestnet",
+        "HYPERLIQUID_TESTNET_PRIVATE_KEY": "testnet-pk",
+    }
+    creds = resolve_exchange_credentials("hyperliquid", env, mode="demo")
+    assert creds["HYPERLIQUID_WALLET_ADDRESS"] == "0xtestnet"
+    assert creds["HYPERLIQUID_PRIVATE_KEY"] == "testnet-pk"
 
 
 def test_redact_secrets_scrubs_known_values(monkeypatch):

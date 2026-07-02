@@ -359,6 +359,117 @@ def test_okx_params_unchanged_regression_guard(monkeypatch):
     assert fake.calls[1]["price"] is None
 
 
+def test_symbol_mapping_usdc_suffix():
+    # Hyperliquid quotes in USDC; the bare-suffix form must map like USDT does.
+    assert _inst_id_to_ccxt_symbol("SOLUSDC") == "SOL/USDC"
+    assert _inst_id_to_ccxt_symbol("BTCUSDT") == "BTC/USDT"
+
+
+def test_hyperliquid_get_order_direct_cloid_fetch_before_scan(monkeypatch):
+    # After a fill, fetch_closed_orders lags; get_order must hit fetch_order with the
+    # hashed cloid FIRST and never fall back to scanning open/closed orders.
+    ex = _hl_executor()
+    hermx_id = "550e8400-e29b-41d4-a716-446655440000"
+    expected_cloid = _to_hyperliquid_cloid(hermx_id)
+
+    class _Client(_FakeHLClient):
+        def __init__(self):
+            super().__init__()
+            self.fetch_order_calls = []
+            self.scanned = False
+
+        def fetch_order(self, order_id, symbol=None):
+            self.fetch_order_calls.append((order_id, symbol))
+            return {
+                "id": "hl-ord-live-1",
+                "symbol": symbol,
+                "clientOrderId": expected_cloid,
+                "status": "closed",
+                "side": "buy",
+                "type": "market",
+                "average": 60000.0,
+                "filled": 1,
+                "amount": 1,
+                "timestamp": 1719300003000,
+                "info": {},
+            }
+
+        def fetch_open_orders(self, symbol=None):
+            self.scanned = True
+            return []
+
+        def fetch_closed_orders(self, symbol=None, limit=100):
+            self.scanned = True
+            return []
+
+    fake = _Client()
+    monkeypatch.setattr(ex, "_client", lambda: fake)
+
+    out = ex.get_order("SOL-USDC-SWAP", cl_ord_id=hermx_id)
+
+    # fetch_order called once with the hashed cloid and the mapped symbol.
+    assert fake.fetch_order_calls == [(expected_cloid, "SOL/USDC:USDC")]
+    # Direct fetch succeeded -> no scan fallback.
+    assert fake.scanned is False
+    assert out["state"] == "filled"
+    assert out["ord_id"] == "hl-ord-live-1"
+
+
+def test_hyperliquid_get_order_scan_matches_hashed_cloid(monkeypatch):
+    # If the live fetch_order misses, the scan fallback must compare against the
+    # hashed cloid (what CCXT returns in clientOrderId), not the raw HermX id.
+    ex = _hl_executor()
+    hermx_id = "550e8400-e29b-41d4-a716-446655440000"
+    expected_cloid = _to_hyperliquid_cloid(hermx_id)
+
+    class _Client(_FakeHLClient):
+        def fetch_order(self, order_id, symbol=None):
+            raise Exception("order does not exist")
+
+        def fetch_open_orders(self, symbol=None):
+            return []
+
+        def fetch_closed_orders(self, symbol=None, limit=100):
+            return [
+                {
+                    "id": "hl-ord-closed-1",
+                    "symbol": symbol,
+                    # Hyperliquid reports the hashed cloid here, NOT the HermX UUID.
+                    "clientOrderId": expected_cloid,
+                    "status": "closed",
+                    "side": "buy",
+                    "type": "market",
+                    "average": 60000.0,
+                    "filled": 1,
+                    "amount": 1,
+                    "timestamp": 1719300003000,
+                    "info": {},
+                }
+            ]
+
+    fake = _Client()
+    monkeypatch.setattr(ex, "_client", lambda: fake)
+
+    out = ex.get_order("SOL-USDC-SWAP", cl_ord_id=hermx_id)
+
+    # Raw-id comparison would have missed and returned not_found.
+    assert out["state"] == "filled"
+    assert out["ord_id"] == "hl-ord-closed-1"
+
+
+def test_okx_get_order_scan_uses_raw_cl_ord_id(monkeypatch):
+    # Non-hyperliquid path is unchanged: compare against the raw cl_ord_id, and never
+    # hash it. _FakeClient.fetch_closed_orders returns clientOrderId="cid-1".
+    ex = _executor()
+    fake = _FakeClient()
+    monkeypatch.setattr(ex, "_client", lambda: fake)
+
+    out = ex.get_order("BTC-USDT-SWAP", cl_ord_id="cid-1")
+
+    assert out["state"] == "filled"
+    assert out["ord_id"] == "ord-h-1"
+
+
 def test_hyperliquid_close_leg_gets_cloid(monkeypatch):
     ex = _hl_executor()
     fake = _FakeHLLongClient()
