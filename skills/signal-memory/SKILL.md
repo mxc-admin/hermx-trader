@@ -8,7 +8,7 @@ platforms: [linux, macos]
 required_environment_variables:
   - name: HERMX_SECRET
     prompt: "HermX dashboard shared secret"
-    help: "Set in HermX .env on this host. Required when HERMX_DASH_AUTH=true."
+    help: "Set in HermX .env on this host. Required by default (HERMX_DASH_AUTH is on unless explicitly set false)."
     required_for: "Authenticated read of the signal history endpoint"
 metadata:
   hermes:
@@ -41,7 +41,7 @@ Reads recent HermX signal history and advisor decisions for agent continuity. Us
 
 ## Procedure
 
-1. Call `GET {hermx.dashboard_base}/api/signals?n=50` with `X-Dashboard-Token: {HERMX_SECRET}` header (omit header if `HERMX_DASH_AUTH` is false).
+1. Call `GET {hermx.dashboard_base}/api/signals?n=50` with the `X-Dashboard-Token: {HERMX_SECRET}` header. Auth is on by default, so the header is required unless the operator explicitly set `HERMX_DASH_AUTH=false`.
 2. Parse the response — a list of recent signal records, each containing:
    - `symbol`, `side`, `strategy_id`
    - `submitted_at` (ISO timestamp)

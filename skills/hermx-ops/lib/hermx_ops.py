@@ -37,8 +37,67 @@ HTTP_TIMEOUT_SECONDS = float(os.environ.get("HERMX_HTTP_TIMEOUT", "5"))
 CONTROL_STATE_PATH = Path(os.environ.get("HERMX_DATA_DIR", ".")) / "control-state.json"
 STRATEGIES_DIR = Path(os.environ.get("HERMX_DATA_DIR", ".")) / "strategies"
 
+# skills/hermx-ops/lib/hermx_ops.py → repo root is three parents up.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
 # Sentinel for any value we could not determine. Distinct from FLAT/empty on purpose.
 UNKNOWN = "UNKNOWN"
+
+
+# --------------------------------------------------------------------------- #
+# Secret resolution                                                           #
+# --------------------------------------------------------------------------- #
+def _load_secret():
+    """Resolve the dashboard shared secret (``X-Dashboard-Token``).
+
+    The dashboard defaults ``HERMX_DASH_AUTH`` **on**, so ``/api`` and the mutating
+    endpoints require this token. Skill processes don't inherit the HermX ``.env``, so
+    we resolve the secret ourselves in this order:
+
+        1. ``HERMX_SECRET`` in the environment.
+        2. A ``HERMX_SECRET=...`` line in ``${HERMX_DATA_DIR}/.env`` (if that env is set).
+        3. A ``HERMX_SECRET=...`` line in ``REPO_ROOT/.env``.
+
+    Returns the value, or ``None`` if nothing is found anywhere. Robust to a missing or
+    unreadable file, blank/comment/malformed lines, ``export`` prefixes, and quoted or
+    inline-commented values.
+    """
+    env_secret = os.environ.get("HERMX_SECRET")
+    if env_secret:
+        return env_secret
+
+    candidates = []
+    data_dir = os.environ.get("HERMX_DATA_DIR")
+    if data_dir:
+        candidates.append(Path(data_dir) / ".env")
+    candidates.append(REPO_ROOT / ".env")
+
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            continue
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            key, sep, value = line.partition("=")
+            if sep != "=" or key.strip() != "HERMX_SECRET":
+                continue
+            value = value.strip()
+            if value[:1] in ("'", '"'):
+                quote_char = value[0]
+                end = value.find(quote_char, 1)
+                value = value[1:end] if end != -1 else value[1:]
+            else:
+                # Strip an inline comment only when it follows whitespace, so a '#'
+                # inside an unquoted secret is preserved.
+                value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()
+            if value:
+                return value
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -135,6 +194,8 @@ def read_state(dashboard_base=DASHBOARD_BASE, secret=None):
           "errors": {"api": ..., "health": ..., "receiver": ...},
         }
     """
+    if secret is None:
+        secret = _load_secret()  # auto-resolve from env/.env when caller omitted it
     receiver_secret = secret  # receiver /health is unauthenticated; kept for symmetry
     api, api_err = _get_json(dashboard_base, "/api", secret=secret)
     health, health_err = _get_json(dashboard_base, "/health", secret=secret)
@@ -472,7 +533,12 @@ def _post_json(base, path, payload, secret=None, timeout=HTTP_TIMEOUT_SECONDS):
     The ``X-Dashboard-Token`` header is added whenever a secret is supplied — the
     close/control endpoints fail closed on a blank/absent token, so callers should
     always pass ``secret`` (a blank one surfaces as a 401 the caller can report).
+
+    When ``secret is None`` the token is auto-resolved via ``_load_secret()`` (env or
+    ``.env``); pass an explicit secret to bypass that lookup.
     """
+    if secret is None:
+        secret = _load_secret()
     url = base.rstrip("/") + path
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")

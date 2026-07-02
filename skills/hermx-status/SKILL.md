@@ -8,7 +8,7 @@ platforms: [linux, macos]
 required_environment_variables:
   - name: HERMX_SECRET
     prompt: "HermX dashboard shared secret (X-Dashboard-Token header)"
-    help: "Set in HermX .env on this host. Required only when HERMX_DASH_AUTH=true."
+    help: "Set in HermX .env on this host. Required by default (HERMX_DASH_AUTH is on unless explicitly set false)."
     required_for: "Authenticated dashboard /api read"
 metadata:
   hermes:
@@ -37,7 +37,11 @@ Endpoint shapes, auth, and the UNKNOWN-never-flat rule live in
 - "when was the last alert?"
 - Quick health check before any other HermX action.
 
-## Reads (loopback, no auth on default host)
+## Reads (loopback; `/api` is auth-gated by default)
+
+`HERMX_DASH_AUTH` defaults **on**, so `/api` requires `X-Dashboard-Token: {HERMX_SECRET}`.
+The helper auto-resolves the secret from `HERMX_SECRET` or the HermX `.env`; a 401 on
+`/api` means the token is missing/wrong (`/health` is unauthenticated and still works).
 
 | Field           | Source                                    |
 |-----------------|-------------------------------------------|
@@ -55,8 +59,8 @@ Endpoint shapes, auth, and the UNKNOWN-never-flat rule live in
    rtk python3 - <<'PY'
    import sys; sys.path.insert(0, "skills/hermx-ops/lib")
    import os, hermx_ops as h
-   secret = os.environ.get("HERMX_SECRET")  # None unless HERMX_DASH_AUTH=true
-   st = h.read_state(secret=secret)
+   secret = os.environ.get("HERMX_SECRET")  # primary source; helper falls back to .env
+   st = h.read_state(secret=secret)         # auto-loads the token from .env if env unset
    print("dashboard:", "UP" if st["reachable"]["dashboard"] else "DOWN")
    print("receiver :", "UP" if st["reachable"]["receiver"] else "DOWN")
    print("armed    :", st["armed"])
@@ -64,6 +68,13 @@ Endpoint shapes, auth, and the UNKNOWN-never-flat rule live in
    print("kill_sw  :", st["kill_switch_engaged"])
    print("freshness:", st["freshness"])
    print("strategies:", st["strategy_count"])
+   errs = st.get("errors") or {}
+   if errs.get("api") == "http_401":
+       print("AUTH FAILED — dashboard /api rejected with 401. "
+             "Check HERMX_SECRET in .env or set HERMX_DASH_AUTH=false to disable.")
+   other = {k: v for k, v in errs.items() if v and not (k == "api" and v == "http_401")}
+   if other:
+       print("errors   :", other)
    PY
    ```
 

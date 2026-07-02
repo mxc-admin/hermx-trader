@@ -18,11 +18,14 @@ Both bind loopback on the same VPS. Never call an exchange directly.
 ## Auth
 
 - Header: `X-Dashboard-Token: {HERMX_SECRET}`.
-- Sent **only** when `HERMX_DASH_AUTH` is on. On loopback with auth off (the default
-  on this host) no header is required.
-- `HERMX_SECRET` comes from the HermX `.env`. If a `/api` read returns `401
-  unauthorized`, the token is required and missing/wrong — treat as a read failure
-  (→ UNKNOWN), not as "flat" / "no positions".
+- `HERMX_DASH_AUTH` defaults **on** (unset ⇒ enabled), so `/api` and `/api/signals`
+  **require** the token. Only `/health` (dashboard and receiver) is unauthenticated.
+  A header is required unless the operator has explicitly set `HERMX_DASH_AUTH=false`.
+- `HERMX_SECRET` comes from the HermX `.env`. Skill processes don't inherit that env,
+  so `lib/hermx_ops.py::_load_secret()` resolves it from `HERMX_SECRET` or the `.env`
+  (`${HERMX_DATA_DIR}/.env`, then repo-root `.env`).
+- If a `/api` read returns `401 unauthorized`, the token is required and missing/wrong
+  — treat as a read failure (→ UNKNOWN), not as "flat" / "no positions".
 
 ## Endpoints
 
