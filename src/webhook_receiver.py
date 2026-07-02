@@ -980,12 +980,27 @@ def normalize(payload: dict) -> dict:
     indicator = str(first(payload, "indicator", "indicator_name", "indicatorName", default="")).strip()
     symbol = str(first(payload, "symbol", "ticker", default="")).upper()
     symbol = symbol.replace("OKX:", "").replace("/", "").replace("-", "")
-    side = str(first(payload, "side", "action", default="")).lower()
+    # `action` is the primary intent field; `side` is derived for back-compat.
+    # Legacy alerts send only `side` (buy|sell); `action` adds `close`. When both
+    # are present the conflict gate in build_record catches opposing open sides.
+    raw_action = str(first(payload, "action", default="") or "").lower().strip()
+    raw_side = str(first(payload, "side", default="") or "").lower().strip()
+    _valid_open = {"buy", "sell"}
+    _valid_action = {"buy", "sell", "close"}
+    if raw_action in _valid_action:
+        action = raw_action
+    elif raw_side in _valid_open:
+        action = raw_side          # derive action from side for legacy alerts
+    else:
+        action = raw_action or raw_side   # preserve for error reporting
+    side = action if action in _valid_open else (raw_side if raw_side in _valid_open else "")
     timeframe = canonical_timeframe(first(payload, "timeframe", "interval", default="30m"))
     tv_time = str(first(payload, "tv_time", "time", "timestamp", "bar_time", "candle_time", default=now_iso()))
     signal_id = str(first(payload, "signal_id", default=""))
     if not signal_id:
-        raw = f"{strategy_id}|{symbol}|{side}|{timeframe}|{tv_time}"
+        # Hash on `action` (not `side`): buy/sell are unchanged (action==side), while
+        # a `close` bar gets a deterministic id instead of collapsing to an empty side.
+        raw = f"{strategy_id}|{symbol}|{action}|{timeframe}|{tv_time}"
         signal_id = hashlib.sha256(raw.encode()).hexdigest()
     normalized = {
         "strategy_id": strategy_id,
@@ -993,6 +1008,7 @@ def normalize(payload: dict) -> dict:
         "indicator": indicator,
         "symbol": symbol,
         "side": side,
+        "action": action,
         "timeframe": timeframe,
         "tv_signal_price": as_float(first(payload, "tv_signal_price", "tv_close", "signal_price", "price", "close", default=None)),
         "chart_type": (lambda c: str(c).lower() if c else None)(first(payload, "chart_type", default=None)),
@@ -1007,6 +1023,10 @@ def normalize(payload: dict) -> dict:
     # Optional observe-only debugging context. Only carried when it is a dict --
     # never inject ``extras: None``, which would fail the schema's ``object`` type
     # check (schema key ``extras`` is an object) and reject otherwise-valid alerts.
+    # A close carries no side; drop the empty value so it never trips the schema's
+    # side enum (buy|sell). `action` is the authoritative field for a close bar.
+    if not normalized.get("side"):
+        normalized.pop("side", None)
     extras = payload.get("extras")
     if isinstance(extras, dict):
         normalized["extras"] = extras
@@ -2824,9 +2844,129 @@ def execute_with_advisor(record: dict) -> dict:
     return execute_if_enabled(record)
 
 
+def _build_close_record(payload: dict, normalized: dict, received_at_override: str | None = None) -> tuple[int, dict]:
+    """Intake path for a webhook-driven close (action=close). Runs the SAME
+    source / schema / strategy-match / dedupe gates as an open signal, then routes
+    through the operator-close executor (close_only=True). A close carries no side,
+    so it deliberately bypasses the ALLOWED_SIDES gate that guards open signals."""
+    if normalized.get("source") != "tradingview":
+        return 202, {"ok": True, "ignored": True, "reason": "non_tradingview_source", "normalized": normalized}
+
+    received_at = received_at_override or now_iso()
+
+    # Schema enforcement — identical posture to the open path (observe-only default).
+    _alert_schema_enforcement_status()
+    schema_ok, schema_error = validate_alert_schema(normalized)
+    if not schema_ok:
+        ALERT_SCHEMA_METRICS["invalid"] += 1
+        if bool(STRATEGY_ENGINE.get("enforce_alert_schema", False)):
+            ALERT_SCHEMA_METRICS["quarantined"] += 1
+            reason = f"alert_schema_invalid:{schema_error}"
+            record = {
+                "received_at": received_at,
+                "mode": "strategy_alert_quarantine",
+                "ok": True,
+                "quarantined": True,
+                "reason": reason,
+                "payload": payload,
+                "normalized": normalized,
+                "strategy_config": None,
+            }
+            record_pipeline_event("quarantine", normalized.get("signal_id"), record)
+            record_raw_webhook("webhook", {"received_at": received_at, "payload": payload, "normalized": normalized, "quarantined": True, "reason": reason})
+            return 202, record
+        logging.warning("alert schema invalid (observe-only, processing anyway): %s", schema_error)
+
+    # A close must resolve to a KNOWN strategy — venue/instrument routing lives in
+    # the strategy file. No match → quarantine (never a 400 side_not_allowed).
+    strategy_ok, strategy_config, strategy_error = validate_strategy_alert(normalized)
+    if not strategy_ok or strategy_config is None:
+        reason = strategy_error or "strategy_id_unknown"
+        record = {
+            "received_at": received_at,
+            "mode": "strategy_alert_quarantine",
+            "ok": True,
+            "quarantined": True,
+            "reason": reason,
+            "payload": payload,
+            "normalized": normalized,
+            "strategy_config": strategy_config,
+        }
+        record_pipeline_event("quarantine", normalized.get("signal_id"), record)
+        record_raw_webhook("webhook", {"received_at": received_at, "payload": payload, "normalized": normalized, "quarantined": True, "reason": reason})
+        return 202, record
+
+    duplicate, dedupe = check_and_mark_signal(normalized, received_at)
+    latency = latency_info(normalized.get("tv_time"), received_at)
+    if duplicate:
+        record = {
+            "received_at": received_at,
+            "mode": "webhook_close",
+            "config_snapshot": {"strategy_engine": STRATEGY_ENGINE},
+            "ok": True,
+            "duplicate": True,
+            "dedupe": dedupe,
+            "latency": latency,
+            "payload": payload,
+            "normalized": normalized,
+            "strategy_config": strategy_config,
+        }
+        record_raw_webhook("webhook", {"received_at": received_at, "payload": payload, "normalized": normalized, "duplicate": True})
+        record_pipeline_event("dedup_reject", normalized.get("signal_id"), record)
+        return 200, record
+
+    # Route through the SAME controlled operator-close executor. close_only=True in
+    # its readiness bypasses the kill switch + symbol pause; every other gate runs.
+    # When the execution surface is unavailable this returns not_submitted (no order).
+    result = execute_operator_close(normalized["symbol"], strategy_config, reason="webhook_close")
+    record = {
+        "received_at": received_at,
+        "mode": "webhook_close",
+        "config_snapshot": {"strategy_engine": STRATEGY_ENGINE},
+        "ok": True,
+        "payload": payload,
+        "normalized": normalized,
+        "duplicate": False,
+        "dedupe": dedupe,
+        "latency": latency,
+        "strategy_config": strategy_config,
+        "close_only": True,
+        "okx_execution": result,
+    }
+    record_raw_webhook("webhook", {"received_at": received_at, "payload": payload, "normalized": normalized, "strategy_id": normalized.get("strategy_id"), "close": True})
+    record_pipeline_event("strategy_match", normalized.get("signal_id"), record)
+    record_pipeline_event("decision", normalized.get("signal_id"), record)
+    _atomic_json_dump(LATEST_FILE, record)
+    return 200, record
+
+
 def build_record(payload: dict, received_at_override: str | None = None) -> tuple[int, dict]:
     normalized = normalize(payload)
-    if normalized["side"] not in ALLOWED_SIDES:
+
+    # PR2 conflict gate: reject when BOTH an explicit `action` and an explicit
+    # `side` are present as *opposing* open sides (e.g. action=buy, side=sell).
+    # A matching pair (buy/buy) or a lone field is fine and falls through.
+    raw_action_in = str(first(payload, "action", default="") or "").lower().strip()
+    raw_side_in = str(first(payload, "side", default="") or "").lower().strip()
+    if (raw_action_in in {"buy", "sell"} and raw_side_in in {"buy", "sell"}
+            and raw_action_in != raw_side_in):
+        return 400, {
+            "ok": False,
+            "error": "action_side_conflict",
+            "mode": "action_side_conflict",
+            "reason": f"action={raw_action_in!r} conflicts with side={raw_side_in!r}",
+            "normalized": normalized,
+        }
+
+    # PR2 close branch: action=close reduces risk, so it reuses the operator-close
+    # path (close_only=True → bypasses the kill switch + symbol pause). It carries
+    # no side, so it must return BEFORE the ALLOWED_SIDES gate below.
+    if normalized.get("action") == "close":
+        return _build_close_record(payload, normalized, received_at_override)
+
+    # `.get`: a close has already returned above; a malformed open alert (invalid
+    # side, no valid action) has its `side` key dropped by normalize → None → 400.
+    if normalized.get("side") not in ALLOWED_SIDES:
         return 400, {"ok": False, "error": "side_not_allowed", "normalized": normalized}
     if normalized.get("source") != "tradingview":
         return 202, {"ok": True, "ignored": True, "reason": "non_tradingview_source", "normalized": normalized}

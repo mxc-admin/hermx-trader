@@ -8,10 +8,13 @@
     "strategy_id",
     "symbol",
     "timeframe",
-    "side",
     "tv_signal_price",
     "tv_time",
     "source"
+  ],
+  "anyOf": [
+    { "required": ["side"] },
+    { "required": ["action"] }
   ],
   "properties": {
     "strategy_id": {
@@ -31,6 +34,10 @@
     "side": {
       "type": "string",
       "enum": ["buy", "sell"]
+    },
+    "action": {
+      "type": "string",
+      "enum": ["buy", "sell", "close"]
     },
     "tv_signal_price": {
       "oneOf": [

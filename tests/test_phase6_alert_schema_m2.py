@@ -40,10 +40,15 @@ BASE_ALERT = {
     "symbol": "BTCUSDT",
     "timeframe": "2h",
     "side": "buy",
+    "action": "buy",
     "tv_signal_price": 65000.0,
     "tv_time": "2026-06-20T00:00:00Z",
     "source": "tradingview",
 }
+
+
+def _without(*keys) -> dict:
+    return {k: v for k, v in BASE_ALERT.items() if k not in keys}
 
 
 def _schema() -> dict:
@@ -79,6 +84,53 @@ def test_alert_valid_without_exchange():
     """exchange was removed from the schema; alerts must be valid without it."""
     alert_without_exchange = {k: v for k, v in BASE_ALERT.items() if k != "exchange"}
     assert _is_valid(alert_without_exchange)
+
+
+# --------------------------------------------------------------------------- #
+# (a2) PR2: `action` field (anyOf side|action; action adds `close`)             #
+# --------------------------------------------------------------------------- #
+
+
+def test_action_buy_valid():
+    """action=buy with no side present is schema-valid (anyOf side|action)."""
+    alert = _without("side")
+    alert["action"] = "buy"
+    assert _is_valid(alert)
+
+
+def test_action_sell_valid():
+    alert = _without("side")
+    alert["action"] = "sell"
+    assert _is_valid(alert)
+
+
+def test_action_close_valid():
+    """action=close with side removed is valid."""
+    alert = _without("side")
+    alert["action"] = "close"
+    assert _is_valid(alert)
+
+
+def test_action_close_no_side_valid():
+    """BASE_ALERT with the side key absent and action=close is valid."""
+    alert = _without("side")
+    alert["action"] = "close"
+    assert _is_valid(alert)
+
+
+def test_action_invalid_enum():
+    """action outside {buy,sell,close} is rejected even if a valid side is present."""
+    assert not _is_valid(_alert(action="long"))
+
+
+def test_neither_action_nor_side():
+    """anyOf requires at least one of side|action; an alert with neither is invalid."""
+    assert not _is_valid(_without("side", "action"))
+
+
+def test_action_side_matching():
+    """Both present and in agreement (buy/buy) is valid."""
+    assert _is_valid(_alert(action="buy", side="buy"))
 
 
 # --------------------------------------------------------------------------- #

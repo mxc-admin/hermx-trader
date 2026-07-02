@@ -20,6 +20,16 @@ Every active execution alert must include `strategy_id`.
 }
 ```
 
+### Direction Fields — `action` and `side`
+
+- **`action`** (string, optional*): Direction + intent. Enum: `buy` (enter long), `sell`
+  (enter short), `close` (flatten open position, reduce-only). **Primary field going forward.**
+- **`side`** (string, optional*): Legacy direction field. Enum: `buy`, `sell`. Retained for
+  backward compatibility. If `action` is absent, `side` drives routing. If both are present
+  with `buy`/`sell` values, they **must match**.
+
+\* At least one of `action` or `side` is required (enforced by the schema `anyOf`).
+
 ## Authentication
 
 The alert must be sent with the `X-Webhook-Secret` HTTP header set to `HERMX_SECRET`.
@@ -44,6 +54,17 @@ are supplied by the strategy file matched on `strategy_id`:
 
 This keeps the contract **exchange-agnostic**: the same alert shape works for every supported
 venue, and the strategy file selects where and how it executes.
+
+## Close Semantics — `action=close`
+
+An alert with `action` set to `close` **flattens the strategy's open position, reduce-only**.
+It does **not** open a new position.
+
+- Requires a **matched strategy** (routing via `strategy.instrument`), same as any other alert.
+- `side` is **optional and ignored** when `action=close`.
+- **Bypasses the kill switch and symbol pause** (same as the operator `/close` button) — a
+  reduce-only order cannot increase exposure, so it is always allowed to flatten.
+- **Deduplicated per bar close signal**, same as buy/sell signals.
 
 ## Required TradingView Settings
 
@@ -88,6 +109,7 @@ Without `strategy_id`, the system cannot know which one should execute.
   "indicator": "duo-base-dev",
   "symbol": "SOLUSDT",
   "timeframe": "3h",
+  "action": "buy",
   "side": "buy",
   "tv_signal_price": "{{close}}",
   "tv_time": "{{time}}",
@@ -104,7 +126,24 @@ Without `strategy_id`, the system cannot know which one should execute.
   "indicator": "duo-base-dev",
   "symbol": "ETHUSDT",
   "timeframe": "2h",
+  "action": "sell",
   "side": "sell",
+  "tv_signal_price": "{{close}}",
+  "tv_time": "{{time}}",
+  "source": "tradingview"
+}
+```
+
+### BTC 2H Close
+
+Flatten the strategy's open position (reduce-only). No `side` needed.
+
+```json
+{
+  "strategy_id": "btcusdt_duo_base_dev_2h",
+  "symbol": "BTCUSDT",
+  "timeframe": "2h",
+  "action": "close",
   "tv_signal_price": "{{close}}",
   "tv_time": "{{time}}",
   "source": "tradingview"
@@ -188,6 +227,20 @@ Invalid:
 Corrected (`side` must be `buy` or `sell`):
 ```json
 {"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
+```
+
+### Conflicting `action` and `side` — `action_side_conflict` (HTTP 400)
+
+Both `action` and `side` are present with `buy`/`sell` values that **differ**. The two
+direction fields must agree during the transition period.
+
+Invalid (`action` says `buy`, `side` says `sell`):
+```json
+{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","action":"buy","side":"sell","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
+```
+Corrected (make them match, or send only one):
+```json
+{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","action":"buy","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 
 ### Missing `strategy_id` — `missing_strategy_id` (status 202, quarantined)

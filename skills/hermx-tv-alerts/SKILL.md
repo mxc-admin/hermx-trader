@@ -33,7 +33,7 @@ Resolution semantics live in
 
 ## When to use
 - "what's the TradingView alert JSON for SOLUSDT 3H?", "give me the buy + sell message
-  box for `btcusdt_duo_base_dev_2h`".
+  box for `btcusdt_duo_base_dev_2h`", "give me the close alert template for BTCUSDT".
 - Do NOT use to send, arm, or execute an alert — this only prints templates. To verify a
   received alert flowed through, use `/trace`.
 
@@ -55,19 +55,37 @@ candidates for the operator to disambiguate. Never emit a template for a guessed
   receiver reads venue, mode, and sizing from the strategy file, never from the alert.
 
 ## Payload contract (must match exactly)
+BUY/SELL (long/short):
 ```json
 {
   "strategy_id": "<resolved-id>",
   "symbol": "<resolved-symbol>",
   "timeframe": "<from-strategy>",
+  "action": "buy",
   "side": "buy",
   "tv_signal_price": "{{close}}",
   "tv_time": "{{time}}",
   "source": "tradingview"
 }
 ```
-- `side` is the only field that differs between the two templates: `buy` (long) / `sell`
-  (short). The schema enum is exactly `buy`/`sell` — not `long`/`short`.
+CLOSE (flatten position):
+```json
+{
+  "strategy_id": "<resolved-id>",
+  "symbol": "<resolved-symbol>",
+  "timeframe": "<from-strategy>",
+  "action": "close",
+  "tv_signal_price": "{{close}}",
+  "tv_time": "{{time}}",
+  "source": "tradingview"
+}
+```
+- `action` is the primary field (`buy`/`sell`/`close`). `side` is derived/legacy
+  (`buy`/`sell` only, present for back-compat) and is included in the buy/sell templates
+  during the transition; the close template carries **only** `action` and no `side`.
+- BUY vs SELL differ only in `action`/`side` (`buy` (long) / `sell` (short)). The schema
+  enums are exactly `buy`/`sell` for `side` and `buy`/`sell`/`close` for `action` — not
+  `long`/`short`.
 - `tv_signal_price` = `{{close}}` and `tv_time` = `{{time}}` are Pine Script placeholders
   TradingView substitutes at fire time; leave them literal.
 - **The alert carries no `exchange` field.** Venue routing comes entirely from
@@ -104,25 +122,31 @@ timeframe = data.get("timeframe") or h.UNKNOWN
 venue = inst.get("exchange") or "okx"             # context only; not an alert field
 mode = str(data.get("execution_mode") or "demo").lower()
 
-def tmpl(side):
-    return json.dumps({
+def tmpl(action, side=None):
+    payload = {
         "strategy_id": sid,
         "symbol": symbol,
         "timeframe": timeframe,
-        "side": side,
+        "action": action,
         "tv_signal_price": "{{close}}",
         "tv_time": "{{time}}",
         "source": "tradingview",
-    }, separators=(",", ":"))          # compact single-line, matches the contract
+    }
+    if side:
+        payload["side"] = side
+    return json.dumps(payload, separators=(",", ":"))   # compact single-line, matches the contract
 
 print(f"strategy : {sid}  ({data.get('name') or sid})")
 print(f"symbol   : {symbol}   timeframe: {timeframe}   venue: {venue}   mode: {mode}")
 print()
-print("# BUY (long) — paste into the BUY alert's Message box")
-print(tmpl("buy"))
+print("# BUY (long) — paste into the BUY signal alert's Message box")
+print(tmpl("buy", side="buy"))
 print()
-print("# SELL (short) — paste into the SELL alert's Message box")
-print(tmpl("sell"))
+print("# SELL (short) — paste into the SELL signal alert's Message box")
+print(tmpl("sell", side="sell"))
+print()
+print("# CLOSE (flatten position) — paste into the CLOSE signal alert's Message box")
+print(tmpl("close"))
 PY
 ```
 
@@ -143,6 +167,9 @@ PY
   frequency = **once per bar close**; expiration = open-ended/max; leave `timeframe`
   hard-coded to the strategy's bar so a wrong-chart alert is caught as
   `strategy_timeframe_mismatch` rather than silently accepted.
+- **CLOSE alert:** its condition = the strategy's exit/close signal (the Pine strategy's
+  exit condition if you have one) or a separate manual alert. Paste the CLOSE template into
+  its Message box — it needs **no `side`**, only `action=close`.
 
 ## Reporting
 - Print both templates as compact single-line JSON so a copy-paste drops cleanly into the
@@ -156,14 +183,18 @@ PY
 ## Verification checklist
 - [ ] `resolve_strategy` returns a unique `strategy_id`; an ambiguous symbol prints
       candidates and emits **no** template.
-- [ ] Both templates parse as JSON and validate against
-      `schemas/tradingview-alert.schema.json` (all 7 required fields; `side` ∈ `buy|sell`;
-      `timeframe` ∈ the schema enum).
+- [ ] All templates parse as JSON and validate against
+      `schemas/tradingview-alert.schema.json` (6 base required fields + `anyOf` satisfied by
+      `side` or `action`; `side` ∈ `buy|sell`; `action` ∈ `buy|sell|close`; `timeframe` ∈
+      the schema enum).
 - [ ] `symbol` matches the strategy's `instrument.inst_id`-derived asset and `timeframe`
       matches the strategy file (so neither `strategy_symbol_mismatch` nor
       `strategy_timeframe_mismatch` would fire).
-- [ ] BUY and SELL payloads differ **only** in `side`.
-- [ ] No `exchange` field is present in either payload; `timeframe` is
+- [ ] BUY, SELL, CLOSE: buy/sell include both `action` and `side`; close has
+      `action=close` and **no** `side`.
+- [ ] CLOSE template validates against the schema without `side` (schema `anyOf` satisfied
+      by `action`).
+- [ ] No `exchange` field is present in any payload; `timeframe` is
       hard-coded, not `{{interval}}`.
 - [ ] Webhook URL, `X-Webhook-Secret` header, and "strategy must be loaded" are stated.
 - [ ] No HTTP request issued, no file written, no `/webhook` call — read-only throughout.

@@ -1,0 +1,9 @@
+{
+  "strategy_id": "btcusdt_duo_base_dev_2h",
+  "symbol": "BTCUSDT",
+  "timeframe": "2h",
+  "action": "close",
+  "tv_signal_price": "65000",
+  "tv_time": "2026-06-20T00:00:00Z",
+  "source": "tradingview"
+}
