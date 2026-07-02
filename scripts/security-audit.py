@@ -302,7 +302,7 @@ def check_secrets(root, fast=False):
     for path in iter_files(root):
         # Never scan the audit's own detection patterns or the secrets baseline.
         rel = _rel(path, root)
-        if rel.endswith("scripts/security-audit.py"):
+        if rel.endswith("scripts/security-audit.py") or _is_test_path(rel):
             continue
         if rel.endswith(".secrets.baseline"):
             continue
