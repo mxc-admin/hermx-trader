@@ -16,7 +16,6 @@ Every active execution alert must include `strategy_id`.
   "side": "buy",
   "tv_signal_price": "{{close}}",
   "tv_time": "{{time}}",
-  "exchange": "okx",
   "source": "tradingview"
 }
 ```
@@ -32,12 +31,10 @@ in the `X-Webhook-Secret` header.
 The alert carries only the **signal** — never venue routing, sizing, or execution mode. Those
 are supplied by the strategy file matched on `strategy_id`:
 
-- **Venue** is `strategy.instrument.exchange`, which is **authoritative for routing**. The alert's
-  own `exchange` field is advisory only and is constrained by the alert schema
-  (`schemas/tradingview-alert.schema.json`) to the four wired venues —
-  `okx`, `kucoin`, `bybit`, `hyperliquid` — so an alert declaring any other venue fails validation
-  when schema enforcement is on. The strategy may route to other configured venues via
-  `instrument.exchange`; the alert `exchange` need only be one of the four schema-allowed values.
+- **Venue** is `strategy.instrument.exchange`, which is **authoritative for routing** and the
+  **sole** source of venue selection. The alert payload carries **no** `exchange` field at all —
+  it is not part of the schema (`schemas/tradingview-alert.schema.json`). The strategy file
+  alone decides where an order routes via `instrument.exchange`.
 - **Execution mode** is `strategy.execution_mode`, a two-value enum — `demo` or `live`.
   **Only `live` is real-money**: it routes to the real account and additionally requires
   the global kill switch `HERMX_LIVE_TRADING=true`. `demo` routes to the venue's
@@ -94,7 +91,6 @@ Without `strategy_id`, the system cannot know which one should execute.
   "side": "buy",
   "tv_signal_price": "{{close}}",
   "tv_time": "{{time}}",
-  "exchange": "okx",
   "source": "tradingview"
 }
 ```
@@ -111,7 +107,6 @@ Without `strategy_id`, the system cannot know which one should execute.
   "side": "sell",
   "tv_signal_price": "{{close}}",
   "tv_time": "{{time}}",
-  "exchange": "okx",
   "source": "tradingview"
 }
 ```
@@ -134,7 +129,6 @@ context that helps correlate a signal to what you saw on TradingView.
   "side": "buy",
   "tv_signal_price": "{{close}}",
   "tv_time": "{{time}}",
-  "exchange": "okx",
   "source": "tradingview",
   "extras": { "chart_note": "post-breakout retest", "alert_id": "tv-9931" }
 }
@@ -175,7 +169,7 @@ Invalid:
 ```
 Corrected:
 ```json
-{"strategy_id":"solusdt_duo_base_dev_3h","strategy_name":"SOLUSDT Duo Base Dev 3H","indicator":"duo-base-dev","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","exchange":"okx","source":"tradingview"}
+{"strategy_id":"solusdt_duo_base_dev_3h","strategy_name":"SOLUSDT Duo Base Dev 3H","indicator":"duo-base-dev","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 
 Other Stage-1 rejections (same synchronous path): `invalid_content_length` (400) for a bad/negative
@@ -189,11 +183,11 @@ processing queue is saturated.
 
 Invalid:
 ```json
-{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"long","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","exchange":"okx","source":"tradingview"}
+{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"long","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 Corrected (`side` must be `buy` or `sell`):
 ```json
-{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","exchange":"okx","source":"tradingview"}
+{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 
 ### Missing `strategy_id` — `missing_strategy_id` (status 202, quarantined)
@@ -203,11 +197,11 @@ With `strategy_engine.require_strategy_id=true` the reason is `missing_strategy_
 
 Invalid:
 ```json
-{"strategy_name":"SOLUSDT Duo Base Dev 3H","indicator":"duo-base-dev","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","exchange":"okx","source":"tradingview"}
+{"strategy_name":"SOLUSDT Duo Base Dev 3H","indicator":"duo-base-dev","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 Corrected (add the `strategy_id`):
 ```json
-{"strategy_id":"solusdt_duo_base_dev_3h","strategy_name":"SOLUSDT Duo Base Dev 3H","indicator":"duo-base-dev","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","exchange":"okx","source":"tradingview"}
+{"strategy_id":"solusdt_duo_base_dev_3h","strategy_name":"SOLUSDT Duo Base Dev 3H","indicator":"duo-base-dev","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 
 ### Unknown `strategy_id` — `unknown_strategy_id` (status 202, quarantined)
@@ -216,11 +210,11 @@ Corrected (add the `strategy_id`):
 
 Invalid (no `strategies/solusdt_duo_base_dev_9h.json` exists):
 ```json
-{"strategy_id":"solusdt_duo_base_dev_9h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","exchange":"okx","source":"tradingview"}
+{"strategy_id":"solusdt_duo_base_dev_9h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 Corrected (use a `strategy_id` that exists on disk):
 ```json
-{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","exchange":"okx","source":"tradingview"}
+{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 
 ### Wrong `symbol` for the strategy — `strategy_symbol_mismatch` (status 202, quarantined)
@@ -229,11 +223,11 @@ Corrected (use a `strategy_id` that exists on disk):
 
 Invalid (`solusdt_duo_base_dev_3h` trades `SOLUSDT`, not `BTCUSDT`):
 ```json
-{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"BTCUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","exchange":"okx","source":"tradingview"}
+{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"BTCUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 Corrected:
 ```json
-{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","exchange":"okx","source":"tradingview"}
+{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 
 ### Wrong `timeframe` for the strategy — `strategy_timeframe_mismatch` (status 202, quarantined)
@@ -242,11 +236,11 @@ Corrected:
 
 Invalid (`solusdt_duo_base_dev_3h` is a 3h strategy):
 ```json
-{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"2h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","exchange":"okx","source":"tradingview"}
+{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"2h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 Corrected:
 ```json
-{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","exchange":"okx","source":"tradingview"}
+{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 
 ### Symbol not wired — `symbol_not_allowed` (status 400)
@@ -256,11 +250,11 @@ strategy trades.
 
 Invalid:
 ```json
-{"symbol":"DOGEUSDT","timeframe":"3h","side":"buy","tv_signal_price":"0.16","tv_time":"2026-07-01T12:00:00Z","exchange":"okx","source":"tradingview"}
+{"symbol":"DOGEUSDT","timeframe":"3h","side":"buy","tv_signal_price":"0.16","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 Corrected (route through a real strategy):
 ```json
-{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","exchange":"okx","source":"tradingview"}
+{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 
 ### Schema validation failure — `alert_schema_invalid:<detail>` (status 202, quarantined)
@@ -269,16 +263,15 @@ Only enforced when `HERMX_ENFORCE_ALERT_SCHEMA=true` (`strategy_engine.enforce_a
 When enforcement is **off** the same failure is logged + counted but the alert still processes
 (observe-only). The normalized alert is validated against `schemas/tradingview-alert.schema.json`;
 `<detail>` names the offending field. Common triggers: missing `tv_signal_price` (normalizes to
-`null`), an `exchange` outside `okx`/`kucoin`/`bybit`/`hyperliquid`, a bad `timeframe` enum value,
-or a non-object `extras`.
+`null`), a bad `timeframe` enum value, or a non-object `extras`.
 
-Invalid (missing `tv_signal_price`, unwired `exchange`):
+Invalid (missing `tv_signal_price`):
 ```json
-{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_time":"2026-07-01T12:00:00Z","exchange":"binance","source":"tradingview"}
+{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 Corrected:
 ```json
-{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","exchange":"okx","source":"tradingview"}
+{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 
 ### Non-TradingView source — `non_tradingview_source` (status 202, ignored)
@@ -287,11 +280,11 @@ Corrected:
 
 Invalid:
 ```json
-{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","exchange":"okx","source":"manual"}
+{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"manual"}
 ```
 Corrected:
 ```json
-{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","exchange":"okx","source":"tradingview"}
+{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 
 ## TradingView Message Templates
@@ -308,22 +301,22 @@ Set the `X-Webhook-Secret` header to `HERMX_SECRET` in the alert's webhook setti
 
 ### BTCUSDT Duo Base Dev 2H
 ```json
-{"strategy_id":"btcusdt_duo_base_dev_2h","strategy_name":"BTCUSDT Duo Base Dev 2H","indicator":"duo-base-dev","symbol":"{{ticker}}","timeframe":"2h","side":"{{strategy.order.action}}","tv_signal_price":"{{close}}","tv_time":"{{time}}","exchange":"okx","source":"tradingview"}
+{"strategy_id":"btcusdt_duo_base_dev_2h","strategy_name":"BTCUSDT Duo Base Dev 2H","indicator":"duo-base-dev","symbol":"{{ticker}}","timeframe":"2h","side":"{{strategy.order.action}}","tv_signal_price":"{{close}}","tv_time":"{{time}}","source":"tradingview"}
 ```
 
 ### ETHUSDT Duo Base Dev 2H
 ```json
-{"strategy_id":"ethusdt_duo_base_dev_2h","strategy_name":"ETHUSDT Duo Base Dev 2H","indicator":"duo-base-dev","symbol":"{{ticker}}","timeframe":"2h","side":"{{strategy.order.action}}","tv_signal_price":"{{close}}","tv_time":"{{time}}","exchange":"okx","source":"tradingview"}
+{"strategy_id":"ethusdt_duo_base_dev_2h","strategy_name":"ETHUSDT Duo Base Dev 2H","indicator":"duo-base-dev","symbol":"{{ticker}}","timeframe":"2h","side":"{{strategy.order.action}}","tv_signal_price":"{{close}}","tv_time":"{{time}}","source":"tradingview"}
 ```
 
 ### SOLUSDT Duo Base Dev 3H
 ```json
-{"strategy_id":"solusdt_duo_base_dev_3h","strategy_name":"SOLUSDT Duo Base Dev 3H","indicator":"duo-base-dev","symbol":"{{ticker}}","timeframe":"3h","side":"{{strategy.order.action}}","tv_signal_price":"{{close}}","tv_time":"{{time}}","exchange":"okx","source":"tradingview"}
+{"strategy_id":"solusdt_duo_base_dev_3h","strategy_name":"SOLUSDT Duo Base Dev 3H","indicator":"duo-base-dev","symbol":"{{ticker}}","timeframe":"3h","side":"{{strategy.order.action}}","tv_signal_price":"{{close}}","tv_time":"{{time}}","source":"tradingview"}
 ```
 
 ### XRPUSDT Duo Base Dev 4H
 ```json
-{"strategy_id":"xrpusdt_duo_base_dev_4h","strategy_name":"XRPUSDT Duo Base Dev 4H","indicator":"duo-base-dev","symbol":"{{ticker}}","timeframe":"4h","side":"{{strategy.order.action}}","tv_signal_price":"{{close}}","tv_time":"{{time}}","exchange":"okx","source":"tradingview"}
+{"strategy_id":"xrpusdt_duo_base_dev_4h","strategy_name":"XRPUSDT Duo Base Dev 4H","indicator":"duo-base-dev","symbol":"{{ticker}}","timeframe":"4h","side":"{{strategy.order.action}}","tv_signal_price":"{{close}}","tv_time":"{{time}}","source":"tradingview"}
 ```
 
 To attach debug context, add an `extras` object (observe-only, see above), e.g.

@@ -11,7 +11,6 @@
     "side",
     "tv_signal_price",
     "tv_time",
-    "exchange",
     "source"
   ],
   "properties": {
@@ -44,10 +43,6 @@
         { "type": "string", "minLength": 1 },
         { "type": "number" }
       ]
-    },
-    "exchange": {
-      "type": "string",
-      "enum": ["okx", "kucoin", "bybit", "hyperliquid"]
     },
     "source": {
       "type": "string",

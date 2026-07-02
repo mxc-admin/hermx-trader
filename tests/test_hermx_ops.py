@@ -14,12 +14,10 @@ Stdlib-only, matching the module under test. HTTP is faked by monkeypatching
 
 import io
 import json
-import os
 import sys
 import urllib.error
 import urllib.request
 
-import pytest
 
 sys.path.insert(0, "skills/hermx-ops/lib")
 import hermx_ops as h  # noqa: E402

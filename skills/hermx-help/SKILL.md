@@ -8,7 +8,7 @@ platforms: [linux, macos]
 metadata:
   hermes:
     tags: [trading, hermx, help, docs, read-only, operations]
-    related_skills: [hermx-control, hermx-status, hermx-positions, hermx-strategy-list, hermx-trace, hermx-strategy-mode, hermx-close, emergency-stop, hermx-restart, hermx-upgrade]
+    related_skills: [hermx-control, hermx-status, hermx-positions, hermx-strategy-list, hermx-trace, hermx-tv-alerts, hermx-strategy-mode, hermx-close, emergency-stop, hermx-restart, hermx-upgrade]
     config:
       - key: hermx.dashboard_base
         description: "HermX dashboard base URL (loopback)"
@@ -35,12 +35,13 @@ operator at the shared helper
 - Match **case-insensitively** and **with or without the leading `/`**:
   `close`, `/close`, `CLOSE`, `/Close` all resolve to `/close`.
 - Accept common aliases: `estop`/`kill` → `/emergency-stop`, `strategies`/`list`
-  → `/strategy-list`, `mode` → `/strategy-mode`, `deploy` → `/upgrade`.
+  → `/strategy-list`, `mode` → `/strategy-mode`, `deploy` → `/upgrade`,
+  `alerts`/`tv` → `/tv-alerts`.
 - Unknown arg → say so, then print the overview so the operator can pick.
 
 ## All commands (`/help`)
 
-Nine commands: four read-only diagnostics, five guarded mutations. None sets an
+Ten commands: five read-only diagnostics, five guarded mutations. None sets an
 order size; none calls an exchange directly. Every mutation dry-runs then needs an
 explicit `yes`.
 
@@ -53,6 +54,8 @@ explicit `yes`.
   `/strategy-list`
 - **`/trace`** — follow one signal intake → dedupe → pipeline → exec, joined on
   `received_at`. `/trace BTCUSDT`
+- **`/tv-alerts`** — print copy-paste BUY + SELL TradingView Message templates for a
+  strategy. `/tv-alerts SOLUSDT`
 
 **Mutating (dry-run + explicit `yes`)**
 - **`/strategy-mode`** — set a per-strategy override (pause/resume/demo/live).
@@ -117,6 +120,24 @@ Ask `/help <command>` for syntax, guards, and examples on any one.
   - `rtk claude -p "/trace BTCUSDT" --permission-mode dontAsk`
   - `rtk claude -p "/trace 2026-07-02T14:03:12.481922Z" --permission-mode dontAsk`
   - "why didn't the last BTC alert fire?" → `/trace BTCUSDT`
+
+### `/tv-alerts`
+- **Type:** read-only.
+- **Syntax:** `/tv-alerts <name-or-id>`
+- **Does:** resolves the arg to a `strategy_id`, reads `strategies/<id>.json`, and prints
+  two schema-valid single-line alert Message payloads — one BUY (long), one SELL (short) —
+  extracting `symbol` (from `instrument.inst_id`), `timeframe`, `strategy_id`, and venue
+  (`instrument.exchange`). Also reports the webhook URL (`https://<host>/webhook` or the
+  Tailscale Funnel URL) and the `X-Webhook-Secret: <HERMX_SECRET>` header.
+- **Guards:** read-only text — no HTTP, no file write, never `/webhook`. An ambiguous
+  symbol / fuzzy-only arg stops with candidates and emits **no** template. `exchange` is
+  hard-coded to the strategy venue (not `{{exchange}}` — TradingView emits it uppercase
+  and it can fail `alert_schema_invalid`); `timeframe` is hard-coded (not `{{interval}}`).
+  `execution_mode` is shown as context only, never as an alert field.
+- **Examples:**
+  - `rtk claude -p "/tv-alerts SOLUSDT" --permission-mode dontAsk`
+  - `rtk claude -p "/tv-alerts btcusdt_duo_base_dev_2h" --permission-mode dontAsk`
+  - "what do I paste into TradingView for ETH?" → `/tv-alerts ETHUSDT`
 
 ### `/strategy-mode`
 - **Type:** mutating.
@@ -216,13 +237,13 @@ Ask `/help <command>` for syntax, guards, and examples on any one.
 ## Rules
 - This skill is **pure text**: it issues no HTTP request, writes no file, mutates
   nothing. If asked to actually *run* a command, defer to that command's own skill.
-- Never invent commands or flags — only the nine above exist.
+- Never invent commands or flags — only the ten above exist.
 - Keep output terse and chat-formatted: markdown bullets and short paragraphs.
 
 ## Verification checklist
-- [ ] `/help` (no arg) lists all **nine** commands, each with a one-liner + example.
+- [ ] `/help` (no arg) lists all **ten** commands, each with a one-liner + example.
 - [ ] `/help close`, `/help /close`, `/help CLOSE` all resolve to the `/close` detail.
-- [ ] Aliases (`estop`, `kill`, `deploy`, `mode`, `list`) map to the right command.
+- [ ] Aliases (`estop`, `kill`, `deploy`, `mode`, `list`, `alerts`, `tv`) map to the right command.
 - [ ] An unknown arg reports "unknown command" then falls back to the overview.
 - [ ] No HTTP call, no file write, no mutation is performed by this skill.
 - [ ] Detail blocks state each command's type, syntax, guards, and 2–3 examples.

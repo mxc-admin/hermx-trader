@@ -120,3 +120,18 @@
 - **Decision**: `hermx-data` (ledgers) + `hermx-state` (snapshots) as named volumes; bind-mounts only for operator-editable config.
 - **Alternatives**: Host directories for everything (rejected — permissions mess with non-root uid 10001); bake state into image (rejected — destroyed on every update).
 - **Rationale**: Named volumes have independent lifecycle, preserve data across image pulls, and inherit correct ownership from the image's pre-created mount points.
+
+### `exchange` removed from the alert contract
+- **Decision:** `exchange` removed from `schemas/tradingview-alert.schema.json` (both `required` and `properties`). The alert now has 7 required fields.
+- **Alternatives:** Keep `exchange` as an optional field; keep it required.
+- **Rationale:** Strategy is the single source of truth for venue routing. The receiver (`webhook_receiver.py:1002`) backfills `"okx"` when absent (fail-open). Duplicating venue in the alert invites strategy/alert divergence.
+
+### `/tv-alerts` symbol hard-coded from `inst_id`, not TV `{{ticker}}`
+- **Decision:** The template's `symbol` field is emitted from `strategy.instrument.inst_id` (may be `BTC-USDT-SWAP`), not the TradingView `{{ticker}}` placeholder.
+- **Alternatives:** Use the `{{ticker}}` placeholder so TV fills it at fire time.
+- **Rationale:** `{{ticker}}` emits the chart-feed name, which can differ from the strategy's exact instrument format. Hard-coding from the strategy guarantees the `strategy_symbol_mismatch` gate passes.
+
+### `/docker-update` re-seed decoupled from `--force`
+- **Decision:** `--force` skips confirmations but does NOT auto-accept strategy re-seed; a separate `--reseed` flag gates re-seeding.
+- **Alternatives:** Let `--force` imply re-seed (single flag for all non-interactive behavior).
+- **Rationale:** CI/automation (`--force`) must default to safe — never silently overwrite operator strategy files. Re-seed is destructive and must be opted into explicitly.

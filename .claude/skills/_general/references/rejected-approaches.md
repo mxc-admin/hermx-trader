@@ -126,3 +126,24 @@
 - **Verdict**: REJECTED
 - **Reason**: Removing `read_only` weakens container hardening for a single file write. Better: add `HERMX_DATA_DIR=/app/data` + `hermx-state:/app/data` (rw) mount. Root fs stays read-only; only the volume mount is writable.
 - **Date tested**: June 2026
+
+### `side="long"` as a schema-invalid test trigger
+- **What:** Use `side="long"` (or `source="webhook"`) to trigger `validate_alert_schema()` rejection, replacing the removed `exchange="binance"` trigger.
+- **Tested:** Traced `build_record` gate order in `webhook_receiver.py`.
+- **Verdict:** REJECTED
+- **Reason:** `side not in ALLOWED_SIDES` hard-400s at `build_record:2829` before the jsonschema gate — never reaches `validate_alert_schema()`. `source="webhook"` 202s early via the `non_tradingview_source` path. Valid schema-invalid trigger: `tv_signal_price="not-a-price"` (no pre-schema gate; fails jsonschema `oneOf(number|string)`).
+- **Date:** July 2026
+
+### Bare Docker volume names in backup/restore scripts
+- **What:** Reference `hermx-state`/`hermx-data` directly in `docker run -v hermx-state:/state ...`.
+- **Tested:** Compared script volume names against compose-created volume names.
+- **Verdict:** REJECTED
+- **Reason:** Compose namespaces volumes as `<project>_<volume>` (e.g. `hermx_hermx-state`). Bare names silently create empty phantom volumes — backup tars empty dirs, restore writes to a volume the stack never mounts. Use `<project>_hermx-state` or pin `name:` in the compose file.
+- **Date:** July 2026
+
+### Top-level-only `node_modules` prune in find/grep scripts
+- **What:** Exclude `node_modules` from dead-link scans with `-path './node_modules' -prune`.
+- **Tested:** Ran the scan; 1484 false-positive dead-link failures + spurious exit 1.
+- **Verdict:** REJECTED
+- **Reason:** `-path './node_modules' -prune` only prunes the top-level dir. `dashboard-ui/node_modules` (535 `.md` files) evades it. Prune by name at any depth: `-name node_modules -prune`.
+- **Date:** July 2026

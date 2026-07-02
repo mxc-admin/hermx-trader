@@ -1,8 +1,8 @@
 """Phase 6 / M2: alert schema widening + explicit intake validation.
 
 Proves:
-  * the alert `exchange` enum is widened to the planned CCXT venues
-    (okx/kucoin/bybit/hyperliquid) and OKX stays valid,
+  * the alert `exchange` field is removed from the schema; routing comes entirely
+    from `strategy.instrument.exchange`,
   * the alert `symbol` regex is relaxed (no longer pinned to *USDT) to match the
     v2 strategy asset regex,
   * the runtime helper `validate_alert_schema` enforces the schema on a
@@ -42,7 +42,6 @@ BASE_ALERT = {
     "side": "buy",
     "tv_signal_price": 65000.0,
     "tv_time": "2026-06-20T00:00:00Z",
-    "exchange": "okx",
     "source": "tradingview",
 }
 
@@ -76,18 +75,10 @@ def test_schema_is_well_formed():
     jsonschema.Draft202012Validator.check_schema(_schema())
 
 
-def test_okx_alert_still_valid():
-    """No currently-valid OKX alert may be broken by the widening."""
-    assert _is_valid(_alert(exchange="okx"))
-
-
-@pytest.mark.parametrize("venue", ["okx", "kucoin", "bybit", "hyperliquid"])
-def test_exchange_enum_accepts_planned_venues(venue):
-    assert _is_valid(_alert(exchange=venue)), f"{venue} must be accepted"
-
-
-def test_exchange_enum_still_rejects_unknown_venue():
-    assert not _is_valid(_alert(exchange="binance"))
+def test_alert_valid_without_exchange():
+    """exchange was removed from the schema; alerts must be valid without it."""
+    alert_without_exchange = {k: v for k, v in BASE_ALERT.items() if k != "exchange"}
+    assert _is_valid(alert_without_exchange)
 
 
 # --------------------------------------------------------------------------- #
@@ -110,17 +101,12 @@ def test_relaxed_symbol_regex_still_rejects_malformed(symbol):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("venue", ["okx", "kucoin", "bybit", "hyperliquid"])
-def test_runtime_validator_accepts_widened_venues(wr, venue):
-    ok, error = wr.validate_alert_schema(_alert(exchange=venue))
+def test_runtime_validator_accepts_alert_without_exchange(wr):
+    """exchange removed from schema; validator must accept alerts that omit it."""
+    alert_without_exchange = {k: v for k, v in BASE_ALERT.items() if k != "exchange"}
+    ok, error = wr.validate_alert_schema(alert_without_exchange)
     assert ok is True, error
     assert error is None
-
-
-def test_runtime_validator_rejects_unknown_exchange(wr):
-    ok, error = wr.validate_alert_schema(_alert(exchange="binance"))
-    assert ok is False
-    assert "exchange" in error
 
 
 # --------------------------------------------------------------------------- #
@@ -143,10 +129,11 @@ def test_flag_is_off_by_default(wr):
 def test_flag_off_invalid_alert_logged_but_processed_byte_identical(wr, monkeypatch):
     """With the flag OFF a schema-invalid alert is counted but processed exactly
     as the pre-M2 pipeline would (byte-identical record)."""
-    # A schema-invalid alert (exchange not in the enum) that still matches its
-    # strategy by id/symbol/timeframe, so only the schema verdict differs.
+    # A schema-invalid alert (tv_signal_price normalizes to null, failing the
+    # required number|string oneOf) that still matches its strategy by
+    # id/symbol/timeframe, so only the schema verdict differs.
     alert = load_alert("strategy/btcusdt_buy.json")
-    alert["exchange"] = "binance"
+    alert["tv_signal_price"] = "not-a-price"
 
     monkeypatch.setitem(wr.STRATEGY_ENGINE, "enforce_alert_schema", False)
     # Force the execution surface unavailable so the corpus strategy resolves to a
@@ -187,8 +174,11 @@ def test_flag_off_invalid_alert_logged_but_processed_byte_identical(wr, monkeypa
 
 
 def test_flag_on_invalid_alert_quarantined_via_existing_path(wr, monkeypatch):
+    # tv_signal_price normalizes to null (as_float of a non-numeric string),
+    # failing the schema's required number|string oneOf while leaving strategy
+    # matching intact.
     alert = load_alert("strategy/btcusdt_buy.json")
-    alert["exchange"] = "binance"
+    alert["tv_signal_price"] = "not-a-price"
 
     monkeypatch.setitem(wr.STRATEGY_ENGINE, "enforce_alert_schema", True)
     before = dict(wr.ALERT_SCHEMA_METRICS)

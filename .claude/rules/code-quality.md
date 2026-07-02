@@ -28,6 +28,15 @@ When a host directory is bind-mounted over an image directory (e.g., `./strategi
 ### Dashboard writes control-state.json but needs writable mount
 `dashboard.py:2497-2518` writes `control-state.json` for per-strategy mode overrides. Running the dashboard `read_only: true` without a writable volume mount for `HERMX_DATA_DIR` causes silent write failures — mode toggles appear to work in the UI but do not persist. The compose file must mount `hermx-state:/app/data` (rw) even when `read_only: true` is set on the root filesystem.
 
+### webhook_receiver validates `side`/`source` before the schema gate
+`build_record` gates `side not in ALLOWED_SIDES` → hard 400 (line 2829) and `source != "tradingview"` → 202 `non_tradingview_source` (line 2831), both BEFORE `validate_alert_schema()`. Tests exercising `enforce_alert_schema` must pick a trigger that survives these gates — `tv_signal_price="not-a-price"` has no pre-schema gate and fails jsonschema `oneOf(number|string)`.
+
+### Docker Compose namespaces volumes with the project name
+Volumes declared without `name:`/`external:` are prefixed with the compose directory basename (e.g. `hermx-state` → `hermx_hermx-state`). Scripts using bare `hermx-state` in `docker run -v` silently create empty phantom volumes. Reference `<project>_hermx-state` or pin `name:` in the compose file.
+
+### `find`/grep scripts must prune `node_modules` by name, not path
+`-path './node_modules' -prune` only prunes the top-level dir; `dashboard-ui/node_modules` (535 `.md` files) evades it and produces false-positive failures. Use `-name node_modules -prune` to catch nested dirs at any depth.
+
 ## Anti-Patterns (populated by /learn)
 <!-- Entries added here as anti-patterns are identified -->
 

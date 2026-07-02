@@ -51,7 +51,6 @@ candidates for the operator to disambiguate. Never emit a template for a guessed
 - `strategy_id` — the resolved id (payload `strategy_id`).
 - `symbol` — derived from `instrument.inst_id` (`SOL-USDT-SWAP` → `SOLUSDT`; payload `symbol`).
 - `timeframe` — the strategy's bar (payload `timeframe`, **hard-coded**, never `{{interval}}`).
-- `exchange` — `instrument.exchange` (payload `exchange`; see the note below).
 - `execution_mode` — `demo` / `live`. **Context only** — it is *not* an alert field; the
   receiver reads venue, mode, and sizing from the strategy file, never from the alert.
 
@@ -64,7 +63,6 @@ candidates for the operator to disambiguate. Never emit a template for a guessed
   "side": "buy",
   "tv_signal_price": "{{close}}",
   "tv_time": "{{time}}",
-  "exchange": "<strategy-venue>",
   "source": "tradingview"
 }
 ```
@@ -72,13 +70,8 @@ candidates for the operator to disambiguate. Never emit a template for a guessed
   (short). The schema enum is exactly `buy`/`sell` — not `long`/`short`.
 - `tv_signal_price` = `{{close}}` and `tv_time` = `{{time}}` are Pine Script placeholders
   TradingView substitutes at fire time; leave them literal.
-- **`exchange` is hard-coded to the strategy's `instrument.exchange` (e.g. `okx`) — do NOT
-  use `{{exchange}}`.** TradingView's `{{exchange}}` emits the chart feed's venue name in
-  **uppercase** (e.g. `OKX`) and can name an unwired venue; the schema enum is lowercase
-  `okx|kucoin|bybit|hyperliquid`, so `{{exchange}}` fails `alert_schema_invalid` under
-  enforcement. The alert `exchange` is advisory anyway — routing comes from
-  `strategy.instrument.exchange` — so hard-coding the strategy's venue is both accurate
-  and schema-valid.
+- **The alert carries no `exchange` field.** Venue routing comes entirely from
+  `strategy.instrument.exchange`, matched on `strategy_id` — never from the payload.
 - **`symbol` is hard-coded to the resolved symbol**, not `{{ticker}}`. `{{ticker}}` also
   validates (the receiver uppercases + strips `-`/`/`), but hard-coding guarantees the
   `strategy_symbol_mismatch` gate passes regardless of which chart the alert sits on.
@@ -108,7 +101,7 @@ if not isinstance(data, dict):
 inst = data.get("instrument") or {}
 symbol = h._symbol_from_inst_id(inst.get("inst_id"))
 timeframe = data.get("timeframe") or h.UNKNOWN
-exchange = inst.get("exchange") or "okx"          # advisory; routing = strategy venue
+venue = inst.get("exchange") or "okx"             # context only; not an alert field
 mode = str(data.get("execution_mode") or "demo").lower()
 
 def tmpl(side):
@@ -119,12 +112,11 @@ def tmpl(side):
         "side": side,
         "tv_signal_price": "{{close}}",
         "tv_time": "{{time}}",
-        "exchange": exchange,
         "source": "tradingview",
     }, separators=(",", ":"))          # compact single-line, matches the contract
 
 print(f"strategy : {sid}  ({data.get('name') or sid})")
-print(f"symbol   : {symbol}   timeframe: {timeframe}   venue: {exchange}   mode: {mode}")
+print(f"symbol   : {symbol}   timeframe: {timeframe}   venue: {venue}   mode: {mode}")
 print()
 print("# BUY (long) — paste into the BUY alert's Message box")
 print(tmpl("buy"))
@@ -165,13 +157,13 @@ PY
 - [ ] `resolve_strategy` returns a unique `strategy_id`; an ambiguous symbol prints
       candidates and emits **no** template.
 - [ ] Both templates parse as JSON and validate against
-      `schemas/tradingview-alert.schema.json` (all 8 required fields; `side` ∈ `buy|sell`;
-      `exchange` ∈ the four wired venues; `timeframe` ∈ the schema enum).
+      `schemas/tradingview-alert.schema.json` (all 7 required fields; `side` ∈ `buy|sell`;
+      `timeframe` ∈ the schema enum).
 - [ ] `symbol` matches the strategy's `instrument.inst_id`-derived asset and `timeframe`
       matches the strategy file (so neither `strategy_symbol_mismatch` nor
       `strategy_timeframe_mismatch` would fire).
 - [ ] BUY and SELL payloads differ **only** in `side`.
-- [ ] `exchange` is the hard-coded strategy venue, not `{{exchange}}`; `timeframe` is
+- [ ] No `exchange` field is present in either payload; `timeframe` is
       hard-coded, not `{{interval}}`.
 - [ ] Webhook URL, `X-Webhook-Secret` header, and "strategy must be loaded" are stated.
 - [ ] No HTTP request issued, no file written, no `/webhook` call — read-only throughout.

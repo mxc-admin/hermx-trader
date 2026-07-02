@@ -6,11 +6,12 @@ One-page reference for the HermX slash-command skills: read-only status/diagnost
 
 | Command | Type | What it does | Safety guard |
 |---|---|---|---|
-| `/help` | read | Lists all 9 commands, or explains one (`/help <command>`) with syntax + examples | Pure text: no HTTP, no writes, no mutations |
+| `/help` | read | Lists all 10 commands, or explains one (`/help <command>`) with syntax + examples | Pure text: no HTTP, no writes, no mutations |
 | `/status` | read | Armed?, mode, dashboard/receiver up, last alert, strategy count | Read failure → DOWN/UNKNOWN, never "not armed" |
 | `/positions` | read | Open positions: side, size, entry, mark, UPL | Failed/stale/degraded read → UNKNOWN, never "flat" |
 | `/strategy-list` | read | All strategies + `file_mode` vs `effective_mode`, paused | Corrupt strategy file → UNKNOWN fields, no crash |
 | `/trace` | read | Follow one signal intake→dedupe→pipeline→exec, joined on `received_at` | Never re-derives a time-less `signal_id`; read-only |
+| `/tv-alerts <name-or-id>` | read | Prints copy-paste BUY + SELL TradingView Message templates for one strategy | Read-only text; hard-codes venue/timeframe so schema passes; never sends or `/webhook` |
 | `/strategy-mode <name-or-id> <pause\|resume\|demo\|live>` | mutate | Sets a per-strategy override via dashboard control endpoint | Dry-run first; `live` needs explicit `yes`; never edits `strategies/*.json` |
 | `/close <symbol\|strategy>` | mutate | Flattens ONE position, reduce-only, via `/api/close` | UNKNOWN read → refuses; no size sent; never `/webhook` |
 | `/emergency-stop kill\|flatten\|demo\|pause-symbol` | mutate | Global kill / flatten all / force strategy to demo / pause a symbol | Dry-run + explicit `yes`; UNKNOWN never rendered as flat |
@@ -24,7 +25,7 @@ One-page reference for the HermX slash-command skills: read-only status/diagnost
 - **Does:** with no arg, prints a concise overview of all nine commands (one-liner +
   example each); with a command arg, prints that command's syntax, safety guards, and
   2–3 examples. Case-insensitive; matches with or without the leading `/` (and common
-  aliases like `estop`, `deploy`, `mode`).
+  aliases like `estop`, `deploy`, `mode`, `alerts`).
 - **Guard:** pure text — issues no HTTP request, writes no file, mutates nothing. If
   asked to actually run a command, it defers to that command's own skill.
 - **Example:** `rtk claude -p "/help close" --permission-mode dontAsk`
@@ -52,6 +53,12 @@ One-page reference for the HermX slash-command skills: read-only status/diagnost
 - **Does:** joins `raw-webhooks.jsonl` → `signals.jsonl` → `pipeline.jsonl` → `executions.jsonl` on `received_at`; shows where the signal stopped.
 - **Guard:** time-less payloads (no `tv_time`) are flagged `time_less`; their non-deterministic `signal_id` is never re-derived. Intake-without-dedupe = "queued, not yet dequeued", not an error.
 - **Example:** `rtk claude -p "/trace BTCUSDT" --permission-mode dontAsk`
+
+### `/tv-alerts` — copy-paste TradingView alert templates (read-only)
+- **Syntax:** `/tv-alerts <name-or-id>`
+- **Does:** resolves the arg to a `strategy_id` via `resolve_strategy()`, reads `strategies/<id>.json`, and prints two schema-valid, single-line alert Message payloads — one BUY (long), one SELL (short) — extracting `symbol` (from `instrument.inst_id`), `timeframe`, `strategy_id`, and venue (`instrument.exchange`). Also reports the webhook URL and the `X-Webhook-Secret` header. `execution_mode` is shown as context only — it is not an alert field.
+- **Guard:** read-only text — no HTTP request, no file write, and it never routes via `/webhook`. An ambiguous symbol / fuzzy-only arg stops with candidates and emits **no** template. `exchange` is hard-coded to the strategy venue (not `{{exchange}}`, which TradingView emits uppercase and can fail `alert_schema_invalid`) and `timeframe` is hard-coded (not `{{interval}}`) so a wrong-chart alert is caught, not silently accepted.
+- **Example:** `rtk claude -p "/tv-alerts SOLUSDT" --permission-mode dontAsk`
 
 ### `/strategy-mode` — change a strategy's mode (mutating)
 - **Syntax:** `/strategy-mode <name-or-id> <pause|resume|demo|live>` (`resume` → wire `clear`)
@@ -96,7 +103,7 @@ One-page reference for the HermX slash-command skills: read-only status/diagnost
 - **Freshness is bounded on bar time (`tv_time`), not server time.** A current clock after an outage does not mean fresh data.
 
 ## Setup
-- **Where the skills live:** `skills/hermx-help/`, `hermx-status/`, `hermx-positions/`, `hermx-strategy-list/`, `hermx-trace/`, `hermx-strategy-mode/`, `hermx-close/`, `hermx-restart/`, `hermx-upgrade/` (each a `SKILL.md`), plus `skills/emergency-stop.md`. Shared code + contract live in `skills/hermx-ops/`.
+- **Where the skills live:** `skills/hermx-help/`, `hermx-status/`, `hermx-positions/`, `hermx-strategy-list/`, `hermx-trace/`, `hermx-tv-alerts/`, `hermx-strategy-mode/`, `hermx-close/`, `hermx-restart/`, `hermx-upgrade/` (each a `SKILL.md`), plus `skills/emergency-stop.md`. Shared code + contract live in `skills/hermx-ops/`.
 - **Load in Hermes:** each `SKILL.md` carries `metadata.hermes` (tags, `related_skills`, config with loopback defaults `dashboard=http://127.0.0.1:8098`, `receiver=http://127.0.0.1:8891`). Invoke as `claude -p "/<skill-name> <args>" --permission-mode dontAsk`.
 - **`HERMX_SECRET`:** required **only when `HERMX_DASH_AUTH` is on**. When set, requests send `X-Dashboard-Token: {HERMX_SECRET}` (from the HermX `.env`). On loopback with auth off (the host default) no header is needed. A `401` is a read failure → UNKNOWN, not "flat". The `/api/close` and control-write endpoints fail closed without a matching token.
 

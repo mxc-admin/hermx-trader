@@ -22,7 +22,6 @@ from dashboard_core import (
     build_combined_events,
     colombia_time,
     display_time,
-    normalize_policy_decision,
     okx_swap_tickers,
     parse_dt,
     read_jsonl_stats,
@@ -2015,7 +2014,6 @@ def render():
     )
     warn = status_banners(model)
     execution_cfg = cfg.get("execution") or {}
-    risk_cfg = cfg.get("risk") or {}
     okx_enabled = bool(execution_cfg.get("enabled"))
     okx_badge = badge("Execution enabled", "good") if okx_enabled else badge("Orders disabled", "warn")
     fresh = model.get("freshness") or {}

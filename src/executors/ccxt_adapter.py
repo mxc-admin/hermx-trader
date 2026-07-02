@@ -298,7 +298,7 @@ class CcxtExecutor(BaseExecutor):
             out.append(f"OPEN_{target.upper()}")
         return out
 
-    def _order_params(self, *, readiness: dict, reduce_only: bool, position_side: str | None, client_order_id: str | None) -> dict:
+    def _order_params(self, *, readiness: dict, reduce_only: bool, client_order_id: str | None) -> dict:
         params = {}
         if client_order_id:
             params["clOrdId"] = str(client_order_id)
@@ -490,7 +490,6 @@ class CcxtExecutor(BaseExecutor):
                     params = self._order_params(
                         readiness=readiness,
                         reduce_only=True,
-                        position_side=expected_side,
                         client_order_id=client_order_id_close,
                     )
                     try:
@@ -555,7 +554,6 @@ class CcxtExecutor(BaseExecutor):
                     params = self._order_params(
                         readiness=readiness,
                         reduce_only=False,
-                        position_side=target_side,
                         client_order_id=client_order_id_open,
                     )
                     try:

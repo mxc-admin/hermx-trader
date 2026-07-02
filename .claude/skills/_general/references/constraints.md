@@ -45,3 +45,6 @@ The exchange nets per `inst_id`; the dashboard keys positions by symbol. Two str
 
 ### Docker named volume initialization copies ownership from image mount-point
 When Docker creates a named volume for the first time, it copies the ownership and permissions of the image's mount-point directory into the volume. The Dockerfile must `mkdir -p /app/data /app/logs && chown -R hermx:hermx /app` before `USER hermx` so fresh volumes are writable by the non-root process without manual host chown.
+
+### webhook_receiver validates several fields BEFORE the schema gate
+`build_record` gates these before `validate_alert_schema()` runs: `side` (`ALLOWED_SIDES = {"buy","sell"}` → 400 at line 2829); `source` (≠ `"tradingview"` → 202 `non_tradingview_source` at line 2831); `strategy_id` (unknown → `strategy_id_unknown` quarantine). To exercise schema rejection in tests, use a trigger with no pre-schema gate — e.g. `tv_signal_price="not-a-price"` (fails jsonschema `oneOf(number|string)`).
