@@ -37,8 +37,8 @@ The exchange nets per `inst_id`; the dashboard keys positions by symbol. Two str
 ### "ccxt" is a backend name, not a venue name
 `CcxtExecutor._exchange_id()` resolves `ccxt_exchange or exchange or "okx"`. Setting `exchange="ccxt"` (the backend) without `ccxt_exchange="okx"` (the venue) causes `getattr(ccxt, "ccxt")` → `None` → `ValueError("unsupported_ccxt_exchange:ccxt")`. Always distinguish backend from venue in execution config.
 
-### Empty shadow_config() breaks dashboard executor
-After reducing `dashboard_core.shadow_config()` to `return {}`, `_dashboard_executor` lost its source for `ccxt_exchange` default. The fallback logic (`exchange="ccxt"`) masked the built-in `"okx"` default because `"ccxt"` was truthy. Removing a config source requires auditing all consumers for masked defaults.
+### Empty shadow_config() breaks dashboard executor (historical — dead code)
+(Historical — dead code.) After reducing `dashboard_core.shadow_config()` to `return {}`, `_dashboard_executor` lost its source for `ccxt_exchange` default. The fallback logic (`exchange="ccxt"`) masked the built-in `"okx"` default because `"ccxt"` was truthy. Removing a config source requires auditing all consumers for masked defaults.
 
 ### engine-config.json is gitignored — cannot be COPY'd in Dockerfile
 `engine-config.json` is listed in `.gitignore:7`. It is generated at runtime, not tracked. Any Dockerfile step that `COPY engine-config.json` will fail on a fresh clone or CI checkout. Use the tracked `config/runtime.demo.json` (identical defaults) instead.

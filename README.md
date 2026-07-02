@@ -133,6 +133,15 @@ All use the `mxc duo-base v2.5` indicator logic. They are configured for demo/sa
 - Hermes Agent in Telegram for monitoring and signal relay
 - Complete peace of mind that safety logic lives in auditable Python code
 
+## Repository Layout
+
+- `src/` — Python execution layer (webhook receiver, CCXT executor, dashboard backend)
+- `tests/` — test suite for the money path, intake hardening, and recovery
+- `scripts/` — operational and maintenance helper scripts
+- `dashboard-ui/` — Next.js source for the local dashboard (built to `dashboard-ui/out`)
+- `strategies/` — per-strategy demo/live JSON configs
+- `skills/` — Hermes operator skills and slash commands
+
 ## Requirements
 
 - VPS (Ubuntu 22.04 recommended) or local Mac

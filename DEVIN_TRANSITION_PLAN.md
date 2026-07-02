@@ -100,7 +100,7 @@ Do **not** use `python -m pytest` / `python3 -m pytest` / version-specific Pytho
 ### 3.4 — Config-deletion regression lesson
 **Trigger:** "Removing or emptying a config source/file in HermX." **Pin:** this repo.
 
-Deleting `shadow-config.json` and reducing `shadow_config()` to `return {}` caused a dashboard "Engine - ERROR": `_dashboard_executor`'s fallback `exchange="ccxt"` (a *backend* name) masked `CcxtExecutor`'s built-in `"okx"` default, so `getattr(ccxt, "ccxt")` returned `None`. **Rule:** when removing a config source, audit every consumer for masked defaults — especially where `or`-chains conflate backend names and venue names.
+(Historical — dead code; `shadow_config()` is a no-op kept only for callers.) Deleting `shadow-config.json` and reducing `shadow_config()` to `return {}` caused a dashboard "Engine - ERROR": `_dashboard_executor`'s fallback `exchange="ccxt"` (a *backend* name) masked `CcxtExecutor`'s built-in `"okx"` default, so `getattr(ccxt, "ccxt")` returned `None`. **Rule:** when removing a config source, audit every consumer for masked defaults — especially where `or`-chains conflate backend names and venue names.
 
 ### 3.5 — Money-system proven patterns (from `.claude/CLAUDE.md`, worth pinning explicitly)
 **Trigger:** "Touching webhook intake, dedupe, replay, or recovery logic in HermX." **Pin:** this repo.
