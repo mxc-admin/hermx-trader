@@ -53,6 +53,10 @@
       "type": "string",
       "enum": ["tradingview"]
     },
-    "signal_id": { "type": "string" }
+    "signal_id": { "type": "string" },
+    "extras": {
+      "type": "object",
+      "description": "Optional debugging context. Any extra fields sent in the alert that are not part of the core schema should be nested here to avoid conflicts with future schema additions. The receiver logs extras to pipeline.jsonl without affecting execution."
+    }
   }
 }

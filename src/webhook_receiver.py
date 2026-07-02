@@ -903,6 +903,13 @@ def record_pipeline_event(stage: str, signal_id: str | None, payload: dict | Non
         for key, value in payload.items():
             if key not in ("ts", "stage", "signal_id"):
                 record[key] = value
+    # Observe-only: surface the alert's optional ``extras`` debugging context at the
+    # event top level so operators can grep it out of pipeline.jsonl without digging
+    # into the nested ``normalized`` block. Never affects execution.
+    if "extras" not in record and payload:
+        norm = payload.get("normalized")
+        if isinstance(norm, dict) and isinstance(norm.get("extras"), dict):
+            record["extras"] = norm["extras"]
     (append_jsonl_durable if durable else append_jsonl)(PIPELINE_LEDGER, record)
     _rotate_ledger_if_large(PIPELINE_LEDGER)
 
@@ -980,7 +987,7 @@ def normalize(payload: dict) -> dict:
     if not signal_id:
         raw = f"{strategy_id}|{symbol}|{side}|{timeframe}|{tv_time}"
         signal_id = hashlib.sha256(raw.encode()).hexdigest()
-    return {
+    normalized = {
         "strategy_id": strategy_id,
         "strategy_name": strategy_name,
         "indicator": indicator,
@@ -997,6 +1004,13 @@ def normalize(payload: dict) -> dict:
         "source": str(first(payload, "source", default="tradingview")),
         "signal_id": signal_id,
     }
+    # Optional observe-only debugging context. Only carried when it is a dict --
+    # never inject ``extras: None``, which would fail the schema's ``object`` type
+    # check (schema key ``extras`` is an object) and reject otherwise-valid alerts.
+    extras = payload.get("extras")
+    if isinstance(extras, dict):
+        normalized["extras"] = extras
+    return normalized
 
 
 def validate_strategy_alert(normalized: dict) -> tuple[bool, dict | None, str | None]:
@@ -1122,7 +1136,6 @@ def default_control_state() -> dict:
         "pause_reason": "",
         "symbol_pauses": {},
         "strategy_overrides": {},
-        "allowed_assets": list(ALLOWED_SYMBOLS),
         "notes": "Shadow control file. Dashboard/Hermes may read this. Live execution remains disabled here.",
     }
 
@@ -1153,8 +1166,7 @@ def load_control_state() -> dict:
     try:
         state = json.loads(CONTROL_STATE_FILE.read_text(encoding="utf-8"))
         default = default_control_state()
-        merged = default | state
-        merged["risk_limits"] = default.get("risk_limits", {}) | state.get("risk_limits", {})
+        merged = {k: v for k, v in (default | state).items() if k in default}
         merged["symbol_pauses"] = state.get("symbol_pauses") if isinstance(state.get("symbol_pauses"), dict) else {}
         merged["strategy_overrides"] = state.get("strategy_overrides") if isinstance(state.get("strategy_overrides"), dict) else {}
         # Backward compat: remap legacy override mode labels. "shadow" was the old

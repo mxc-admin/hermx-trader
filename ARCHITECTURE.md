@@ -298,6 +298,28 @@ gate chain runs.
 
 A `hermes gateway` (native Telegram support) loads the `hermx-control` skill so an operator can query positions, PnL, arm status, and the last signal in chat. It is read-first; it inherits the same hard rule that it cannot execute without an explicit inbound signal or human instruction, and never bypasses the gate chain.
 
+### 7.6 Slash-command skill set
+
+Beyond the single `hermx-control` skill, HermX ships a set of focused operator slash commands
+(`/status`, `/positions`, `/strategy-list`, `/trace`, `/strategy-mode`, `/close`,
+`/emergency-stop`, `/restart`, `/upgrade`, `/help`). They follow a **4-layer architecture**:
+
+```text
+Hermes UI (slash command)  →  skills/hermx-*/SKILL.md  →  skills/hermx-ops/lib/hermx_ops.py  →  HermX runtime (dashboard :8098 / receiver :8891)
+```
+
+- **Hermes UI** — each `skills/hermx-*/SKILL.md` registers as a dynamic slash command.
+- **SKILL.md** — command prose, safety guards, examples; carries `metadata.hermes` config with
+  loopback defaults.
+- **`hermx_ops.py`** — the shared helper library (`read_state()` encoding UNKNOWN-never-flat,
+  `format_positions()`, `resolve_strategy()`, `post_close()`, `safe_update_control_state()`, …);
+  every skill imports it via `sys.path.insert(0, "skills/hermx-ops/lib")`.
+- **HermX runtime** — the same loopback HTTP API a human would use; all money-safety stays below
+  the API seam.
+
+The canonical API contract these skills speak is `skills/hermx-ops/references/api-contract.md`.
+Full command reference: `docs/hermx-slash-commands.md`.
+
 ---
 
 ## 8. Deployment
@@ -341,7 +363,8 @@ Two supervision modes run the *same* source. Both bind `127.0.0.1`.
 
 **Docker** — `docker-compose.yml` builds one image (`Dockerfile`, `python:3.11-slim`) with two services:
 - `receiver` + `dashboard`, both `network_mode: host` (required — both bind loopback; also lets Funnel reach `:8891`).
-- `.env` bind-mounted read-only; `strategies/` bind-mounted (editable without rebuild); the `hermx-data` named volume persists `logs/` ledgers across restarts (dashboard mounts it read-only).
+- Secrets come from `env_file: .env` (not a bind mount); `engine-config.json` and `strategies/` are bind-mounted **read-only** (`:ro`) — not editable in place.
+- `HERMX_DATA_DIR=/app/data` on both services. Two named volumes persist across restarts: `hermx-data` → `/app/logs` (append-only ledgers, rw for the receiver, `:ro` for the dashboard) and `hermx-state` → `/app/data` (mutable snapshots, **rw**). The dashboard runs `read_only: true` on its root fs but still writes `control-state.json` to `hermx-state`, so that volume must stay writable even with the read-only root.
 - `HEALTHCHECK` curls `/health` on each port. Secrets are never baked into the image.
 
 ### 8.2 Ingress
@@ -425,11 +448,14 @@ Intelligence is **purely additive** and lives *outside* the money path. Pattern:
 | `src/skills/hermes_execution.py` | `HermesRelayAdapter` — internal relay adapter (reference seam), not a Hermes Agent skill; delegates all safety to the service |
 | `src/security/credentials.py` | Per-exchange namespaced credential resolution + `redact_secrets` |
 | `src/security/webhook_auth.py` | Pure auth/rate-limit/HMAC/replay helpers |
-| `skills/hermx-control/SKILL.md` | Agent skill: loopback reads + signal relay, with hard money-safety rules |
-| `skills/*.md` | Operator runbooks (emergency-stop, optimization-workflow, tradingview-alert-setup, tradingview-recovery) |
+| `skills/hermx-control/SKILL.md` | Agent skill: loopback reads + signal relay, with hard money-safety rules (older single-skill model) |
+| `skills/hermx-{status,positions,strategy-list,trace,strategy-mode,close,restart,upgrade,help}/SKILL.md` | Slash-command skills — one dynamic Hermes command each (see `docs/hermx-slash-commands.md`) |
+| `skills/hermx-ops/` | Shared helper (`lib/hermx_ops.py`) + canonical API contract (`references/api-contract.md`) for the slash commands |
+| `skills/*.md` | Flat operator runbooks (`emergency-stop`, `optimization-workflow`, `tradingview-alert-setup`, `tradingview-recovery`) |
 | `schemas/strategy.schema.json` | Strategy file contract (v1 + v2, no inline credentials) |
 | `schemas/tradingview-alert.schema.json` | Inbound alert contract (Draft 2020-12) |
-| `config/runtime.demo.json` | OKX sandbox/demo profile (armed) |
+| `engine-config.json` (repo root) | **Runtime/engine config source** — loaded via `load_engine_config()` (`src/dashboard_core.py`), consumed by the receiver. (`shadow-config.json` is dead code, not a config source.) |
+| `config/runtime.demo.json` | Per-venue execution profile — OKX sandbox/demo (armed), not the engine runtime config |
 | `config/runtime.{kucoin,hyperliquid}.demo.json` | Other-venue demo profiles (ship disarmed) |
 | `config/runtime.live.example.json` | Live profile template (operator-created from explicit approval) |
 | `strategies/*.json` | Sanctioned strategy files keyed by `strategy_id` |

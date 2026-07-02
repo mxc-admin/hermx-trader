@@ -594,11 +594,12 @@ not used**. Key properties of the default compose:
 - **Non-root runtime** — processes run as the `hermx` user (uid/gid `10001`).
 - **Read-only config + strategies** — `engine-config.json` and `strategies/` are
   bind-mounted **`:ro`** into both services; edit them on the host, then restart.
-- **Two named volumes** — `hermx-data` holds the append-only ledgers/logs (`/app/logs`,
-  receiver rw, dashboard ro); `hermx-state` holds the four mutable state snapshots
-  (`/app/data`: `paper-state.json`, `control-state.json`, `seen-signals.json`,
-  `latest.json`). The dashboard shares `hermx-state` **rw** so live mode overrides it
-  writes to `control-state.json` land in the same volume the receiver reads.
+- **Two named volumes** — both services set `HERMX_DATA_DIR=/app/data`. `hermx-data` holds
+  the append-only ledgers/logs (`/app/logs`, receiver rw, dashboard ro); `hermx-state` holds
+  the four mutable state snapshots (`/app/data`: `paper-state.json`, `control-state.json`,
+  `seen-signals.json`, `latest.json`). The dashboard shares `hermx-state` **rw** (writable
+  even with its `read_only: true` root fs) so live mode overrides it writes to
+  `control-state.json` land in the same volume the receiver reads.
 - **Hardened dashboard** — `read_only: true`, `cap_drop: [ALL]`, `tmpfs: /tmp`.
 - **Public ingress via Tailscale** — the `tailscale` sidecar joins your tailnet as
   `hermx` using `TS_AUTHKEY` from `.env` and proxies traffic per
@@ -761,6 +762,28 @@ Make sure the agent can read the dashboard: either set `HERMX_DASH_AUTH=false` (
 single-user) in `.env`, or give the agent the `HERMX_SECRET` to send as the
 `X-Dashboard-Token` header.
 
+### 6.3.1 Register the slash-command skills
+
+Beyond the single `hermx-control` skill, HermX ships focused **slash-command skills** — each
+`skills/hermx-*/SKILL.md` becomes a dynamic slash command in Hermes (`/status`, `/positions`,
+`/strategy-list`, `/trace`, `/strategy-mode`, `/close`, `/emergency-stop`, `/restart`,
+`/upgrade`, `/help`). Link them all in one pass:
+
+```bash
+cd /opt/hermx     # repo root, so $PWD is correct
+mkdir -p ~/.hermes/skills
+for d in skills/hermx-*/; do
+  name="$(basename "$d")"
+  ln -sfn "$PWD/$d" ~/.hermes/skills/"$name"
+done
+hermes skills list | grep hermx-        # expect each hermx-* skill enabled
+```
+
+They share the helper library `skills/hermx-ops/lib/hermx_ops.py` (UNKNOWN-never-flat reads,
+guarded loopback mutations) and speak the contract in
+`skills/hermx-ops/references/api-contract.md`. Full command reference:
+`docs/hermx-slash-commands.md`.
+
 ### 6.4 Start the Telegram gateway
 
 ```bash
@@ -772,8 +795,9 @@ hermes gateway start     # managed service (or `hermes gateway` for foreground)
 
 Ask the user to message their bot in Telegram: **"are you there?"** and confirm a sane reply.
 
-**✅ Verify Phase 6:** `hermes skills list` shows `hermx-control` enabled, `hermes doctor` is clean,
-and the Telegram bot responds. Full details: `setup/09-hermes-agent.md`.
+**✅ Verify Phase 6:** `hermes skills list` shows `hermx-control` **and** the `hermx-*`
+slash-command skills enabled, `hermes doctor` is clean, and the Telegram bot responds. Full
+details: `setup/09-hermes-agent.md`; slash-command reference: `docs/hermx-slash-commands.md`.
 
 ---
 

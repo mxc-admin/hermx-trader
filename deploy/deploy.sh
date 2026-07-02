@@ -131,6 +131,32 @@ probe_health() {
   [[ "$healthy" == true ]]
 }
 
+validate_hermes_skills() {
+  # Hermes agent is optional; the skills only matter when Hermes is on PATH.
+  # Loop over every skill directory that ships a SKILL.md and ensure it is
+  # symlinked into ~/.hermes/skills/. Directories without a SKILL.md (e.g. the
+  # hermx-ops shared library) are not standalone skills and are skipped.
+  # When Hermes is NOT on PATH, stay completely silent — no warnings.
+  local hermes_present=false
+  command -v hermes >/dev/null 2>&1 && hermes_present=true
+  local skill_src skill_name skill_link
+  for skill_src in "$ROOT"/skills/*/; do
+    skill_src="${skill_src%/}"
+    [[ -f "$skill_src/SKILL.md" ]] || continue
+    skill_name="$(basename "$skill_src")"
+    skill_link="$HOME/.hermes/skills/$skill_name"
+    if [[ -L "$skill_link" && "$(readlink -f "$skill_link")" == "$(readlink -f "$skill_src")" ]]; then
+      ok "Hermes skill symlink valid: $skill_link -> $skill_src"
+    elif [[ "$hermes_present" == true ]]; then
+      if mkdir -p "$(dirname "$skill_link")" && ln -sfn "$skill_src" "$skill_link"; then
+        ok "Hermes skill symlink created: $skill_link -> $skill_src"
+      else
+        warn "Hermes installed but failed to create skill symlink: ln -sfn $skill_src $skill_link"
+      fi
+    fi
+  done
+}
+
 rollback() {
   phase "ROLLBACK — reverting to $START_SHA"
   warn "Forward deploy failed health check; rolling back."
@@ -231,6 +257,7 @@ fi
 phase "7/7 — Verdict"
 if [[ "$HEALTHY" == true ]]; then
   phase "Deploy succeeded"
+  validate_hermes_skills || true
   info "Backups for this run: $BACKUP_DIR"
   exit 0
 fi

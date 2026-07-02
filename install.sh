@@ -614,17 +614,24 @@ if ask "Set up Hermes Agent + Telegram (natural-language operator bot)?" "n"; th
     ok "Telegram credentials already present in $HERMES_ENV"
   fi
 
-  # 4. Register the hermx-control skill.
-  if [[ -d "$REPO_ROOT/skills/hermx-control" ]]; then
+  # 4. Register all Hermes skills. Every skill directory that ships a SKILL.md
+  #    is symlinked into ~/.hermes/skills/. Directories without a SKILL.md
+  #    (e.g. the hermx-ops shared library) are not standalone skills; skip them.
+  if [[ -d "$REPO_ROOT/skills" ]]; then
     mkdir -p ~/.hermes/skills
-    ln -sfn "$REPO_ROOT/skills/hermx-control" ~/.hermes/skills/hermx-control
-    if hermes skills list 2>/dev/null | grep -q "hermx-control"; then
-      ok "hermx-control skill registered"
-    else
-      warn "hermx-control skill not yet discovered by Hermes. Try: hermes skills refresh"
-    fi
+    for skill_src in "$REPO_ROOT"/skills/*/; do
+      skill_src="${skill_src%/}"
+      [[ -f "$skill_src/SKILL.md" ]] || continue
+      skill_name="$(basename "$skill_src")"
+      ln -sfn "$skill_src" ~/.hermes/skills/"$skill_name"
+      if hermes skills list 2>/dev/null | grep -q "$skill_name"; then
+        ok "$skill_name skill registered"
+      else
+        warn "$skill_name skill not yet discovered by Hermes. Try: hermes skills refresh"
+      fi
+    done
   else
-    warn "Skill directory not found: $REPO_ROOT/skills/hermx-control"
+    warn "Skill directory not found: $REPO_ROOT/skills"
   fi
 
   # 5. Health check and start gateway.

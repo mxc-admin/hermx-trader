@@ -148,8 +148,10 @@ door**, so it can never be "down" in a way that stops trades.
 - **Fails OPEN.** Timeout / transport error / malformed reply ⇒ proceed
   deterministically (logged). A down or slow LLM never blocks a sanctioned trade.
 - **Seams:** `run_execution_advisor` / `execute_okx_with_advisor`
-  (`src/webhook_receiver.py`), defaults built-in with an optional
-  `shadow-config.json` `advisor` block (env-overridable), decisions logged to
+  (`src/webhook_receiver.py`), defaults built-in and env-overridable. (Note:
+  `shadow-config.json` is dead code — the live config source is
+  `engine-config.json`, loaded via `load_engine_config()` in
+  `src/dashboard_core.py`.) Decisions logged to
   `logs/advisor-decisions.jsonl`.
   Tests: `tests/test_phase8_advisor.py`.
 - **Transport:** the **Hermes Agent** run as a one-shot **with our skills loaded**
