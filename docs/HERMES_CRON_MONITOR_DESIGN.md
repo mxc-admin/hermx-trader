@@ -320,6 +320,15 @@ target the DM explicitly with `--deliver telegram:7000111380`. Specs below use `
 on every job to avoid the fail-closed skip on a global-default change (§2.4). Times are UTC
 (match `HERMX_MONITOR_SUMMARY_HOUR_UTC` semantics from the old spec).
 
+The installer (`deploy/install-cron-monitors.sh`) provisions exactly **five** jobs — §6.1
+`hermx-weekly`, §6.2 `hermx-reconcile`, §6.3 `hermx-daily`, §6.4 `hermx-signal-late`, §6.5
+`hermx-health-check`. Idempotency is name-based, with two modes: **default** (human installer)
+creates missing jobs and `cron edit`s existing ones to enforce the definition; **create-only**
+(`HERMX_CRON_CREATE_ONLY=1`) creates missing jobs but **skips existing ones**, preserving operator
+pauses and edits. `deploy/deploy.sh` runs the installer in create-only mode on every upgrade
+(§5.5), so a deploy can never silently re-enable a paused monitor or overwrite a hand-tuned
+schedule. The MXC risk job (`hermx-risk-watch`) that once lived here was **removed** — see §6.4.
+
 ### 6.1 Weekly summary — Monday 09:00 UTC (LLM, no pre-check needed)
 
 Fires once per ISO week natively; no `last_period` bookkeeping (the scheduler owns next-run).
@@ -378,28 +387,32 @@ and any strategy-mode overrides currently set. Keep it under 200 words. UNKNOWN 
   --name "hermx-daily"
 ```
 
-### 6.4 Risk monitoring (MXC) — every 15 min, gated (pre-check gate + LLM)
+### 6.4 Signal-late (zero-intake) — every 30 min, gated (pre-check gate + LLM)
 
-Pre-check gate (`hermx-risk-gate.py`, §7): read `risk_index_gate_enabled` from
-`control-state.json`; if false/absent → `{"wakeAgent": false}` (fail-open, no risk alerts). If
-true → fetch MXC `risk_state`; wake only on a **transition into** `{elevated, high, risk_off}`
-(window 3600s / escalation), passing the risk snapshot as context.
+Pre-check gate (`hermx-intake-gate.py`, §7) reads the rolling intake window and computes how long
+since the last TradingView intake. If a fresh intake is present (< 3 days) → `{"wakeAgent": false}`
+($0 tick). If the gap exceeds 3 days → wakes the agent with the gap as context: the receiver may be
+up while alerts stopped arriving, a silent observability hole. The agent replies `[SILENT]` if, on
+inspection, a recent intake is present after all.
 
 ```bash
-hermes cron create "every 15m" \
-  "The HermX risk index changed state (snapshot in context). Using the loaded skills, read current \
-posture and open exposure, and produce a short operator note: new risk state, what exposure is \
-affected, and the recommended human check. If the change is benign on inspection, reply [SILENT]." \
-  --script hermx-risk-gate.py \
-  --skill hermx-status --skill signal-memory \
+hermes cron create "every 30m" \
+  "HermX has received NO TradingView intake for over 3 days (details in the injected context). \
+The receiver may be up while alerts stopped arriving — a silent observability hole. Produce a short \
+operator note: how long since the last intake, the likely cause (TV alert paused, webhook URL \
+changed, network), and the recommended human check. If, on inspection, a recent intake is present \
+after all, reply with only [SILENT]. Never assume 'quiet market' — report the gap plainly." \
+  --script hermx-intake-gate.py \
   --workdir "$WORKDIR" \
   --deliver telegram \
-  --provider <pinned> --model <pinned> \
-  --name "hermx-risk-watch"
+  --name "hermx-signal-late"
 ```
 
-*(If `skills/dashboard-risk` is authored (§5.2), add `--skill dashboard-risk` and the gate can be
-thinner — the skill parses MXC; the gate only handles the control-state flag + change detection.)*
+> **Removed: risk monitoring (MXC) — `hermx-risk-watch`.** An MXC risk-index job was specified here
+> but is **not installed**: its gate keyed on `risk_index_gate_enabled`, a flag that does not exist
+> anywhere in the codebase, so the job could never fire — and an inert monitor is worse than none
+> (false reassurance that risk is watched). The `hermx-risk-gate.py` script is kept in the repo but
+> unwired. Re-add the flag (and pin `--provider`/`--model`) before wiring this job.
 
 ### 6.5 Health check — every 5 min (NO-AGENT script watchdog, $0)
 
@@ -488,7 +501,7 @@ skills and creates jobs.
 
 - **Provisioning / CI:** the CLI (`hermes cron create/edit`) driven by the install script above —
   reproducible, reviewable, diffable.
-- **Ad-hoc operator changes:** natural language in chat (`/cron pause hermx-risk-watch`) or the
+- **Ad-hoc operator changes:** natural language in chat (`/cron pause hermx-reconcile`) or the
   `cronjob` tool — the operator can pause a noisy monitor without touching the repo.
 - **Never** hand-edit `~/.hermes/cron/jobs.json` (atomic-write file owned by the scheduler).
 

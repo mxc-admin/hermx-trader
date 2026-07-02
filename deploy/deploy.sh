@@ -243,6 +243,18 @@ phase "5/7 — Restart services"
 restart_services || { err "systemctl restart failed"; rollback || true; exit 1; }
 ok "Services restarted"
 
+# --- 5.5/7 Cron monitors (best-effort, create-only) ----------------------------
+# Provision monitoring so existing installs auto-get it on upgrade. CREATE_ONLY=1
+# means we ONLY create jobs that are missing — a manually paused/edited job is
+# never touched, so a deploy can never silently re-enable operator-disabled cron.
+if command -v hermes >/dev/null 2>&1; then
+  phase "5.5/7 — Provisioning cron monitors (create-only)"
+  HERMX_CRON_CREATE_ONLY=1 HERMX_CRON_SMOKE=0 \
+    bash "$ROOT/deploy/install-cron-monitors.sh" || warn "Cron monitor provisioning failed — inspect manually"
+else
+  info "Hermes not on PATH — skipping cron monitor provisioning"
+fi
+
 # --- 6/7 Health check ----------------------------------------------------------
 phase "6/7 — Health check"
 info "Waiting 5s for services to come up..."

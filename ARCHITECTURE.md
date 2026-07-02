@@ -379,6 +379,8 @@ Every install is fully isolated: its own Tailscale tailnet/URL, its own `.env`, 
 
 HermX monitoring uses the Hermes gateway's built-in cron scheduler rather than a custom daemon. Five read-only jobs run via pre-check gate scripts that read HermX state (logs, `/api`) and wake an LLM agent only when conditions change. The gate scripts live in `deploy/hermes-scripts/`; `deploy/install-cron-monitors.sh` provisions them idempotently. See `docs/HERMES_CRON_MONITOR_DESIGN.md` for the full design.
 
+On every code deploy, `deploy/deploy.sh` runs the installer in `HERMX_CRON_CREATE_ONLY=1` mode: missing jobs are created, but existing jobs are never edited — a manually paused or re-scheduled job survives the deploy untouched.
+
 ---
 
 ## 9. Extension Guide

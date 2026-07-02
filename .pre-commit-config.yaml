@@ -12,3 +12,15 @@ repos:
       - id: check-merge-conflict
       - id: end-of-file-fixer
       - id: trailing-whitespace
+  # Fast, stdlib-only security gate on the production surface. Runs the audit's
+  # heuristic checks (secrets, dangerous calls, HMAC bypass, perms, docker,
+  # git-tracked secrets) with external tools disabled so it stays fast and
+  # dependency-free. Fails the commit on any HIGH/CRITICAL finding.
+  - repo: local
+    hooks:
+      - id: hermx-security-audit
+        name: hermx security audit (fast)
+        entry: python scripts/security-audit.py --fast --fail-on high
+        language: system
+        pass_filenames: false
+        always_run: true

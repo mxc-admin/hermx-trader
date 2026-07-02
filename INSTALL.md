@@ -833,6 +833,8 @@ This registers five read-only monitors (all fail-closed, no money-path access):
 - `hermx-health-check` — dashboard/receiver liveness (every 5m)
 - `hermx-signal-late` — zero-intake detection (every 30m, 3-day threshold)
 
+On subsequent upgrades (`bash deploy/deploy.sh`), missing monitor jobs are created automatically in "create-only" mode — existing jobs are never edited, so manual pauses and schedule changes are preserved.
+
 Pause a noisy monitor with `/cron pause <name>`. Full design: `docs/HERMES_CRON_MONITOR_DESIGN.md`.
 
 ### 6.6 Test it

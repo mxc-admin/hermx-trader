@@ -6,8 +6,11 @@
 # five monitor cron jobs. Safe to re-run.
 #
 #   bash deploy/install-cron-monitors.sh            # provision + smoke-test
-#   HERMX_CRON_DRY_RUN=1 bash deploy/install-cron-monitors.sh   # print actions only
-#   HERMX_CRON_SMOKE=0   bash deploy/install-cron-monitors.sh   # skip `cron run` smoke test
+#   HERMX_CRON_DRY_RUN=1 bash deploy/install-cron-monitors.sh     # print actions only
+#   HERMX_CRON_SMOKE=0   bash deploy/install-cron-monitors.sh     # skip `cron run` smoke test
+#   HERMX_CRON_CREATE_ONLY=1 bash deploy/install-cron-monitors.sh # only create missing jobs,
+#                                                                 # never edit existing ones
+#                                                                 # (preserves operator pauses/edits)
 #
 # See docs/HERMES_CRON_MONITOR_DESIGN.md for the design this implements.
 set -euo pipefail
@@ -31,6 +34,7 @@ BRIDGE_SCRIPTS=(hermx_gate_lib.py hermx-reconcile-gate.py hermx-health-watch.py 
 
 DRY_RUN="${HERMX_CRON_DRY_RUN:-0}"
 DO_SMOKE="${HERMX_CRON_SMOKE:-1}"
+CREATE_ONLY="${HERMX_CRON_CREATE_ONLY:-0}"
 
 say()  { printf '==> %s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
@@ -107,10 +111,18 @@ SIGNAL_LATE_PROMPT="HermX has received NO TradingView intake for over 3 days (de
 job_exists() { hermes cron list 2>/dev/null | grep -qiw "$1"; }
 
 # ensure_job NAME <create-args...>
-# Name-based idempotency: create if absent, else `cron edit` to enforce the definition.
+# Name-based idempotency. Two behaviours:
+#   default          — create if absent, else `cron edit` to enforce the definition.
+#   CREATE_ONLY=1    — create if absent, else SKIP entirely (preserves operator state:
+#                      manual pauses, schedule edits, prompt changes are left untouched).
+#                      Used by deploy.sh so an upgrade never silently re-enables a paused job.
 ensure_job() {
   local name="$1"; shift
   if job_exists "$name"; then
+    if [ "$CREATE_ONLY" = "1" ]; then
+      say "  job '$name' exists — preserving operator state (unset HERMX_CRON_CREATE_ONLY to enforce definition)"
+      return 0
+    fi
     say "  job '$name' exists — enforcing definition via 'cron edit'"
     run "hermes cron edit \"$name\" $*" || warn "  'cron edit $name' failed — inspect manually"
   else
