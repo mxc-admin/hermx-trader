@@ -99,7 +99,28 @@
 - **Reason**: A fresh clone / CI checkout does not contain `engine-config.json`, so `docker build` fails with `COPY failed: no such file or directory`. Replaced with `COPY config/runtime.demo.json` (tracked, identical defaults).
 - **Date tested**: June 2026
 
-### Removing read_only from dashboard service to fix control-state writes
+### `git checkout --` to discard operator config before pull
+- **What:** Use `git checkout -- engine-config.json strategies/` before `git pull` so pull never conflicts.
+- **Tested:** Deploy script design review.
+- **Verdict:** REJECTED
+- **Reason:** `checkout --` permanently discards uncommitted operator edits with no recovery path. Stash preserves them in `git stash list` and allows manual resolution if pop conflicts. (See architecture-decisions: config-safe deploy via stash.)
+- **Date tested:** June 2026
+
+### SIGTERM drain handler as a deploy concern
+- **What:** Require an app-level SIGTERM handler in `webhook_receiver.py` before accepting the deploy script.
+- **Tested:** Code review of WAL (`raw-webhooks.jsonl` fsync before queue put), startup replay, and reconciliation.
+- **Verdict:** REJECTED as deploy requirement (deferred to app improvement)
+- **Reason:** The WAL + startup replay + reconcile_startup + deterministic cl_ord_id idempotency already guarantee zero acknowledged-transaction loss across a hard restart. SIGTERM drain reduces restart-window reprocessing/noise but does not change the correctness guarantee. It is an app optimization, not a deploy blocker.
+- **Date tested:** June 2026
+
+### Schema migration framework for deploy
+- **What:** Add a versioned migration step in `deploy.sh` keyed off ledger `schema_version`.
+- **Tested:** Design review — checked if any schema break has ever occurred.
+- **Verdict:** REJECTED
+- **Reason:** `schema_version` / `checkpoint_version` exist and are verified on load, but no schema break has occurred in practice. A migration framework would be premature abstraction today. If a break occurs, handle it as a one-off migration script.
+- **Date tested:** June 2026
+
+
 - **What**: Remove `read_only: true` from the dashboard compose service so it can write `control-state.json`.
 - **Tested**: Code review of `dashboard.py:2497-2518` (`_save_control_state`) and compose service definition.
 - **Verdict**: REJECTED

@@ -7,6 +7,9 @@ globs: ["**/*"]
 ## Known Patterns (populated by /learn)
 <!-- Entries added here as bugs and patterns are discovered -->
 
+### `.gitignore` is inert for already-tracked files
+A file listed in `.gitignore` that is already tracked in git remains tracked — `gitignore` only prevents *new* untracked files from being staged. `git check-ignore <file>` exits 1 for tracked files regardless of `.gitignore` contents. This means operator-edited tracked config files (`engine-config.json`, `strategies/*.json`) will still conflict on `git pull` even if `.gitignore` lists them. The fix is `git rm --cached` (one-time repo change), not adding them to `.gitignore`.
+
 ### normalize() is non-deterministic for time-less payloads
 When a payload has no `tv_time`, `normalize()` falls back to `now_iso()`, yielding a different `signal_id` each call. On replay this breaks dedupe. Fix: drop time-less payloads on replay (never re-derive their id from wall-clock).
 

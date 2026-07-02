@@ -91,7 +91,32 @@
 - **Alternatives**: Trust the baked fallback (rejected — empty host bind-mounted `:ro` dir shadows baked files → zero strategies → all alerts quarantined).
 - **Rationale**: Docker bind-mounts are all-or-nothing; an empty host dir completely replaces the image contents. Pre-seeding guarantees the operator has editable strategy files.
 
-### Docker named volumes for state isolation
+### Config-safe deploy via stash of tracked operator-editable files
+- **Decision:** Before `git pull`, stash tracked config files (`engine-config.json`, `strategies/`, `config/`), do `git pull --ff-only`, then `git stash pop`.
+- **Alternatives:** `git checkout --` (discards edits permanently), `git rm --cached` (root fix but one-time repo change).
+- **Rationale:** Operator-edited tracked files conflict on every upstream config change. Stash preserves edits in `git stash list` and provides a conflict-resolution path. `checkout --` is destructive; `git rm --cached` is the durable fix but outside the deploy script.
+
+### Rollback boundary: code + config + deps only, never WAL
+- **Decision:** On health-check failure, `git reset --hard START_SHA`, restore operator config, reinstall deps, rebuild UI, restart. Transaction state (`logs/`, `control-state.json`) is append-only and NEVER rewound.
+- **Alternatives:** Roll back everything including `logs/` and `control-state.json`.
+- **Rationale:** WAL entries are money events. Rewinding them would erase real trades and break reconciliation. Code and deps are disposable; state is sacred. Idempotency makes replaying existing WAL rows on rolled-back code safe.
+
+### `pip install` is mandatory on every deploy (even `--no-pull`)
+- **Decision:** `pip install -r requirements.txt` runs unconditionally in `deploy.sh` regardless of `--no-pull`.
+- **Alternatives:** Skip pip when `--no-pull` is set (assumes deps unchanged).
+- **Rationale:** `git pull` updates source code; `.venv/` lives outside git. The pulled commit may bump `requirements.txt` or import a new package. Skipping pip risks `ImportError` on restart. pip is a ~1s no-op when already satisfied.
+
+### `git pull --ff-only` for deterministic deploy history
+- **Decision:** Deploy script uses `--ff-only` instead of bare `git pull`.
+- **Alternatives:** Plain `git pull` (may create surprise merge commits on divergent history).
+- **Rationale:** A deploy box should never carry local commits. `--ff-only` aborts on non-fast-forward history, preventing silent merge commits that complicate rollback (`START_SHA` would point to a merge commit, not a clean prior state).
+
+### Pre-deploy snapshot of config + transaction state
+- **Decision:** Before touching anything, copy operator config → `.deploy-backups/<ts>/config` and transaction state → `.deploy-backups/<ts>/state`.
+- **Alternatives:** No snapshot (rely on gitignore survival + operator discipline).
+- **Rationale:** Provides a forensic safety net for botched rollback or operator error. Config snapshot is actively used for rollback restore; state snapshot is insurance only (never restored).
+
+
 - **Decision**: `hermx-data` (ledgers) + `hermx-state` (snapshots) as named volumes; bind-mounts only for operator-editable config.
 - **Alternatives**: Host directories for everything (rejected — permissions mess with non-root uid 10001); bake state into image (rejected — destroyed on every update).
 - **Rationale**: Named volumes have independent lifecycle, preserve data across image pulls, and inherit correct ownership from the image's pre-created mount points.
