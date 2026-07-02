@@ -135,3 +135,28 @@
 - **Decision:** `--force` skips confirmations but does NOT auto-accept strategy re-seed; a separate `--reseed` flag gates re-seeding.
 - **Alternatives:** Let `--force` imply re-seed (single flag for all non-interactive behavior).
 - **Rationale:** CI/automation (`--force`) must default to safe — never silently overwrite operator strategy files. Re-seed is destructive and must be opted into explicitly.
+
+### Hermes built-in cron over a custom monitor daemon
+- **Decision:** Use Hermes' built-in cron (60s tick scheduler + `hermes cron create/edit/run/list`) for all monitors.
+- **Alternatives:** A ~600-line custom monitor daemon (`docs/MONITOR_DAEMON_SPEC.md`, rejected).
+- **Rationale:** Built-in cron already provides scheduler, dedup, delivery, and resilience. No new process, no new store.
+
+### Pre-check gate scripts as the HermX↔Hermes bridge
+- **Decision:** Python scripts in `~/.hermes/scripts/` read HermX state (files + `/api`) read-only, compute conditions, and emit `{"wakeAgent": true/false}`.
+- **Alternatives:** Wake the LLM every tick regardless of state.
+- **Rationale:** The LLM only wakes when something actually changed — cheap deterministic pre-check, expensive LLM only on signal.
+
+### Repo→host deployment model for cron monitors
+- **Decision:** `deploy/hermes-scripts/` (repo, git-tracked) is `cp`'d to `~/.hermes/scripts/` (host, runtime). Skills are `ln -sfn` symlinked (live edits). Jobs are created once in `~/.hermes/cron/jobs.json` and self-sustain.
+- **Alternatives:** Symlink everything, or bake all into the repo path.
+- **Rationale:** Scripts want a stable frozen copy per deploy; skills want live edits; jobs are one-time registrations. Each artifact class gets the deploy mechanism that matches its lifecycle.
+
+### Producer `emit_operator_alert` on the REJECTED path
+- **Decision:** A one-line producer change in `service.py` emits an operator alert on rejected orders, surfacing them through the *existing* reconcile gate.
+- **Alternatives:** Build a new dedicated rejected-order monitor/gate.
+- **Rationale:** Cheapest high-value fix — reuses the existing gate plumbing; no new gate, script, or job needed.
+
+### Remove inert monitors rather than keep them
+- **Decision:** `hermx-risk-watch` was removed from the installer because it gates on a nonexistent flag (`risk_index_gate_enabled`) and can never fire.
+- **Alternatives:** Keep it wired "for coverage" until the flag exists.
+- **Rationale:** A monitor that looks alive in `hermes cron list` but never fires creates false confidence — worse than no monitor. Delete until the flag is real.

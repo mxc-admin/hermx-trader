@@ -30,7 +30,8 @@ from pathlib import Path
 SEVERITY_RANK = {"info": 0, "warning": 1, "error": 2, "critical": 3}
 
 # Per-concern suppression windows (seconds). Ported verbatim from the daemon spec §4.3.
-WINDOW = {"health": 900, "reconcile": 1800, "risk": 3600}
+# "signal_late" is a slow absence condition (zero-intake) — 1h suppression to avoid spamming.
+WINDOW = {"health": 900, "reconcile": 1800, "risk": 3600, "signal_late": 3600}
 
 # Risk states that warrant an operator note (transition INTO one of these wakes).
 RISK_ALERT_STATES = {"elevated", "high", "risk_off"}

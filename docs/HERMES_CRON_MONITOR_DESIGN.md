@@ -335,7 +335,7 @@ any read that is stale or unavailable — never assume 'flat' or 'healthy'." \
   --workdir "$WORKDIR" \
   --deliver telegram \
   --provider <pinned> --model <pinned> \
-  --name "hermx-weekly-summary"
+  --name "hermx-weekly"
 ```
 
 ### 6.2 Reconcile-error alert — every 5 min, deliver only on change (pre-check gate + LLM)
@@ -358,7 +358,7 @@ tracing, the condition is already resolved and benign, reply with only [SILENT].
   --workdir "$WORKDIR" \
   --deliver telegram \
   --provider <pinned> --model <pinned> \
-  --name "hermx-reconcile-watch"
+  --name "hermx-reconcile"
 ```
 
 ### 6.3 Daily digest — 08:00 UTC (LLM, no ask, no pre-check)
@@ -375,7 +375,7 @@ and any strategy-mode overrides currently set. Keep it under 200 words. UNKNOWN 
   --workdir "$WORKDIR" \
   --deliver telegram \
   --provider <pinned> --model <pinned> \
-  --name "hermx-daily-digest"
+  --name "hermx-daily"
 ```
 
 ### 6.4 Risk monitoring (MXC) — every 15 min, gated (pre-check gate + LLM)
@@ -413,7 +413,7 @@ hermes cron create "every 5m" \
   --script hermx-health-watch.py \
   --workdir "$WORKDIR" \
   --deliver telegram \
-  --name "hermx-health-watch"
+  --name "hermx-health-check"
 ```
 
 ### 6.6 Optional future jobs (drop-in, same pattern)

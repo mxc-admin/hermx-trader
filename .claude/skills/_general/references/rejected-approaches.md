@@ -147,3 +147,24 @@
 - **Verdict:** REJECTED
 - **Reason:** `-path './node_modules' -prune` only prunes the top-level dir. `dashboard-ui/node_modules` (535 `.md` files) evades it. Prune by name at any depth: `-name node_modules -prune`.
 - **Date:** July 2026
+
+### Custom monitor daemon (`docs/MONITOR_DAEMON_SPEC.md`)
+- **What:** A ~600-line custom daemon for scheduling, dedup, delivery, and resilience of HermX monitors.
+- **Tested:** Compared against Hermes built-in cron capabilities.
+- **Verdict:** REJECTED (superseded)
+- **Reason:** Hermes' built-in cron (60s tick scheduler + `hermes cron create/edit/run/list`) already provides scheduler, dedup, delivery, and resilience. A custom daemon is a whole new process/store for zero capability gain.
+- **Date:** July 2026
+
+### "Absence detection needs a new gate-lib primitive"
+- **What:** Add a new primitive to `hermx_gate_lib.py` to support frequency/zero-intake absence gates (brainstorm doc §7).
+- **Tested:** Reviewed the existing lib's condition/sidecar/suppression handling.
+- **Verdict:** REJECTED (over-stated)
+- **Reason:** The lib already handles arbitrary conditions + sidecar + suppression. An absence gate's script computes a synthetic condition and feeds existing `evaluate()`. Only condition-derivation differs, and that always lives in the per-gate script — no new primitive.
+- **Date:** July 2026
+
+### Keeping `hermx-risk-watch` in the installer
+- **What:** Leave the risk-watch cron job wired in `install-cron-monitors.sh`.
+- **Tested:** grep for `risk_index_gate_enabled` in `src/` — zero hits.
+- **Verdict:** REJECTED
+- **Reason:** It gates on `risk_index_gate_enabled`, a flag that does not exist in the codebase, so the job can never fire. An inert-but-listed monitor is false reassurance — worse than no monitor. Removed from installer; script kept in repo but unwired.
+- **Date:** July 2026

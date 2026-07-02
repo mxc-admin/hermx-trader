@@ -27,7 +27,7 @@ WORKDIR="$REPO_ROOT"
 DELIVER="telegram"
 
 READONLY_SKILLS=(hermx-status hermx-positions hermx-trace signal-memory)
-BRIDGE_SCRIPTS=(hermx_gate_lib.py hermx-reconcile-gate.py hermx-risk-gate.py hermx-health-watch.py)
+BRIDGE_SCRIPTS=(hermx_gate_lib.py hermx-reconcile-gate.py hermx-health-watch.py hermx-intake-gate.py)
 
 DRY_RUN="${HERMX_CRON_DRY_RUN:-0}"
 DO_SMOKE="${HERMX_CRON_SMOKE:-1}"
@@ -96,10 +96,13 @@ warn "Gateway must be restarted to pick up new env: 'hermes gateway restart' (or
 # 5. Create / update the five monitor cron jobs                               #
 # --------------------------------------------------------------------------- #
 # Provider/model intentionally NOT pinned (use default; accepts fail-closed skip risk).
+# hermx-risk-watch intentionally OMITTED: its gate keys on `risk_index_gate_enabled`, a flag
+# that does not exist anywhere in the codebase, so the job could never fire — worse than no
+# monitor (false reassurance). The hermx-risk-gate.py script is kept in the repo but unwired.
 WEEKLY_PROMPT="You are HermX's read-only weekly reporter. Using the loaded skills, read current status, open positions/exposure, and recent signal history. Produce a concise WEEKLY operator summary: arm state & mode, executor health, exposure and unrealized PnL, notable reconcile/stuck-order events this week, and the single most useful thing for the operator to check. Report UNKNOWN for any read that is stale or unavailable — never assume 'flat' or 'healthy'."
 RECONCILE_PROMPT="A reconcile/watchdog condition changed on HermX (details in the injected context). Use the loaded skills to trace the affected signal(s) end-to-end and confirm current exposure. Report a short operator summary: what fired, current CONFIRMED state, and the next check. If, after tracing, the condition is already resolved and benign, reply with only [SILENT]. Never assume 'flat' — report UNKNOWN if a read is unavailable."
 DAILY_PROMPT="Produce the HermX DAILY digest using the loaded skills: arm state & mode, executor/freshness health, open positions with exposure and uPnL, count of reconcile/operator alerts in the last 24h, and any strategy-mode overrides currently set. Keep it under 200 words. UNKNOWN for stale reads."
-RISK_PROMPT="The HermX risk index changed state (snapshot in context). Using the loaded skills, read current posture and open exposure, and produce a short operator note: new risk state, what exposure is affected, and the recommended human check. If the change is benign on inspection, reply [SILENT]."
+SIGNAL_LATE_PROMPT="HermX has received NO TradingView intake for over 3 days (details in the injected context). The receiver may be up while alerts stopped arriving — a silent observability hole. Produce a short operator note: how long since the last intake, the likely cause (TV alert paused, webhook URL changed, network), and the recommended human check. If, on inspection, a recent intake is present after all, reply with only [SILENT]. Never assume 'quiet market' — report the gap plainly."
 
 job_exists() { hermes cron list 2>/dev/null | grep -qiw "$1"; }
 
@@ -118,31 +121,30 @@ ensure_job() {
 
 say "Creating/updating monitor cron jobs"
 
-ensure_job "hermx-weekly-summary" \
+ensure_job "hermx-weekly" \
   "\"0 9 * * 1\" \"$WEEKLY_PROMPT\" \
    --skill hermx-status --skill hermx-positions --skill signal-memory \
    --workdir \"$WORKDIR\" --deliver $DELIVER"
 
-ensure_job "hermx-reconcile-watch" \
+ensure_job "hermx-reconcile" \
   "\"every 5m\" \"$RECONCILE_PROMPT\" \
    --script hermx-reconcile-gate.py \
    --skill hermx-trace --skill hermx-positions \
    --workdir \"$WORKDIR\" --deliver $DELIVER"
 
-ensure_job "hermx-daily-digest" \
+ensure_job "hermx-daily" \
   "\"0 8 * * *\" \"$DAILY_PROMPT\" \
    --skill hermx-status --skill hermx-positions --skill signal-memory \
    --workdir \"$WORKDIR\" --deliver $DELIVER"
 
-ensure_job "hermx-risk-watch" \
-  "\"every 15m\" \"$RISK_PROMPT\" \
-   --script hermx-risk-gate.py \
-   --skill hermx-status --skill signal-memory \
-   --workdir \"$WORKDIR\" --deliver $DELIVER"
-
-ensure_job "hermx-health-watch" \
+ensure_job "hermx-health-check" \
   "\"every 5m\" --no-agent \
    --script hermx-health-watch.py \
+   --workdir \"$WORKDIR\" --deliver $DELIVER"
+
+ensure_job "hermx-signal-late" \
+  "\"every 30m\" \"$SIGNAL_LATE_PROMPT\" \
+   --script hermx-intake-gate.py \
    --workdir \"$WORKDIR\" --deliver $DELIVER"
 
 # --------------------------------------------------------------------------- #
@@ -154,7 +156,7 @@ run "hermes -z \"ping\" --skills hermx-status >/dev/null && echo '  hermx-status
 
 if [ "$DO_SMOKE" = "1" ]; then
   say "Firing each job once ('hermes cron run'); inspect ~/.hermes/cron/output/<job_id>/"
-  for name in hermx-weekly-summary hermx-reconcile-watch hermx-daily-digest hermx-risk-watch hermx-health-watch; do
+  for name in hermx-weekly hermx-reconcile hermx-daily hermx-health-check hermx-signal-late; do
     run "hermes cron run \"$name\"" || warn "  'cron run $name' failed — inspect manually"
   done
 else

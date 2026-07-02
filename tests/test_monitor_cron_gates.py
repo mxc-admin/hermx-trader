@@ -41,6 +41,7 @@ def _load(mod_name, filename):
 reconcile = _load("hermx_reconcile_gate", "hermx-reconcile-gate.py")
 risk = _load("hermx_risk_gate", "hermx-risk-gate.py")
 health = _load("hermx_health_watch", "hermx-health-watch.py")
+intake = _load("hermx_intake_gate", "hermx-intake-gate.py")
 
 
 # --------------------------------------------------------------------------- #
@@ -332,6 +333,81 @@ def test_health_main_problem_prints_lines(monkeypatch, capsys):
     monkeypatch.setattr(health.g, "import_hermx_ops", lambda: hermx_ops)
     health.main()
     assert "receiver: down" in capsys.readouterr().out.splitlines()
+
+
+# --------------------------------------------------------------------------- #
+# Intake-recency gate (D — absence detection)                                  #
+# --------------------------------------------------------------------------- #
+def _write_raw(tmp_path, rows):
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    text = "".join(json.dumps(r) + "\n" for r in rows)
+    (tmp_path / "logs" / "raw-webhooks.jsonl").write_text(text)
+
+
+def test_intake_missing_wal_fail_open(tmp_path):
+    assert intake.intake_conditions(hermx_ops, str(tmp_path), NOW) == []
+
+
+def test_intake_empty_wal_fail_open(tmp_path):
+    _write_raw(tmp_path, [])
+    assert intake.intake_conditions(hermx_ops, str(tmp_path), NOW) == []
+
+
+def test_intake_no_intake_phase_fail_open(tmp_path):
+    # Only non-intake rows present → no intake ever seen → fail-open.
+    _write_raw(tmp_path, [{"phase": "webhook", "received_at": _iso(NOW)}])
+    assert intake.intake_conditions(hermx_ops, str(tmp_path), NOW) == []
+
+
+def test_intake_recent_no_alert(tmp_path):
+    _write_raw(tmp_path, [
+        {"phase": "intake", "received_at": _iso(NOW - 100)},
+        {"phase": "webhook", "received_at": _iso(NOW - 100)},  # ignored
+    ])
+    assert intake.intake_conditions(hermx_ops, str(tmp_path), NOW) == []
+
+
+def test_intake_stale_emits_one_condition(tmp_path):
+    _write_raw(tmp_path, [
+        {"phase": "intake", "received_at": _iso(NOW - 4 * 24 * 3600)},   # 4d old (> 3d default)
+        {"phase": "intake", "received_at": _iso(NOW - 5 * 24 * 3600)},   # older; not the max
+    ])
+    conds = intake.intake_conditions(hermx_ops, str(tmp_path), NOW)
+    assert len(conds) == 1
+    assert conds[0]["fingerprint"] == "frequency:zero_intake:global"
+    assert conds[0]["severity"] == "error"
+
+
+def test_intake_uses_newest_row_not_first(tmp_path):
+    # A fresh row anywhere in the file suppresses the alert (max, not last-line).
+    _write_raw(tmp_path, [
+        {"phase": "intake", "received_at": _iso(NOW - 5 * 3600)},
+        {"phase": "intake", "received_at": _iso(NOW - 60)},         # recent
+    ])
+    assert intake.intake_conditions(hermx_ops, str(tmp_path), NOW) == []
+
+
+def test_intake_corrupt_lines_skipped(tmp_path):
+    (tmp_path / "logs").mkdir()
+    good = json.dumps({"phase": "intake", "received_at": _iso(NOW - 4 * 24 * 3600)})
+    (tmp_path / "logs" / "raw-webhooks.jsonl").write_text(
+        good + "\n{not json\n" + '{"phase":"intake","received_at":"broken\n'
+    )
+    conds = intake.intake_conditions(hermx_ops, str(tmp_path), NOW)
+    assert [c["fingerprint"] for c in conds] == ["frequency:zero_intake:global"]
+
+
+def test_intake_gate_end_to_end_wake_then_sleep(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMX_SCRIPTS_DIR", str(tmp_path))
+    _write_raw(tmp_path, [{"phase": "intake", "received_at": _iso(NOW - 4 * 24 * 3600)}])
+    conds = intake.intake_conditions(hermx_ops, str(tmp_path), NOW)
+
+    first = g.run_gate("signal_late", conds, NOW)
+    assert first["wakeAgent"] is True
+    assert (tmp_path / ".hermx-signal_late.state").exists()
+
+    second = g.run_gate("signal_late", conds, NOW + 100)  # inside 3600s window
+    assert second["wakeAgent"] is False
 
 
 # --------------------------------------------------------------------------- #

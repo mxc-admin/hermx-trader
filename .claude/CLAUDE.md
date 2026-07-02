@@ -36,3 +36,4 @@ Invoke: `claude -p "/<skill-name> <args>" --permission-mode dontAsk`
 - **`received_at` (microsecond ISO) is the join key** between intake and outcome rows. Collision-safe; use it to correlate, not as a freshness measure.
 - **Freshness is bounded on signal bar time (`tv_time`), never server time (`received_at`).** After an outage the server clock is current but the bar is stale.
 - **Restarts are routine, not rare:** systemd `Restart=always` / `RestartSec=5`. Design recovery for frequent restarts.
+- **The cron gate library is proportionate, not gold-plating.** Fingerprint + suppression window + escalation + atomic sidecar (~269 lines in `hermx_gate_lib.py`) is the actual job of a money-adjacent dedup gate. Its tests (~361 lines / 32–40 cases) call the real production functions, avoiding the "re-implement the handler" anti-pattern.

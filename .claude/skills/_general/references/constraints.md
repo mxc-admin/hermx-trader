@@ -48,3 +48,18 @@ When Docker creates a named volume for the first time, it copies the ownership a
 
 ### webhook_receiver validates several fields BEFORE the schema gate
 `build_record` gates these before `validate_alert_schema()` runs: `side` (`ALLOWED_SIDES = {"buy","sell"}` → 400 at line 2829); `source` (≠ `"tradingview"` → 202 `non_tradingview_source` at line 2831); `strategy_id` (unknown → `strategy_id_unknown` quarantine). To exercise schema rejection in tests, use a trigger with no pre-schema gate — e.g. `tv_signal_price="not-a-price"` (fails jsonschema `oneOf(number|string)`).
+
+### `risk_index_gate_enabled` does not exist in code
+Zero hits in `src/`. The `dashboard-risk` skill and the `hermx-risk-gate.py` monitor both gate on it → absent → fail-open → never fires. The risk monitor is inert until this flag is implemented in `control-state.json` and written by the dashboard.
+
+### `max_daily_loss_usd` is read by nothing
+Zero hits in `src/`. The key exists in `control-state.json` but is silently dropped on the next receiver-side `save_control_state` (`webhook_receiver.py:1189` filters to a default key set). Any drawdown monitor must first make the receiver persist this key.
+
+### Position-drift detection was actively removed
+`reconcile_startup` (`webhook_receiver.py:2148`) hard-codes `position_mismatches` empty with a docstring admitting "always-empty." The old comparison that wrote `reconcile-alerts.jsonl` was removed — that file is a fossil with no current writer.
+
+### Only BTC has trainable signal history
+In `raw-webhooks.jsonl` / `pipeline.jsonl`, btcusdt has ~222 intake rows; ETH/SOL/XRP have ~1 each. Per-strategy frequency/absence baselines are un-trainable today for anything but BTC.
+
+### Installer cron quoting/`hermes cron edit` grammar is untested
+`ensure_job()` relies on `hermes cron edit "$name" $*` accepting the same positional args as `create`, and on shell double-eval of `"..."` strings containing apostrophes. Neither is exercised by any test, and a dry-run won't catch the quoting break — it fails only at real invocation.

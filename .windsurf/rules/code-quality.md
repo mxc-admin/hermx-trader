@@ -37,6 +37,15 @@ Volumes declared without `name:`/`external:` are prefixed with the compose direc
 ### `find`/grep scripts must prune `node_modules` by name, not path
 `-path './node_modules' -prune` only prunes the top-level dir; `dashboard-ui/node_modules` (535 `.md` files) evades it and produces false-positive failures. Use `-name node_modules -prune` to catch nested dirs at any depth.
 
+### An inert monitor is worse than no monitor
+A cron job that gates on a nonexistent flag (e.g. `risk_index_gate_enabled`) never fires but still appears in `hermes cron list` as active coverage — false reassurance that risk is watched. Fix: either implement the flag or delete the job. `hermx-risk-watch` was removed from the installer for exactly this reason.
+
+### Installer must not contradict its own design doc (pin `--provider`/`--model`)
+`HERMES_CRON_MONITOR_DESIGN.md` §8.3 mandates pinning `--provider`/`--model` on every LLM cron job so a global-default change can't silently dark-fire monitors (fail-closed skip). `install-cron-monitors.sh:98` said "intentionally NOT pinned" — a model-default change silently disables all LLM monitors. Pin them.
+
+### Absence detection needs no new gate-lib primitive
+Frequency/zero-intake ("absence") gates do NOT require a new primitive in `hermx_gate_lib.py`. The per-gate script reads a rolling window, computes a count, manufactures a synthetic condition, and feeds it to the existing `run_gate()`/`evaluate()`. Only the condition-derivation is gate-specific (it always lives in the script); the lib touch is at most a suppression-window key.
+
 ## Anti-Patterns (populated by /learn)
 <!-- Entries added here as anti-patterns are identified -->
 
