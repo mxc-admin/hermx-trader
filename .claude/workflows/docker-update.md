@@ -37,6 +37,8 @@ whole block into a terminal. Flags:
 - `--dry-run` — preview only; no pull, no re-seed, no restart.
 - `--host` — use `docker-compose.host.yml` (host-networking fallback).
 - `--force` — skip all confirmation prompts (CI/automation). Implies non-interactive.
+  Does **not** re-seed strategies (safe default — it would overwrite operator edits).
+- `--reseed` — re-seed `strategies/` from the image; required to re-seed under `--force`.
 - `-h`, `--help` — usage.
 
 ```bash
@@ -51,7 +53,15 @@ set -uo pipefail
 IMAGE="${HERMX_IMAGE:-ghcr.io/mxc-admin/hermx-trader:latest}"
 INSTALL_DIR="${HERMX_INSTALL_DIR:-/opt/hermx}"
 COMPOSE_FILE="docker-compose.yml"
-DRY_RUN=0; FORCE=0
+DRY_RUN=0; FORCE=0; RESEED=0
+
+# Compose derives its project name from the install-dir basename, so the named
+# volumes are created prefixed (e.g. hermx_hermx-state). Reference them by their
+# full Docker volume names in `docker run` contexts (compose commands use the
+# bare compose-file names).
+COMPOSE_PROJECT="$(basename "$INSTALL_DIR")"
+VOL_STATE="${COMPOSE_PROJECT}_hermx-state"
+VOL_DATA="${COMPOSE_PROJECT}_hermx-data"
 
 # --- colored output (mirrors install-docker.sh) ------------------------------
 if [[ -t 1 ]]; then
@@ -70,10 +80,11 @@ ask(){ local p="$1" d="${2:-n}" r s; (( FORCE )) && return 0
   r="${r:-$d}"; [[ "$r" =~ ^[Yy] ]]; }
 
 usage(){ cat <<EOF
-Usage: bash docker-update.sh [--dry-run] [--host] [--force]
+Usage: bash docker-update.sh [--dry-run] [--host] [--force] [--reseed]
   --dry-run   Preview only; no pull/re-seed/restart.
   --host      Use docker-compose.host.yml (host networking).
-  --force     Skip confirmations (CI/automation).
+  --force     Skip confirmations (CI/automation). Does NOT re-seed strategies.
+  --reseed    Re-seed strategies/ from the image (needed to re-seed under --force).
   -h, --help  This message.
 Env: HERMX_IMAGE (default $IMAGE), HERMX_INSTALL_DIR (default $INSTALL_DIR).
 EOF
@@ -84,6 +95,7 @@ while [[ $# -gt 0 ]]; do case "$1" in
   --dry-run) DRY_RUN=1;;
   --host)    COMPOSE_FILE="docker-compose.host.yml";;
   --force)   FORCE=1;;
+  --reseed)  RESEED=1;;
   -h|--help) usage; exit 0;;
   *) err "Unknown flag: $1"; usage; exit 2;;
 esac; shift; done
@@ -126,7 +138,7 @@ info "Running services : ${RUNNING:-<none>}"
 # volume sizes (best-effort; needs a throwaway container)
 if have docker; then
   info "Volume sizes (persist across update):"
-  docker run --rm -v hermx-state:/state -v hermx-data:/data busybox \
+  docker run --rm -v "$VOL_STATE":/state -v "$VOL_DATA":/data busybox \
     sh -c 'printf "    hermx-state %s\n" "$(du -sh /state 2>/dev/null | cut -f1)";
            printf "    hermx-data  %s\n" "$(du -sh /data  2>/dev/null | cut -f1)"' 2>/dev/null \
     || warn "Could not size volumes (they still persist across the update)."
@@ -135,7 +147,7 @@ fi
 # backup reminder
 info ""
 info "${BOLD}Backup (optional):${RESET} volumes survive the pull, but for a restore point run:"
-info "  mkdir -p /backup && docker run --rm -v hermx-state:/state -v hermx-data:/data \\"
+info "  mkdir -p /backup && docker run --rm -v $VOL_STATE:/state -v $VOL_DATA:/data \\"
 info "    -v /backup:/backup busybox tar czf /backup/hermx-backup-\$(date +%Y%m%d).tgz /state /data"
 
 # --- confirm to proceed ------------------------------------------------------
@@ -166,7 +178,18 @@ fi
 
 # --- PHASE 3: optional re-seed strategies ------------------------------------
 phase "PHASE 3: Strategies"
-if ask "New strategies may be available in the image. Re-seed strategies/? (operator edits to existing files are preserved)" "n"; then
+# Re-seed is decoupled from --force: --force auto-accepts everything EXCEPT the
+# re-seed (which overwrites operator strategy files). Under --force, re-seed only
+# happens when --reseed is also given. Without --force, the operator is prompted.
+do_reseed=0
+if (( FORCE )) && ! (( RESEED )); then
+  info "Re-seed skipped under --force (use --reseed to override)."
+elif (( RESEED )); then
+  do_reseed=1
+elif ask "New strategies may be available in the image. Re-seed strategies/? (operator edits to existing files are preserved)" "n"; then
+  do_reseed=1
+fi
+if (( do_reseed )); then
   # Copy /app/strategies/. from the NEW image onto the host, same throwaway-container
   # pattern as install-docker.sh. `cp -r .` merges: image files land alongside operator
   # files; existing same-named files are overwritten with the image version.
@@ -207,7 +230,7 @@ phase "PHASE 6: Verify"
 info "Containers:"
 $DC ps 2>/dev/null | sed 's/^/    /'
 info "Image in use: $IMAGE (${NEW_ID#sha256:})"
-docker run --rm -v hermx-state:/state -v hermx-data:/data busybox \
+docker run --rm -v "$VOL_STATE":/state -v "$VOL_DATA":/data busybox \
   sh -c 'printf "    hermx-state %s\n" "$(du -sh /state 2>/dev/null | cut -f1)";
          printf "    hermx-data  %s\n" "$(du -sh /data  2>/dev/null | cut -f1)"' 2>/dev/null \
   || true
@@ -226,7 +249,7 @@ info "Option B — re-pull previous / clean image cache:"
 info "    $DC down && docker image prune -f && $DC pull && $DC up -d"
 info "Option C — restore from backup (if you made one in Phase 1):"
 info "    $DC down"
-info "    docker run --rm -v hermx-state:/state -v hermx-data:/data \\"
+info "    docker run --rm -v $VOL_STATE:/state -v $VOL_DATA:/data \\"
 info "      -v /backup:/backup busybox tar xzf /backup/hermx-backup-YYYYMMDD.tgz -C /"
 info "    $DC up -d"
 exit 1

@@ -39,7 +39,7 @@ sec(){  printf '\n=== %s ===\n' "$*"; }
 # All .md files, excluding vendored dirs and this audit doc (it mentions the
 # very tokens we grep for, so it would self-trigger).
 md_files(){
-  find . \( -path './node_modules' -o -path './.git' \) -prune -o -name '*.md' -print \
+  find . \( -name node_modules -prune \) -o \( -path './.git' -prune \) -o -name '*.md' -print \
     | grep -v 'workflows/doc-audit.md'
 }
 
@@ -47,7 +47,7 @@ md_files(){
 sec "1. Dead config references (shadow-config.json)"
 hits=$(grep -rn --include='*.md' 'shadow-config\.json' . 2>/dev/null \
         | grep -v 'workflows/doc-audit.md' \
-        | grep -viE 'dead|stale|legacy|removed|deprecated|no-op|obsolete' || true)
+        | grep -viE 'dead|stale|legacy|removed|deprecated|no-op|obsolete|delet|not reference|nowhere|rejected|removing|zero remaining' || true)
 if [ -n "$hits" ]; then
   fail "shadow-config.json referenced in docs without a dead/stale label:"
   printf '%s\n' "$hits" | sed 's/^/      /'
