@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
+import hashlib
 import os
 import time
 
@@ -37,6 +38,14 @@ def _decimal_floor(value: float | Decimal, step: float | Decimal) -> float:
         return float(d_value)
     units = (d_value / d_step).to_integral_value(rounding=ROUND_DOWN)
     return float(units * d_step)
+
+
+def _to_hyperliquid_cloid(client_order_id: str) -> str:
+    """Map an arbitrary client order id to Hyperliquid's required cloid format:
+    a 32-byte (64 hex char) hex string prefixed with ``0x``. A raw UUID is
+    rejected, so hash to guarantee exactly 32 bytes regardless of input length."""
+    stripped = str(client_order_id).replace("-", "")
+    return "0x" + hashlib.sha256(stripped.encode()).hexdigest()
 
 
 def _step_from_precision(precision_value) -> float | None:
@@ -298,15 +307,21 @@ class CcxtExecutor(BaseExecutor):
             out.append(f"OPEN_{target.upper()}")
         return out
 
-    def _order_params(self, *, readiness: dict, reduce_only: bool, client_order_id: str | None) -> dict:
+    def _order_params(self, *, readiness: dict, reduce_only: bool, client_order_id: str | None, exchange_id: str) -> dict:
         params = {}
+        is_hyperliquid = exchange_id == "hyperliquid"
         if client_order_id:
-            params["clOrdId"] = str(client_order_id)
-            params["clientOrderId"] = str(client_order_id)
+            if is_hyperliquid:
+                # Hyperliquid rejects OKX's clOrdId; it needs a 0x+hex cloid instead.
+                params["cloid"] = _to_hyperliquid_cloid(str(client_order_id))
+            else:
+                params["clOrdId"] = str(client_order_id)
+                params["clientOrderId"] = str(client_order_id)
 
-        td_mode = str((readiness or {}).get("td_mode") or self.execution_cfg.get("td_mode") or "").lower()
-        if td_mode:
-            params["tdMode"] = td_mode
+        if not is_hyperliquid:
+            td_mode = str((readiness or {}).get("td_mode") or self.execution_cfg.get("td_mode") or "").lower()
+            if td_mode:
+                params["tdMode"] = td_mode
 
         if reduce_only:
             params["reduceOnly"] = True
@@ -424,6 +439,7 @@ class CcxtExecutor(BaseExecutor):
 
     def execute(self, readiness: dict) -> dict:
         started = time.time()
+        exchange_id = self._exchange_id()
         intent = (readiness or {}).get("execution_intent") or {}
         client_order_id = intent.get("client_order_id")
         # Distinct clOrdId per leg so a reversal's close + open are not rejected as a
@@ -466,6 +482,9 @@ class CcxtExecutor(BaseExecutor):
             executed_orders = []
             order_type = str(self.execution_cfg.get("order_type") or "market").lower()
             price = reference_price if order_type in {"limit", "stop", "stop_limit"} else None
+            # Hyperliquid needs a reference price even for market orders (slippage bound).
+            if exchange_id == "hyperliquid":
+                price = reference_price
 
             for action in actions:
                 if action in {"CLOSE_LONG", "CLOSE_SHORT"}:
@@ -491,6 +510,7 @@ class CcxtExecutor(BaseExecutor):
                         readiness=readiness,
                         reduce_only=True,
                         client_order_id=client_order_id_close,
+                        exchange_id=exchange_id,
                     )
                     try:
                         order = client.create_order(symbol, order_type, close_side, close_amount, price, params)
@@ -555,6 +575,7 @@ class CcxtExecutor(BaseExecutor):
                         readiness=readiness,
                         reduce_only=False,
                         client_order_id=client_order_id_open,
+                        exchange_id=exchange_id,
                     )
                     try:
                         order = client.create_order(symbol, order_type, open_side, open_amount, price, params)

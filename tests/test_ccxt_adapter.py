@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
-from executors.ccxt_adapter import CcxtExecutor, _inst_id_to_ccxt_symbol
+from executors.ccxt_adapter import (
+    CcxtExecutor,
+    _inst_id_to_ccxt_symbol,
+    _to_hyperliquid_cloid,
+)
 
 
 class _FakeClient:
@@ -213,3 +218,169 @@ def test_health_snapshot_shape(monkeypatch):
     assert isinstance(snap.get("positions"), list)
     assert snap["positions"][0]["instId"] == "BTC-USDT-SWAP"
     assert snap["positions"][0]["mgnMode"] == "cross"
+
+
+# ---------------------------------------------------------------------------
+# Hyperliquid-specific fixes
+# ---------------------------------------------------------------------------
+
+_CLOID_RE = re.compile(r"^0x[0-9a-f]{64}$")
+
+
+def _hl_executor() -> CcxtExecutor:
+    cfg = {
+        "execution": {
+            "exchange": "ccxt",
+            "ccxt_exchange": "hyperliquid",
+            "simulated_trading": True,
+        }
+    }
+    return CcxtExecutor(cfg, Path("."))
+
+
+class _FakeHLClient(_FakeClient):
+    # Hyperliquid is not OKX-style contract sizing: allow fractional amounts so a
+    # small planned notional still produces a non-zero order.
+    def market(self, _symbol):
+        return {
+            "contract": True,
+            "contractSize": 1.0,
+            "precision": {"amount": 4},
+            "limits": {"amount": {"min": 0.0001}},
+        }
+
+    def fetch_positions(self, symbols=None):
+        return []
+
+    def fetch_ticker(self, _symbol):
+        return {"last": 60000.0}
+
+
+class _FakeHLLongClient(_FakeHLClient):
+    def fetch_positions(self, symbols=None):
+        symbol = symbols[0] if symbols else "SOL/USDC:USDC"
+        return [
+            {
+                "symbol": symbol,
+                "side": "long",
+                "contracts": 5,
+                "entryPrice": 59000.0,
+                "unrealizedPnl": 3.0,
+                "info": {},
+            }
+        ]
+
+
+def _hl_open_readiness() -> dict:
+    return {
+        "signal_side": "buy",
+        "signal_price": 60000.0,
+        "inst_id": "SOL-USDC-SWAP",
+        "execution_intent": {
+            "client_order_id": "550e8400-e29b-41d4-a716-446655440000",
+            "client_order_id_open": "550e8400-e29b-41d4-a716-446655440001",
+            "target_direction": "long",
+            "planned_notional_usd": 50.0,
+            "actions": ["OPEN_LONG"],
+        },
+    }
+
+
+def test_to_hyperliquid_cloid_format_and_determinism():
+    cloid = _to_hyperliquid_cloid("550e8400-e29b-41d4-a716-446655440000")
+    assert isinstance(cloid, str)
+    assert _CLOID_RE.match(cloid) is not None
+    # Deterministic: same input -> same output.
+    assert cloid == _to_hyperliquid_cloid("550e8400-e29b-41d4-a716-446655440000")
+
+
+def test_hyperliquid_params_sets_cloid_and_drops_okx_fields(monkeypatch):
+    ex = _hl_executor()
+    fake = _FakeHLClient()
+    monkeypatch.setattr(ex, "_client", lambda: fake)
+
+    out = ex.execute(_hl_open_readiness())
+
+    assert out["ok"] is True
+    assert len(fake.calls) == 1
+    params = fake.calls[0]["params"]
+    assert _CLOID_RE.match(params.get("cloid") or "") is not None
+    assert "clOrdId" not in params
+    assert "clientOrderId" not in params
+    assert "tdMode" not in params
+    assert "reduceOnly" not in params
+
+
+def test_hyperliquid_market_order_passes_reference_price(monkeypatch):
+    ex = _hl_executor()
+    fake = _FakeHLClient()
+    monkeypatch.setattr(ex, "_client", lambda: fake)
+
+    ex.execute(_hl_open_readiness())
+
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["price"] == 60000.0
+
+
+def test_okx_params_unchanged_regression_guard(monkeypatch):
+    ex = _executor()
+    fake = _FakeClient()
+    monkeypatch.setattr(ex, "_client", lambda: fake)
+
+    # _FakeClient reports a short position, so an OPEN_LONG must be preceded by a
+    # CLOSE_OPPOSITE_IF_ANY (same shape as the existing flip-semantics test) for
+    # orders to actually be submitted.
+    readiness = {
+        "signal_side": "buy",
+        "signal_price": 60000.0,
+        "inst_id": "BTC-USDT-SWAP",
+        "td_mode": "cross",
+        "execution_intent": {
+            "client_order_id": "cid-okx-open",
+            "target_direction": "long",
+            "planned_notional_usd": 1500.0,
+            "actions": ["CLOSE_OPPOSITE_IF_ANY", "OPEN_LONG"],
+        },
+    }
+
+    out = ex.execute(readiness)
+
+    assert out["ok"] is True
+    assert len(fake.calls) == 2
+    params = fake.calls[0]["params"]
+    assert params.get("clOrdId") == "cid-okx-open"
+    assert params.get("tdMode") == "cross"
+    assert fake.calls[0]["price"] is None
+    # The open leg keeps the OKX clOrdId/tdMode shape too (no cloid).
+    open_params = fake.calls[1]["params"]
+    assert open_params.get("clOrdId") == "cid-okx-open"
+    assert open_params.get("tdMode") == "cross"
+    assert "cloid" not in open_params
+    assert fake.calls[1]["price"] is None
+
+
+def test_hyperliquid_close_leg_gets_cloid(monkeypatch):
+    ex = _hl_executor()
+    fake = _FakeHLLongClient()
+    monkeypatch.setattr(ex, "_client", lambda: fake)
+
+    readiness = {
+        "signal_side": "sell",
+        "signal_price": 60000.0,
+        "inst_id": "SOL-USDC-SWAP",
+        "execution_intent": {
+            "client_order_id": "550e8400-e29b-41d4-a716-446655440000",
+            "client_order_id_close": "550e8400-e29b-41d4-a716-446655440002",
+            "target_direction": "short",
+            "planned_notional_usd": 50.0,
+            "actions": ["CLOSE_LONG"],
+        },
+    }
+
+    ex.execute(readiness)
+
+    assert len(fake.calls) == 1
+    close_params = fake.calls[0]["params"]
+    assert _CLOID_RE.match(close_params.get("cloid") or "") is not None
+    assert close_params.get("reduceOnly") is True
+    assert "clOrdId" not in close_params
