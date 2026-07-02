@@ -1,6 +1,6 @@
 ---
 name: signal-memory
-description: Use when the agent needs recent HermX signal and decision history — last N processed alerts, advisor verdicts, and execution outcomes — for conversational continuity. Helps avoid doubling up on a recent action or contradicting a prior decision. Read-only, never relays a signal.
+description: "Use when the agent needs recent HermX signal and decision history — last N processed alerts, advisor verdicts, and execution outcomes — for conversational continuity. Helps avoid doubling up on a recent action or contradicting a prior decision. Read-only, never relays a signal."
 version: 0.1.0
 author: HermX
 license: MIT

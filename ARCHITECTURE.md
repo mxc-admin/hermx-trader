@@ -301,8 +301,8 @@ A `hermes gateway` (native Telegram support) loads the `hermx-control` skill so 
 ### 7.6 Slash-command skill set
 
 Beyond the single `hermx-control` skill, HermX ships a set of focused operator slash commands
-(`/status`, `/positions`, `/strategy-list`, `/trace`, `/strategy-mode`, `/close`,
-`/emergency-stop`, `/restart`, `/upgrade`, `/help`). They follow a **4-layer architecture**:
+(`/hx-status`, `/hx-positions`, `/hx-strategy-list`, `/hx-trace`, `/hx-strategy-mode`, `/hx-close`,
+`/hx-emergency-stop`, `/hx-restart`, `/hx-upgrade`, `/hx-help`). They follow a **4-layer architecture**:
 
 ```text
 Hermes UI (slash command)  →  skills/hermx-*/SKILL.md  →  skills/hermx-ops/lib/hermx_ops.py  →  HermX runtime (dashboard :8098 / receiver :8891)

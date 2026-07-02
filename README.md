@@ -85,16 +85,16 @@ The `hermx-control` skill above is the older single-skill model. HermX now also 
 set of focused **slash-command skills** — each `skills/hermx-*/SKILL.md` becomes a dynamic
 slash command in Hermes:
 
-- `/status` — armed?, mode, dashboard/receiver reachability, last alert
-- `/positions` — open positions (UNKNOWN, never "flat" on a failed read)
-- `/strategy-list` — strategies with `file_mode` vs `effective_mode`
-- `/trace` — follow one signal intake → dedupe → pipeline → exec
-- `/strategy-mode` — set a per-strategy override (dry-run first; `live` needs `yes`)
-- `/close` — flatten ONE position, reduce-only and sizeless
-- `/emergency-stop` — kill / flatten all / force demo / pause a symbol
-- `/restart` — health-check and restart the down service(s)
-- `/upgrade` — run `deploy/deploy.sh` with auto-rollback
-- `/help` — list or explain the commands (pure text)
+- `/hx-status` — armed?, mode, dashboard/receiver reachability, last alert
+- `/hx-positions` — open positions (UNKNOWN, never "flat" on a failed read)
+- `/hx-strategy-list` — strategies with `file_mode` vs `effective_mode`
+- `/hx-trace` — follow one signal intake → dedupe → pipeline → exec
+- `/hx-strategy-mode` — set a per-strategy override (dry-run first; `live` needs `yes`)
+- `/hx-close` — flatten ONE position, reduce-only and sizeless
+- `/hx-emergency-stop` — kill / flatten all / force demo / pause a symbol
+- `/hx-restart` — health-check and restart the down service(s)
+- `/hx-upgrade` — run `deploy/deploy.sh` with auto-rollback
+- `/hx-help` — list or explain the commands (pure text)
 
 They share a helper library, `skills/hermx-ops/lib/hermx_ops.py` (UNKNOWN-never-flat reads,
 guarded mutations over loopback). Full reference: [docs/hermx-slash-commands.md](docs/hermx-slash-commands.md).

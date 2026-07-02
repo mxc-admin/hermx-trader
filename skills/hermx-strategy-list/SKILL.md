@@ -1,6 +1,6 @@
 ---
 name: hermx-strategy-list
-description: Use when the operator asks which HermX strategies exist and what mode each is in — demo/live/paused, symbol, timeframe. Read-only. Reads strategies/*.json merged with control-state.json strategy_overrides and symbol_pauses. Renders a table (id, name, symbol, tf, file_mode, effective_mode, paused). Never edits a strategy or changes a mode.
+description: "Use when the operator asks which HermX strategies exist and what mode each is in — demo/live/paused, symbol, timeframe. Read-only. Reads strategies/*.json merged with control-state.json strategy_overrides and symbol_pauses. Renders a table (id, name, symbol, tf, file_mode, effective_mode, paused). Never edits a strategy or changes a mode."
 version: 0.1.0
 author: HermX
 license: MIT
@@ -18,7 +18,7 @@ metadata:
         default: "control-state.json"
 ---
 
-# /strategy-list — HermX strategies & effective modes
+# /hx-strategy-list — HermX strategies & effective modes
 
 Read-only. Lists `strategies/*.json` and folds in `control-state.json`
 (`strategy_overrides`, `symbol_pauses`) to show each strategy's **effective** mode.

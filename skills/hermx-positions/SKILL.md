@@ -1,6 +1,6 @@
 ---
 name: hermx-positions
-description: Use when the operator asks what positions are open on HermX — open size, side, entry, mark, unrealized PnL. Read-only. Reads the local dashboard /api okx_live.positions over loopback. On any read failure or a stale/degraded executor it reports UNKNOWN — never "flat". Never places or closes an order.
+description: "Use when the operator asks what positions are open on HermX — open size, side, entry, mark, unrealized PnL. Read-only. Reads the local dashboard /api okx_live.positions over loopback. On any read failure or a stale/degraded executor it reports UNKNOWN — never 'flat'. Never places or closes an order."
 version: 0.1.0
 author: HermX
 license: MIT
@@ -20,7 +20,7 @@ metadata:
         default: "http://127.0.0.1:8098"
 ---
 
-# /positions — HermX open positions
+# /hx-positions — HermX open positions
 
 Read-only. Reads `GET {dashboard}/api` → `okx_live.positions` and renders a table.
 

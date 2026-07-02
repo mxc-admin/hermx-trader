@@ -1,6 +1,6 @@
 ---
 name: hermx-close
-description: Use when the operator wants to CLOSE (flatten) one open HermX position by symbol or strategy. Mutating, reduce-only. Confirms the position exists via /api first, previews side+size, and on explicit "yes" POSTs /api/close on the receiver. Never sends a size; never routes via /webhook. A failed/stale read is UNKNOWN — it refuses to close rather than assume flat.
+description: "Use when the operator wants to CLOSE (flatten) one open HermX position by symbol or strategy. Mutating, reduce-only. Confirms the position exists via /api first, previews side+size, and on explicit 'yes' POSTs /api/close on the receiver. Never sends a size; never routes via /webhook. A failed/stale read is UNKNOWN — it refuses to close rather than assume flat."
 version: 0.1.0
 author: HermX
 license: MIT
@@ -23,9 +23,9 @@ metadata:
         default: "http://127.0.0.1:8891"
 ---
 
-# /close — flatten one HermX position (reduce-only)
+# /hx-close — flatten one HermX position (reduce-only)
 
-**Mutating, reduce-only.** `/close <symbol|strategy>`
+**Mutating, reduce-only.** `/hx-close <symbol|strategy>`
 
 Closes ONE open position via `POST {receiver}/api/close`. The receiver derives a
 reduce-only close from the live position — this skill **never sends a size** and
@@ -75,7 +75,7 @@ arg = sys.argv[1]
 sid = h.resolve_strategy(arg, "strategies")["resolved"]
 symbol = {r["id"]: r for r in h.list_strategies("strategies")}[sid]["symbol"]
 r = h.post_close(h.RECEIVER_BASE, os.environ.get("HERMX_SECRET"),
-                 symbol, sid, operator="operator", reason="manual /close")
+                 symbol, sid, operator="operator", reason="manual /hx-close")
 print("outcome:", r["outcome"], "| reason:", r["reason"], "| cl_ord_id:", r["cl_ord_id"])
 # Re-read to see the resulting position (may still be settling).
 st = h.read_state(secret=os.environ.get("HERMX_SECRET"))

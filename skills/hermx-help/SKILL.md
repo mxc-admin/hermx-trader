@@ -1,6 +1,6 @@
 ---
 name: hermx-help
-description: Use when the operator asks what HermX slash commands exist, how one works, or wants usage help — e.g. "/help", "/help close", "what commands are there", "how do I use /strategy-mode". Prints a human-readable overview of all HermX commands, or a detailed guide for one. Read-only text: no HTTP calls, no file writes, no mutations.
+description: "Use when the operator asks what HermX slash commands exist, how one works, or wants usage help — e.g. '/hx-help', '/hx-help close', 'what commands are there', 'how do I use /hx-strategy-mode'. Prints a human-readable overview of all HermX commands, or a detailed guide for one. Read-only text: no HTTP calls, no file writes, no mutations."
 version: 0.1.0
 author: HermX
 license: MIT
@@ -18,9 +18,9 @@ metadata:
         default: "http://127.0.0.1:8891"
 ---
 
-# /help — HermX slash-command help
+# /hx-help — HermX slash-command help
 
-**Read-only text.** `/help` or `/help <command>`. Emits nothing but formatted
+**Read-only text.** `/hx-help` or `/hx-help <command>`. Emits nothing but formatted
 markdown — **no HTTP calls, no file writes, no mutations**. This SKILL.md *is* the
 source of truth; you do not need the helper library or contract loaded to answer.
 
@@ -33,47 +33,47 @@ operator at the shared helper
 - **No arg → overview.** Print the "All commands" section below.
 - **One arg → detail.** Print that command's "Command detail" block.
 - Match **case-insensitively** and **with or without the leading `/`**:
-  `close`, `/close`, `CLOSE`, `/Close` all resolve to `/close`.
-- Accept common aliases: `estop`/`kill` → `/emergency-stop`, `strategies`/`list`
-  → `/strategy-list`, `mode` → `/strategy-mode`, `deploy` → `/upgrade`,
-  `alerts`/`tv` → `/tv-alerts`.
+  `close`, `/hx-close`, `CLOSE`, `/Close` all resolve to `/hx-close`.
+- Accept common aliases: `estop`/`kill` → `/hx-emergency-stop`, `strategies`/`list`
+  → `/hx-strategy-list`, `mode` → `/hx-strategy-mode`, `deploy` → `/hx-upgrade`,
+  `alerts`/`tv` → `/hx-tv-alerts`.
 - Unknown arg → say so, then print the overview so the operator can pick.
 
-## All commands (`/help`)
+## All commands (`/hx-help`)
 
 Ten commands: five read-only diagnostics, five guarded mutations. None sets an
 order size; none calls an exchange directly. Every mutation dry-runs then needs an
 explicit `yes`.
 
 **Read-only**
-- **`/status`** — armed?, mode, dashboard/receiver up, last alert, strategy count.
-  `/status`
-- **`/positions`** — open positions: side, size, entry, mark, UPL, leverage.
-  `/positions`
-- **`/strategy-list`** — every strategy with `file_mode` vs `effective_mode` + paused.
-  `/strategy-list`
-- **`/trace`** — follow one signal intake → dedupe → pipeline → exec, joined on
-  `received_at`. `/trace BTCUSDT`
-- **`/tv-alerts`** — print copy-paste BUY + SELL TradingView Message templates for a
-  strategy. `/tv-alerts SOLUSDT`
+- **`/hx-status`** — armed?, mode, dashboard/receiver up, last alert, strategy count.
+  `/hx-status`
+- **`/hx-positions`** — open positions: side, size, entry, mark, UPL, leverage.
+  `/hx-positions`
+- **`/hx-strategy-list`** — every strategy with `file_mode` vs `effective_mode` + paused.
+  `/hx-strategy-list`
+- **`/hx-trace`** — follow one signal intake → dedupe → pipeline → exec, joined on
+  `received_at`. `/hx-trace BTCUSDT`
+- **`/hx-tv-alerts`** — print copy-paste BUY + SELL TradingView Message templates for a
+  strategy. `/hx-tv-alerts SOLUSDT`
 
 **Mutating (dry-run + explicit `yes`)**
-- **`/strategy-mode`** — set a per-strategy override (pause/resume/demo/live).
-  `/strategy-mode btcusdt_duo_base_dev_2h demo`
-- **`/close`** — flatten ONE position, reduce-only, sizeless, via `/api/close`.
-  `/close BTCUSDT`
-- **`/emergency-stop`** — layered stop: kill / flatten all / demo one / pause a symbol.
-  `/emergency-stop flatten`
-- **`/restart`** — restart a down dashboard/receiver via systemd (with fallbacks).
-  `/restart`
-- **`/upgrade`** — pull + deps + UI + tests + restart with auto-rollback.
-  `/upgrade`
+- **`/hx-strategy-mode`** — set a per-strategy override (pause/resume/demo/live).
+  `/hx-strategy-mode btcusdt_duo_base_dev_2h demo`
+- **`/hx-close`** — flatten ONE position, reduce-only, sizeless, via `/api/close`.
+  `/hx-close BTCUSDT`
+- **`/hx-emergency-stop`** — layered stop: kill / flatten all / demo one / pause a symbol.
+  `/hx-emergency-stop flatten`
+- **`/hx-restart`** — restart a down dashboard/receiver via systemd (with fallbacks).
+  `/hx-restart`
+- **`/hx-upgrade`** — pull + deps + UI + tests + restart with auto-rollback.
+  `/hx-upgrade`
 
-Ask `/help <command>` for syntax, guards, and examples on any one.
+Ask `/hx-help <command>` for syntax, guards, and examples on any one.
 
-## Command detail (`/help <command>`)
+## Command detail (`/hx-help <command>`)
 
-### `/status`
+### `/hx-status`
 - **Type:** read-only.
 - **Does:** loopback reads of dashboard `/health` + `/api` and receiver `/health` +
   `/latest`; reports armed, mode, reachability, last alert, strategy count, freshness.
@@ -81,11 +81,11 @@ Ask `/help <command>` for syntax, guards, and examples on any one.
   `/health` returned `ok` with `arm.armed == false`. Freshness is bounded on bar time
   (`tv_time`), never server clock. No POST ever issued.
 - **Examples:**
-  - `rtk claude -p "/status" --permission-mode dontAsk`
-  - "is HermX armed right now?" → `/status`
-  - "when did the last alert land?" → `/status` (reads `/latest`)
+  - `rtk claude -p "/hx-status" --permission-mode dontAsk`
+  - "is HermX armed right now?" → `/hx-status`
+  - "when did the last alert land?" → `/hx-status` (reads `/latest`)
 
-### `/positions`
+### `/hx-positions`
 - **Type:** read-only.
 - **Does:** reads `/api` → `okx_live.positions`; renders SYMBOL/SIDE/POS/AVG_PX/MARK/
   UPL/LEV/MGN.
@@ -93,37 +93,37 @@ Ask `/help <command>` for syntax, guards, and examples on any one.
   `freshness.no_data` → **UNKNOWN**. Only a healthy, non-degraded, empty book is FLAT —
   never infer "flat" from a failed read.
 - **Examples:**
-  - `rtk claude -p "/positions" --permission-mode dontAsk`
-  - "what are we holding?" → `/positions`
+  - `rtk claude -p "/hx-positions" --permission-mode dontAsk`
+  - "what are we holding?" → `/hx-positions`
   - Executor degraded → renders UNKNOWN, not an empty (flat) table.
 
-### `/strategy-list`
+### `/hx-strategy-list`
 - **Type:** read-only.
 - **Does:** lists `strategies/*.json` folded with `control-state.json`; shows
   `file_mode` vs `effective_mode` (override > pause > file) and `paused`.
 - **Guards:** read-only; a corrupt/missing strategy file surfaces UNKNOWN fields
   instead of crashing. No writes.
 - **Examples:**
-  - `rtk claude -p "/strategy-list" --permission-mode dontAsk`
-  - "which strategies are live vs demo?" → `/strategy-list`
-  - "is anything paused?" → `/strategy-list` (`paused` column)
+  - `rtk claude -p "/hx-strategy-list" --permission-mode dontAsk`
+  - "which strategies are live vs demo?" → `/hx-strategy-list`
+  - "is anything paused?" → `/hx-strategy-list` (`paused` column)
 
-### `/trace`
+### `/hx-trace`
 - **Type:** read-only.
-- **Syntax:** `/trace <received_at | symbol>`
+- **Syntax:** `/hx-trace <received_at | symbol>`
 - **Does:** joins `raw-webhooks.jsonl` → `signals.jsonl` → `pipeline.jsonl` →
   `executions.jsonl` on `received_at`; shows where a signal stopped.
 - **Guards:** time-less payloads (no `tv_time`) are flagged `time_less` and their
   non-deterministic `signal_id` is **never re-derived**. Intake-without-dedupe means
   "queued, not yet dequeued" — not an error. Read-only.
 - **Examples:**
-  - `rtk claude -p "/trace BTCUSDT" --permission-mode dontAsk`
-  - `rtk claude -p "/trace 2026-07-02T14:03:12.481922Z" --permission-mode dontAsk`
-  - "why didn't the last BTC alert fire?" → `/trace BTCUSDT`
+  - `rtk claude -p "/hx-trace BTCUSDT" --permission-mode dontAsk`
+  - `rtk claude -p "/hx-trace 2026-07-02T14:03:12.481922Z" --permission-mode dontAsk`
+  - "why didn't the last BTC alert fire?" → `/hx-trace BTCUSDT`
 
-### `/tv-alerts`
+### `/hx-tv-alerts`
 - **Type:** read-only.
-- **Syntax:** `/tv-alerts <name-or-id>`
+- **Syntax:** `/hx-tv-alerts <name-or-id>`
 - **Does:** resolves the arg to a `strategy_id`, reads `strategies/<id>.json`, and prints
   two schema-valid single-line alert Message payloads — one BUY (long), one SELL (short) —
   extracting `symbol` (from `instrument.inst_id`), `timeframe`, `strategy_id`, and venue
@@ -135,13 +135,13 @@ Ask `/help <command>` for syntax, guards, and examples on any one.
   and it can fail `alert_schema_invalid`); `timeframe` is hard-coded (not `{{interval}}`).
   `execution_mode` is shown as context only, never as an alert field.
 - **Examples:**
-  - `rtk claude -p "/tv-alerts SOLUSDT" --permission-mode dontAsk`
-  - `rtk claude -p "/tv-alerts btcusdt_duo_base_dev_2h" --permission-mode dontAsk`
-  - "what do I paste into TradingView for ETH?" → `/tv-alerts ETHUSDT`
+  - `rtk claude -p "/hx-tv-alerts SOLUSDT" --permission-mode dontAsk`
+  - `rtk claude -p "/hx-tv-alerts btcusdt_duo_base_dev_2h" --permission-mode dontAsk`
+  - "what do I paste into TradingView for ETH?" → `/hx-tv-alerts ETHUSDT`
 
-### `/strategy-mode`
+### `/hx-strategy-mode`
 - **Type:** mutating.
-- **Syntax:** `/strategy-mode <name-or-id> <pause|resume|demo|live>` (`resume` →
+- **Syntax:** `/hx-strategy-mode <name-or-id> <pause|resume|demo|live>` (`resume` →
   control `clear`).
 - **Does:** resolves the arg to a `strategy_id`, previews current→target, then
   `POST {dashboard}/api/control/strategy/{id}`; writes only the control override —
@@ -150,32 +150,32 @@ Ask `/help <command>` for syntax, guards, and examples on any one.
   arg stops with candidates; transport/5xx → UNKNOWN (never "applied"); re-reads to
   confirm the new `effective_mode`.
 - **Examples:**
-  - `rtk claude -p "/strategy-mode btcusdt_duo_base_dev_2h demo" --permission-mode dontAsk`
-  - `rtk claude -p "/strategy-mode btc pause" --permission-mode dontAsk`
+  - `rtk claude -p "/hx-strategy-mode btcusdt_duo_base_dev_2h demo" --permission-mode dontAsk`
+  - `rtk claude -p "/hx-strategy-mode btc pause" --permission-mode dontAsk`
   - Promote to live → shows preview, waits for `yes` before the POST.
 
-### `/close`
+### `/hx-close`
 - **Type:** mutating, reduce-only.
-- **Syntax:** `/close <symbol|strategy>`
+- **Syntax:** `/hx-close <symbol|strategy>`
 - **Does:** confirms the position via `/api`, previews side + size, and on `yes` sends
   `POST {receiver}/api/close` with `{symbol, strategy_id, operator, reason}`.
 - **Guards:** UNKNOWN read → **refuses to close** (won't assume flat); **no size field**
   in the body (server derives the reduce-only close); never routes via `/webhook`; a
   transport/5xx outcome is UNKNOWN, never reported as "flat".
 - **Examples:**
-  - `rtk claude -p "/close BTCUSDT" --permission-mode dontAsk`
-  - `rtk claude -p "/close btcusdt_duo_base_dev_2h" --permission-mode dontAsk`
+  - `rtk claude -p "/hx-close BTCUSDT" --permission-mode dontAsk`
+  - `rtk claude -p "/hx-close btcusdt_duo_base_dev_2h" --permission-mode dontAsk`
   - Stale executor → refuses; healthy + no position → "nothing to close".
 
-### `/emergency-stop`
+### `/hx-emergency-stop`
 - **Type:** mutating (layered).
-- **Syntax:** `/emergency-stop kill|flatten|demo <id>|pause-symbol <sym>`
+- **Syntax:** `/hx-emergency-stop kill|flatten|demo <id>|pause-symbol <sym>`
 - **Does:**
   - `kill` — global live kill: outputs the `HERMX_LIVE_TRADING=false` + receiver-restart
     steps, then confirms via `/health` `arm.kill_switch_engaged == true`.
   - `flatten` — closes every open position reduce-only (one `/api/close` each), then
     re-reads to verify flat.
-  - `demo <id>` — forces one strategy to sandbox (mutating twin of `/strategy-mode <id>
+  - `demo <id>` — forces one strategy to sandbox (mutating twin of `/hx-strategy-mode <id>
     demo`).
   - `pause-symbol <sym>` — adds the symbol to `control-state.json` `symbol_pauses` via
     the atomic safe updater.
@@ -183,13 +183,13 @@ Ask `/help <command>` for syntax, guards, and examples on any one.
   and treats UNKNOWN reads as indeterminate — never "flat"/"safe". `kill` stays
   unconfirmed until `/health` returns `true`.
 - **Examples:**
-  - `rtk claude -p "/emergency-stop flatten" --permission-mode dontAsk`
-  - `rtk claude -p "/emergency-stop kill" --permission-mode dontAsk`
-  - `rtk claude -p "/emergency-stop pause-symbol BTCUSDT" --permission-mode dontAsk`
+  - `rtk claude -p "/hx-emergency-stop flatten" --permission-mode dontAsk`
+  - `rtk claude -p "/hx-emergency-stop kill" --permission-mode dontAsk`
+  - `rtk claude -p "/hx-emergency-stop pause-symbol BTCUSDT" --permission-mode dontAsk`
 
-### `/restart`
+### `/hx-restart`
 - **Type:** mutating (lifecycle).
-- **Syntax:** `/restart` or `/restart force`
+- **Syntax:** `/hx-restart` or `/hx-restart force`
 - **Does:** health-checks `{dashboard}/health` + `{receiver}/health`. Both UP → does
   nothing. One/both DOWN → previews the plan and on `yes` restarts via `systemctl
   restart hermx-dashboard hermx-receiver` (preferred), else `bash run.sh --skip-tests`,
@@ -201,14 +201,14 @@ Ask `/help <command>` for syntax, guards, and examples on any one.
   no `/api/close`. The `run.sh` fallback forces `HERMX_LIVE_TRADING=false` unless
   `--honor-submit`.
 - **Examples:**
-  - `rtk claude -p "/restart" --permission-mode dontAsk`
-  - `rtk claude -p "/restart force" --permission-mode dontAsk`
+  - `rtk claude -p "/hx-restart" --permission-mode dontAsk`
+  - `rtk claude -p "/hx-restart force" --permission-mode dontAsk`
   - Both services up → reports `up`, changes nothing.
 
-### `/upgrade`
+### `/hx-upgrade`
 - **Type:** mutating (deploy + lifecycle).
-- **Syntax:** `/upgrade` or `/upgrade --no-pull` or `/upgrade --no-tests` or
-  `/upgrade --no-ui`
+- **Syntax:** `/hx-upgrade` or `/hx-upgrade --no-pull` or `/hx-upgrade --no-tests` or
+  `/hx-upgrade --no-ui`
 - **Does:** runs `bash deploy/deploy.sh` — snapshot state + rollback point, pull latest
   (unless `--no-pull`; pip install always runs), build the UI (unless `--no-ui`), run
   offline tests (unless `--no-tests`), restart both services, then health-check. Health
@@ -218,8 +218,8 @@ Ask `/help <command>` for syntax, guards, and examples on any one.
   flags pass through; non-zero exit or health-stays-down → FAILED/UNKNOWN (never
   "upgraded OK"), with a pointer to the run's `.deploy-backups/` snapshot.
 - **Examples:**
-  - `rtk claude -p "/upgrade" --permission-mode dontAsk`
-  - `rtk claude -p "/upgrade --no-tests" --permission-mode dontAsk`
+  - `rtk claude -p "/hx-upgrade" --permission-mode dontAsk`
+  - `rtk claude -p "/hx-upgrade --no-tests" --permission-mode dontAsk`
   - Health check fails post-deploy → deploy.sh rolls back; report ROLLED BACK.
 
 ## Shared invariants (apply to every command)
@@ -228,7 +228,7 @@ Ask `/help <command>` for syntax, guards, and examples on any one.
   empty book is genuinely FLAT.
 - **Mutations require preview + confirmation** — dry-run first, explicit `yes` before
   any write.
-- **`/close` is reduce-only and sizeless**; it never routes via `/webhook`.
+- **`/hx-close` is reduce-only and sizeless**; it never routes via `/webhook`.
 - **Live transitions require explicit `yes`** — no implicit demo→live.
 - **Sizing is owned by the execution layer** (from the strategy file); a skill never
   sets or suggests a size.
@@ -241,8 +241,8 @@ Ask `/help <command>` for syntax, guards, and examples on any one.
 - Keep output terse and chat-formatted: markdown bullets and short paragraphs.
 
 ## Verification checklist
-- [ ] `/help` (no arg) lists all **ten** commands, each with a one-liner + example.
-- [ ] `/help close`, `/help /close`, `/help CLOSE` all resolve to the `/close` detail.
+- [ ] `/hx-help` (no arg) lists all **ten** commands, each with a one-liner + example.
+- [ ] `/hx-help close`, `/hx-help /hx-close`, `/hx-help CLOSE` all resolve to the `/hx-close` detail.
 - [ ] Aliases (`estop`, `kill`, `deploy`, `mode`, `list`, `alerts`, `tv`) map to the right command.
 - [ ] An unknown arg reports "unknown command" then falls back to the overview.
 - [ ] No HTTP call, no file write, no mutation is performed by this skill.

@@ -777,9 +777,9 @@ single-user) in `.env`, or give the agent the `HERMX_SECRET` to send as the
 ### 6.3.1 Register the slash-command skills
 
 Beyond the single `hermx-control` skill, HermX ships focused **slash-command skills** — each
-`skills/hermx-*/SKILL.md` becomes a dynamic slash command in Hermes (`/status`, `/positions`,
-`/strategy-list`, `/trace`, `/strategy-mode`, `/close`, `/emergency-stop`, `/restart`,
-`/upgrade`, `/help`). Link them all in one pass:
+`skills/hermx-*/SKILL.md` becomes a dynamic slash command in Hermes (`/hx-status`, `/hx-positions`,
+`/hx-strategy-list`, `/hx-trace`, `/hx-strategy-mode`, `/hx-close`, `/hx-emergency-stop`, `/hx-restart`,
+`/hx-upgrade`, `/hx-help`). Link them all in one pass:
 
 ```bash
 cd /opt/hermx     # repo root, so $PWD is correct

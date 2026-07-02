@@ -126,7 +126,7 @@
 - **Alternatives:** Keep `exchange` as an optional field; keep it required.
 - **Rationale:** Strategy is the single source of truth for venue routing. The receiver (`webhook_receiver.py:1002`) backfills `"okx"` when absent (fail-open). Duplicating venue in the alert invites strategy/alert divergence.
 
-### `/tv-alerts` symbol hard-coded from `inst_id`, not TV `{{ticker}}`
+### `/hx-tv-alerts` symbol hard-coded from `inst_id`, not TV `{{ticker}}`
 - **Decision:** The template's `symbol` field is emitted from `strategy.instrument.inst_id` (may be `BTC-USDT-SWAP`), not the TradingView `{{ticker}}` placeholder.
 - **Alternatives:** Use the `{{ticker}}` placeholder so TV fills it at fire time.
 - **Rationale:** `{{ticker}}` emits the chart-feed name, which can differ from the strategy's exact instrument format. Hard-coding from the strategy guarantees the `strategy_symbol_mismatch` gate passes.

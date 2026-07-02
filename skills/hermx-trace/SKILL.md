@@ -1,6 +1,6 @@
 ---
 name: hermx-trace
-description: Use when the operator wants to trace one HermX signal end-to-end — intake → dedupe → pipeline stages → execution outcome. Read-only. Joins logs/raw-webhooks.jsonl, signals.jsonl, pipeline.jsonl, executions.jsonl on received_at. Accepts a received_at or a symbol (shows recent matches, defaults to latest). Never re-derives ids for time-less payloads. Never relays or executes.
+description: "Use when the operator wants to trace one HermX signal end-to-end — intake → dedupe → pipeline stages → execution outcome. Read-only. Joins logs/raw-webhooks.jsonl, signals.jsonl, pipeline.jsonl, executions.jsonl on received_at. Accepts a received_at or a symbol (shows recent matches, defaults to latest). Never re-derives ids for time-less payloads. Never relays or executes."
 version: 0.1.0
 author: HermX
 license: MIT
@@ -15,7 +15,7 @@ metadata:
         default: "logs"
 ---
 
-# /trace — follow one signal through the pipeline
+# /hx-trace — follow one signal through the pipeline
 
 Read-only diagnostic. Joins the four log stages on the **`received_at`** key:
 

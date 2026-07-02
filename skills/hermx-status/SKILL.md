@@ -1,6 +1,6 @@
 ---
 name: hermx-status
-description: Use when the operator asks about HermX system status — is it armed, what mode, is the dashboard/receiver up, when was the last alert, how many strategies. Read-only. Calls the local dashboard /health and /api plus the receiver /health and /latest over loopback. Never relays a signal, never places an order.
+description: "Use when the operator asks about HermX system status — is it armed, what mode, is the dashboard/receiver up, when was the last alert, how many strategies. Read-only. Calls the local dashboard /health and /api plus the receiver /health and /latest over loopback. Never relays a signal, never places an order."
 version: 0.1.0
 author: HermX
 license: MIT
@@ -23,7 +23,7 @@ metadata:
         default: "http://127.0.0.1:8891"
 ---
 
-# /status — HermX system status
+# /hx-status — HermX system status
 
 Read-only posture snapshot. Answers: **armed?**, **mode**, **reachability**,
 **last alert**, **strategy count**. Never submits or relays.

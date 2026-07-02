@@ -62,7 +62,7 @@ It does **not** open a new position.
 
 - Requires a **matched strategy** (routing via `strategy.instrument`), same as any other alert.
 - `side` is **optional and ignored** when `action=close`.
-- **Bypasses the kill switch and symbol pause** (same as the operator `/close` button) — a
+- **Bypasses the kill switch and symbol pause** (same as the operator `/hx-close` button) — a
   reduce-only order cannot increase exposure, so it is always allowed to flatten.
 - **Deduplicated per bar close signal**, same as buy/sell signals.
 

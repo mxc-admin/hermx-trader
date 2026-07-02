@@ -1,6 +1,6 @@
 ---
 name: hermx-restart
-description: Use when the operator wants to restart the HermX services because the dashboard or receiver is down or unresponsive. Mutating (process lifecycle, not trading). First health-checks dashboard /health and receiver /health over loopback; if both are UP it reports "up" and does nothing. If one or both are down it previews a restart plan and requires explicit "yes" before restarting via systemd (preferred) or a start script (fallback). `/restart force` restarts both regardless of state with a stronger prompt. Never edits strategy files, never places or relays an order.
+description: "Use when the operator wants to restart the HermX services because the dashboard or receiver is down or unresponsive. Mutating (process lifecycle, not trading). First health-checks dashboard /health and receiver /health over loopback; if both are UP it reports 'up' and does nothing. If one or both are down it previews a restart plan and requires explicit 'yes' before restarting via systemd (preferred) or a start script (fallback). `/hx-restart force` restarts both regardless of state with a stronger prompt. Never edits strategy files, never places or relays an order."
 version: 0.1.0
 author: HermX
 license: MIT
@@ -26,9 +26,9 @@ metadata:
         default: "hermx-dashboard hermx-receiver"
 ---
 
-# /restart — restart the HermX dashboard / receiver
+# /hx-restart — restart the HermX dashboard / receiver
 
-**Mutating (process lifecycle).** `/restart` or `/restart force`
+**Mutating (process lifecycle).** `/hx-restart` or `/hx-restart force`
 
 Restarts the HermX **dashboard** (`{dashboard}/health`, default `http://127.0.0.1:8098`)
 and/or **receiver** (`{receiver}/health`, default `http://127.0.0.1:8891`) when one is
@@ -40,19 +40,19 @@ order. Endpoint shapes and the UNKNOWN-never-flat rule live in
 ## When to use
 - The dashboard or receiver is unreachable / hung and needs a bounce.
 - After a deploy, systemd `Restart=always` didn't bring a unit back cleanly.
-- **Not** for arming/mode changes (→ `/strategy-mode`, `/emergency-stop`) or for a
-  live kill (→ `/emergency-stop kill`).
+- **Not** for arming/mode changes (→ `/hx-strategy-mode`, `/hx-emergency-stop`) or for a
+  live kill (→ `/hx-emergency-stop kill`).
 
 ## Syntax
 | Form              | Behaviour                                                              |
 |-------------------|-----------------------------------------------------------------------|
-| `/restart`        | Health-check first. Both UP → report `up`, **do nothing**. One/both DOWN → preview plan, require `yes`, restart only the affected services. |
-| `/restart force`  | Restart **both** services regardless of current state, with a stronger confirmation prompt. |
+| `/hx-restart`        | Health-check first. Both UP → report `up`, **do nothing**. One/both DOWN → preview plan, require `yes`, restart only the affected services. |
+| `/hx-restart force`  | Restart **both** services regardless of current state, with a stronger confirmation prompt. |
 
 ## Rules
 - **Never restart without an explicit `yes`.** Both forms preview first and stop for
   confirmation. `force` requires typing `yes, restart both`.
-- **`/restart` with both services UP does nothing** — it reports `up` and exits. Use
+- **`/hx-restart` with both services UP does nothing** — it reports `up` and exits. Use
   `force` to bounce a healthy system.
 - **Warn about live trading.** If `/health` shows `arm.armed == true` (live), warn the
   operator that **open positions may be briefly unmonitored during the restart** and
@@ -86,7 +86,7 @@ State exactly what will happen — do not act yet:
 - Which service(s) are DOWN (or "both, forced").
 - Which mechanism will be used (resolve in this order):
   1. **systemd (preferred):** `systemctl restart hermx-dashboard hermx-receiver`
-     — restart only the affected unit(s) for `/restart`; both for `force`.
+     — restart only the affected unit(s) for `/hx-restart`; both for `force`.
      Verify units exist first: `systemctl list-unit-files 'hermx-*'`.
   2. **Start script (fallback), if no systemd units:** `run.sh` at repo root.
      Relevant flags:
@@ -106,13 +106,13 @@ State exactly what will happen — do not act yet:
 - If `armed == true`: include the live-trading warning from **Rules**.
 
 Then ask:
-- `/restart` → `Restart <service(s)>? Type 'yes' to proceed.`
-- `/restart force` → `Force-restart BOTH dashboard and receiver now? Type 'yes, restart both' to proceed.`
+- `/hx-restart` → `Restart <service(s)>? Type 'yes' to proceed.`
+- `/hx-restart force` → `Force-restart BOTH dashboard and receiver now? Type 'yes, restart both' to proceed.`
 
 ### 3. Restart (only after the exact confirmation)
 Preferred (systemd) — restart the affected units:
 ```bash
-# /restart: pass only the down unit(s); force: pass both
+# /hx-restart: pass only the down unit(s); force: pass both
 rtk sudo systemctl restart hermx-dashboard hermx-receiver
 ```
 Fallback (no systemd units present) — `run.sh` at repo root:
@@ -159,7 +159,7 @@ PY
 - `UNKNOWN` — health reads failed/timed out; state indeterminate, never "restarted OK".
 
 ## Required log (every restart)
-Record: time, operator, `/restart` vs `force`, which service(s) were DOWN before,
+Record: time, operator, `/hx-restart` vs `force`, which service(s) were DOWN before,
 mechanism used (systemd / script / compose), the confirmation string typed, armed
 state at restart, and the final poll result (up / still down / UNKNOWN).
 

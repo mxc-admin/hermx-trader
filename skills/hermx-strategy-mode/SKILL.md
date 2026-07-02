@@ -1,6 +1,6 @@
 ---
 name: hermx-strategy-mode
-description: Use when the operator wants to CHANGE a HermX strategy's execution mode — pause, resume, demo, or live. Mutating. Resolves a name/id/symbol to a strategy_id, previews current→target, and POSTs the override to the dashboard control endpoint (never edits strategies/*.json). Always dry-run first; live transitions require explicit "yes". On any read failure it reports UNKNOWN and refuses.
+description: "Use when the operator wants to CHANGE a HermX strategy's execution mode — pause, resume, demo, or live. Mutating. Resolves a name/id/symbol to a strategy_id, previews current→target, and POSTs the override to the dashboard control endpoint (never edits strategies/*.json). Always dry-run first; live transitions require explicit 'yes'. On any read failure it reports UNKNOWN and refuses."
 version: 0.1.0
 author: HermX
 license: MIT
@@ -26,9 +26,9 @@ metadata:
         default: "control-state.json"
 ---
 
-# /strategy-mode — change a HermX strategy's execution mode
+# /hx-strategy-mode — change a HermX strategy's execution mode
 
-**Mutating.** `/strategy-mode <name-or-id> <pause|resume|demo|live>`
+**Mutating.** `/hx-strategy-mode <name-or-id> <pause|resume|demo|live>`
 
 Sets a per-strategy override via `POST {dashboard}/api/control/strategy/{id}`. This
 writes `control-state.json` `strategy_overrides` **through the dashboard** — it NEVER

@@ -1,6 +1,6 @@
 ---
 name: hermx-control
-description: Use when the user asks about the HermX trading system — open positions, PnL, whether execution is armed — or relays a TradingView signal / a manual trading request. Talks ONLY to the local HermX HTTP API on the same VPS (loopback, no key). Never touches an exchange directly; never invents an order size.
+description: "Use when the user asks about the HermX trading system — open positions, PnL, whether execution is armed — or relays a TradingView signal / a manual trading request. Talks ONLY to the local HermX HTTP API on the same VPS (loopback, no key). Never touches an exchange directly; never invents an order size."
 version: 1.1.0
 author: HermX
 license: MIT

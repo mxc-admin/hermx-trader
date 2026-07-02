@@ -139,7 +139,7 @@ PY
 ### `demo <id>` — force one strategy to sandbox
 
 Dry-run preview then `POST /api/control/strategy/{id}` with `{"mode":"demo"}` (uses
-`post_strategy_mode`). This is the mutating twin of `/strategy-mode <id> demo`:
+`post_strategy_mode`). This is the mutating twin of `/hx-strategy-mode <id> demo`:
 ```bash
 rtk python3 - "$1" <<'PY'
 import sys, os; sys.path.insert(0, "skills/hermx-ops/lib")

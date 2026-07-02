@@ -72,10 +72,10 @@ for doc in README.md ARCHITECTURE.md INSTALL.md; do
   else
     fail "$doc missing reference to docs/hermx-slash-commands.md"
   fi
-  if grep -qE '/(status|positions|close|emergency-stop|help|trace|restart|upgrade)' "$doc"; then
+  if grep -qE '/hx-(status|positions|close|emergency-stop|help|trace|restart|upgrade)' "$doc"; then
     pass "$doc references at least one slash command"
   else
-    fail "$doc references no slash command (expected e.g. /status)"
+    fail "$doc references no slash command (expected e.g. /hx-status)"
   fi
 done
 

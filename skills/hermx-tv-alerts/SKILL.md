@@ -1,6 +1,6 @@
 ---
 name: hermx-tv-alerts
-description: Use when the operator wants copy-paste-ready TradingView alert Message templates for a HermX strategy — "give me the BUY/SELL alert JSON for SOL", "what do I paste into TradingView for btcusdt_duo_base_dev_2h". Read-only. Resolves a name/id/symbol to a strategy_id via hermx_ops.resolve_strategy, reads the strategy file, and emits two schema-valid alert payloads (long/short) plus the webhook URL + X-Webhook-Secret guidance. Never sends an alert, never mutates, never calls /webhook.
+description: "Use when the operator wants copy-paste-ready TradingView alert Message templates for a HermX strategy — 'give me the BUY/SELL alert JSON for SOL', 'what do I paste into TradingView for btcusdt_duo_base_dev_2h'. Read-only. Resolves a name/id/symbol to a strategy_id via hermx_ops.resolve_strategy, reads the strategy file, and emits two schema-valid alert payloads (long/short) plus the webhook URL + X-Webhook-Secret guidance. Never sends an alert, never mutates, never calls /webhook."
 version: 0.1.0
 author: HermX
 license: MIT
@@ -18,9 +18,9 @@ metadata:
         default: "http://127.0.0.1:8891"
 ---
 
-# /tv-alerts — copy-paste TradingView alert templates for a strategy
+# /hx-tv-alerts — copy-paste TradingView alert templates for a strategy
 
-**Read-only.** `/tv-alerts <name-or-id>`. Resolves the arg to a `strategy_id`, reads
+**Read-only.** `/hx-tv-alerts <name-or-id>`. Resolves the arg to a `strategy_id`, reads
 `strategies/<id>.json`, and prints two ready-to-paste **Message** payloads — one BUY
 (long) and one SELL (short) — that satisfy the alert contract and schema. Emits text
 only: **no HTTP request, no file write, no mutation, and it never routes via `/webhook`.**
@@ -35,7 +35,7 @@ Resolution semantics live in
 - "what's the TradingView alert JSON for SOLUSDT 3H?", "give me the buy + sell message
   box for `btcusdt_duo_base_dev_2h`", "give me the close alert template for BTCUSDT".
 - Do NOT use to send, arm, or execute an alert — this only prints templates. To verify a
-  received alert flowed through, use `/trace`.
+  received alert flowed through, use `/hx-trace`.
 
 ## Argument resolution (never guess)
 `resolve_strategy(arg)` precedence, first match wins:
@@ -162,7 +162,7 @@ PY
   HMAC relay path.
 - **Strategy must be loaded:** the receiver quarantines `unknown_strategy_id` for any id
   with no matching file. Confirm the strategy is live first with
-  `rtk claude -p "/strategy-list" --permission-mode dontAsk`.
+  `rtk claude -p "/hx-strategy-list" --permission-mode dontAsk`.
 - **TradingView alert settings:** condition = the strategy's BUY/SELL signal;
   frequency = **once per bar close**; expiration = open-ended/max; leave `timeframe`
   hard-coded to the strategy's bar so a wrong-chart alert is caught as

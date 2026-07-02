@@ -622,13 +622,13 @@ the agent flags reduced context.
 
 | Command | Action | Endpoint(s) used |
 |---------|--------|------------------|
-| `/status` | armed state + open positions summary | `GET /health`, `GET /api` |
+| `/hx-status` | armed state + open positions summary | `GET /health`, `GET /api` |
 | `/pnl` | daily uPnL + realized | `GET /api` |
-| `/positions` | per-symbol detail | `GET /api` |
+| `/hx-positions` | per-symbol detail | `GET /api` |
 | `/last` | last processed alert | `GET /latest` |
 | `/killswitch` | report kill-switch state (read-only) | `GET /health` |
 | `/cancel <id>` | request cancel of a pending order (confirmation flow) | see §6.4 |
-| `/help` | command list | — |
+| `/hx-help` | command list | — |
 
 **Natural-language queries.** The agent also answers free text ("are we good?", "did
 the SOL alert go through?", "how much are we down today?") by mapping intent to the

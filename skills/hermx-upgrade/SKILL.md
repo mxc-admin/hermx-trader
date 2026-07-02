@@ -1,6 +1,6 @@
 ---
 name: hermx-upgrade
-description: Use when the operator wants to upgrade the HermX host to the latest code — pull, install deps, rebuild the dashboard UI, run tests, and restart services. Mutating (deploy + process lifecycle, not trading). Wraps `bash deploy/deploy.sh`, which has built-in auto-rollback on health-check failure. Always previews a dry-run (current git HEAD + what the deploy will do) and requires explicit "yes" before running. Passes through `--no-pull`, `--no-tests`, `--no-ui`. Never edits strategy files, never places or relays an order, never routes via `/webhook` or `/api/close`.
+description: "Use when the operator wants to upgrade the HermX host to the latest code — pull, install deps, rebuild the dashboard UI, run tests, and restart services. Mutating (deploy + process lifecycle, not trading). Wraps `bash deploy/deploy.sh`, which has built-in auto-rollback on health-check failure. Always previews a dry-run (current git HEAD + what the deploy will do) and requires explicit 'yes' before running. Passes through `--no-pull`, `--no-tests`, `--no-ui`. Never edits strategy files, never places or relays an order, never routes via `/webhook` or `/api/close`."
 version: 0.1.0
 author: HermX
 license: MIT
@@ -26,10 +26,10 @@ metadata:
         default: "deploy/deploy.sh"
 ---
 
-# /upgrade — upgrade the HermX host to the latest code
+# /hx-upgrade — upgrade the HermX host to the latest code
 
-**Mutating (deploy + process lifecycle).** `/upgrade` or `/upgrade --no-pull` or
-`/upgrade --no-tests` or `/upgrade --no-ui`
+**Mutating (deploy + process lifecycle).** `/hx-upgrade` or `/hx-upgrade --no-pull` or
+`/hx-upgrade --no-tests` or `/hx-upgrade --no-ui`
 
 Runs `bash deploy/deploy.sh` to pull the latest code, install dependencies, build
 the dashboard UI, run the offline test suite, and restart the services. The deploy
@@ -45,17 +45,17 @@ Endpoint shapes and the UNKNOWN-never-flat rule live in
 - The operator wants to bring the host up to the latest committed code.
 - A hotfix landed and needs deploying (`--no-tests` for a fast path, at your risk).
 - The UI or deps changed and the running host is stale.
-- **Not** for arming/mode changes (→ `/strategy-mode`, `/emergency-stop`), a live
-  kill (→ `/emergency-stop kill`), or a plain bounce of an already-current host
-  (→ `/restart`).
+- **Not** for arming/mode changes (→ `/hx-strategy-mode`, `/hx-emergency-stop`), a live
+  kill (→ `/hx-emergency-stop kill`), or a plain bounce of an already-current host
+  (→ `/hx-restart`).
 
 ## Syntax
 | Form                 | Behaviour                                                         |
 |----------------------|------------------------------------------------------------------|
-| `/upgrade`           | Full deploy: pull + deps + UI build + tests + restart + health check (auto-rollback on failure). |
-| `/upgrade --no-pull` | Skip `git fetch/pull` (pip install **still** runs — deps live in `.venv/`, outside git). |
-| `/upgrade --no-tests`| Skip pytest (hotfix path only).                                  |
-| `/upgrade --no-ui`   | Skip the React/dashboard-UI build (UI unchanged).                |
+| `/hx-upgrade`           | Full deploy: pull + deps + UI build + tests + restart + health check (auto-rollback on failure). |
+| `/hx-upgrade --no-pull` | Skip `git fetch/pull` (pip install **still** runs — deps live in `.venv/`, outside git). |
+| `/hx-upgrade --no-tests`| Skip pytest (hotfix path only).                                  |
+| `/hx-upgrade --no-ui`   | Skip the React/dashboard-UI build (UI unchanged).                |
 
 Flags combine; pass through exactly what the operator supplied.
 
