@@ -88,7 +88,7 @@ def as_float(value):
     except (TypeError, ValueError):
         return None
 
-PORT = int(os.environ.get("SHADOW_PORT", "8891"))
+PORT = int(os.environ.get("HERMX_RECEIVER_PORT") or os.environ.get("SHADOW_PORT", "8891"))
 # Address the HTTP server binds to. Default 127.0.0.1 keeps bare-host/systemd
 # deploys loopback-only (unchanged behavior); the Docker bridge compose sets
 # HERMX_BIND_HOST=0.0.0.0 so the container is reachable on the compose network.
@@ -99,11 +99,14 @@ HERMX_BIND_HOST = (os.environ.get("HERMX_BIND_HOST") or "127.0.0.1").strip() or 
 SECRET = (os.environ.get("HERMX_SECRET") or "").strip()
 HERMX_REQUIRE_HMAC = (os.environ.get("HERMX_REQUIRE_HMAC") or "false").strip().lower() in {"1", "true", "yes"}
 HERMX_WEBHOOK_HMAC_KEY = (os.environ.get("HERMX_WEBHOOK_HMAC_KEY") or "").strip()
-HERMX_REPLAY_WINDOW_SECONDS = float(os.environ.get("HERMX_REPLAY_WINDOW_SECONDS", "300") or "300")
-HERMX_MAX_BODY_BYTES = int(os.environ.get("HERMX_MAX_BODY_BYTES", "262144") or "262144")
-HERMX_RATE_LIMIT_WINDOW_SECONDS = float(os.environ.get("HERMX_RATE_LIMIT_WINDOW_SECONDS", "60") or "60")
-HERMX_RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("HERMX_RATE_LIMIT_MAX_REQUESTS", "120") or "120")
-HERMX_QUEUE_MAXSIZE = int(os.environ.get("HERMX_QUEUE_MAXSIZE", "200") or "200")
+# Operational tuning constants (formerly HERMX_* env reads; hard-coded per the flag
+# fluff audit -- no deployment tunes these). Kept as UPPER_SNAKE module constants so
+# tests can monkeypatch.setattr(wr, "HERMX_X", ...) exactly as before.
+HERMX_REPLAY_WINDOW_SECONDS = 300.0
+HERMX_MAX_BODY_BYTES = 262144
+HERMX_RATE_LIMIT_WINDOW_SECONDS = 60.0
+HERMX_RATE_LIMIT_MAX_REQUESTS = 120
+HERMX_QUEUE_MAXSIZE = 200
 # --- Startup replay of unprocessed intake ------------------------------------
 # On restart, intake rows fsync'd to raw-webhooks.jsonl but never dequeued from
 # the in-memory PROCESS_QUEUE are lost (systemd Restart=always; TradingView
@@ -114,16 +117,19 @@ HERMX_QUEUE_MAXSIZE = int(os.environ.get("HERMX_QUEUE_MAXSIZE", "200") or "200")
 # normalize() would otherwise fall back to now_iso() and mint a non-deterministic
 # signal_id on replay, bypassing the dedupe ledger.
 HERMX_REPLAY_ENABLED = (os.environ.get("HERMX_REPLAY_ENABLED") or "true").strip().lower() in {"1", "true", "yes"}
-REPLAY_LOOKBACK_SECONDS = float(os.environ.get("HERMX_REPLAY_LOOKBACK_SECONDS", "300") or "300")
-REPLAY_MAX_TV_AGE_SECONDS = float(os.environ.get("HERMX_REPLAY_MAX_TV_AGE_SECONDS", "120") or "120")
-HERMX_SUBMIT_TIMEOUT_SECONDS = float(os.environ.get("HERMX_SUBMIT_TIMEOUT_SECONDS", "45") or "45")
-HERMX_WORKER_POOL_SIZE = int(os.environ.get("HERMX_WORKER_POOL_SIZE", "1") or "1")
-HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS = float(os.environ.get("HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS", "86400") or "86400")
+REPLAY_LOOKBACK_SECONDS = 300.0
+REPLAY_MAX_TV_AGE_SECONDS = 120.0
+HERMX_SUBMIT_TIMEOUT_SECONDS = 45.0
+HERMX_WORKER_POOL_SIZE = 1
+HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS = 86400.0
 HERMX_WATCHDOG_ENABLED = (os.environ.get("HERMX_WATCHDOG_ENABLED") or "true").strip().lower() not in {"0", "false", "no", ""}
 HERMX_WATCHDOG_STALE_SECONDS = float(os.environ.get("HERMX_WATCHDOG_STALE_SECONDS", "120") or "120")
-HERMX_QUEUE_LAG_SLO_SECONDS = float(os.environ.get("HERMX_QUEUE_LAG_SLO_SECONDS", "30") or "30")
-HERMX_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("HERMX_REQUEST_TIMEOUT_SECONDS", "30") or "30")
-ROOT = Path(os.environ.get("SHADOW_ROOT", Path(__file__).resolve().parents[1]))
+HERMX_QUEUE_LAG_SLO_SECONDS = 30.0
+HERMX_REQUEST_TIMEOUT_SECONDS = 30.0
+# Outbound operator-alert webhook timeout (URL itself stays env-facing at emit time
+# -- URL presence is the real feature toggle; the timeout is not operator-tuned).
+HERMX_ALERT_WEBHOOK_TIMEOUT_SECONDS = 2.0
+ROOT = Path(os.environ.get("HERMX_ROOT") or os.environ.get("SHADOW_ROOT", Path(__file__).resolve().parents[1]))
 LOG_DIR = ROOT / "logs"
 # Mutable per-process state snapshots live under DATA_DIR so they can be mapped
 # to a dedicated, persistent location (a named volume under Docker) independent
@@ -154,11 +160,11 @@ ALERTS_LEDGER = LOG_DIR / "alerts.jsonl"
 # records, AFTER writing a verified checkpoint that subsumes them. Module constant
 # (env-overridable) so a test can force a checkpoint+rotation without writing
 # thousands of records.
-HERMX_JOURNAL_SEGMENT_MAX_RECORDS = int(os.environ.get("HERMX_JOURNAL_SEGMENT_MAX_RECORDS", "1000") or "1000")
+HERMX_JOURNAL_SEGMENT_MAX_RECORDS = 1000
 # Retention: keep the last K sealed segments for forensic replay. The verified
 # checkpoint already subsumes every sealed segment (older sealed files are
 # replay-unnecessary), so they are pruned beyond K. Set < 0 to keep all.
-HERMX_JOURNAL_SEGMENT_RETENTION = int(os.environ.get("HERMX_JOURNAL_SEGMENT_RETENTION", "5") or "5")
+HERMX_JOURNAL_SEGMENT_RETENTION = 5
 # Size-based rotation for the high-volume consolidated ledgers (pipeline.jsonl,
 # raw-webhooks.jsonl). Unlike the position/order journals -- which rotate by record
 # count behind a verified checkpoint -- these are append-only forensic logs with no
@@ -167,8 +173,8 @@ HERMX_JOURNAL_SEGMENT_RETENTION = int(os.environ.get("HERMX_JOURNAL_SEGMENT_RETE
 # HERMX_LEDGER_ROTATE_RETENTION sealed segments are kept; older ones are pruned
 # (set < 0 to keep all). Default 64 MiB keeps the bounded reverse-tail dashboard
 # reads cheap while retaining ample history.
-HERMX_LEDGER_ROTATE_MAX_BYTES = int(os.environ.get("HERMX_LEDGER_ROTATE_MAX_BYTES", str(64 * 1024 * 1024)) or str(64 * 1024 * 1024))
-HERMX_LEDGER_ROTATE_RETENTION = int(os.environ.get("HERMX_LEDGER_ROTATE_RETENTION", "5") or "5")
+HERMX_LEDGER_ROTATE_MAX_BYTES = 64 * 1024 * 1024
+HERMX_LEDGER_ROTATE_RETENTION = 5
 # Execution outcomes are now recorded to the unified PIPELINE_LEDGER under
 # stage="execution" (record_pipeline_event). The separate execution-plan.jsonl and
 # executions.jsonl ledgers were retired in the JSONL ledger consolidation: the dead
@@ -252,17 +258,17 @@ RECONCILE_CAP_DELAY_SECONDS = 8.0
 RECONCILE_WALL_CLOCK_BUDGET_SECONDS = 20.0
 RECONCILE_HISTORY_LIMIT = 100
 # Task 6 periodic resolver controls.
-UNKNOWN_RESOLVER_INTERVAL_SECONDS = float(os.environ.get("HERMX_UNKNOWN_RESOLVER_INTERVAL_SECONDS", "30") or "30")
-UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS = float(os.environ.get("HERMX_UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS", "900") or "900")
-UNKNOWN_RESOLVER_MAX_ORDERS_PER_TICK = int(os.environ.get("HERMX_UNKNOWN_RESOLVER_MAX_ORDERS_PER_TICK", "50") or "50")
+UNKNOWN_RESOLVER_INTERVAL_SECONDS = 30.0
+UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS = 900.0
+UNKNOWN_RESOLVER_MAX_ORDERS_PER_TICK = 50
 # PLANNED orphan backstop: a PLANNED order older than this (and unknown to the venue) is
 # resolved PLANNED->REJECTED (never_submitted). Shorter than the SUBMITTED/UNKNOWN timeout
 # because a PLANNED order was never sent -- there is no in-flight venue state to wait on,
 # only the small window of an in-process submit between the PLANNED and SUBMITTED writes.
-PLANNED_ORDER_TIMEOUT_SECONDS = float(os.environ.get("HERMX_PLANNED_ORDER_TIMEOUT_SECONDS", "300") or "300")
+PLANNED_ORDER_TIMEOUT_SECONDS = 300.0
 # Queue saturation signaling threshold for early warning; hard rejection now uses
 # PROCESS_QUEUE.maxsize and returns 503 when full.
-QUEUE_SATURATION_ALERT_DEPTH = int(os.environ.get("HERMX_QUEUE_SATURATION_ALERT_DEPTH", "100") or "100")
+QUEUE_SATURATION_ALERT_DEPTH = 100
 # Raw OKX order states that mean "the order genuinely exists on the venue". Anything
 # else returned by the query layer (not_found / error / not_implemented / unknown /
 # empty) is treated as "not present here" so the fallback chain keeps searching.
@@ -291,11 +297,15 @@ STRATEGIES_DIR = ROOT / str(STRATEGY_ENGINE.get("strategies_dir") or "strategies
 # override config so an operator can flip it on a running VPS without editing JSON.
 _ADVISOR_CFG = ENGINE_CONFIG.get("advisor", {}) or {}
 
+# ENABLED stays env-overridable (single live-veto switch operators may flip on a
+# running VPS). The sub-settings are NOT env-facing: they resolve from the
+# engine-config "advisor" block, falling back to ADVISOR_DEFAULTS. Kept as module
+# constants so a test can monkeypatch.setattr(wr, "HERMX_ADVISOR_COMMAND", ...).
 HERMX_ADVISOR_ENABLED = _env_bool("HERMX_ADVISOR_ENABLED", bool(_ADVISOR_CFG.get("enabled", False)))
-HERMX_ADVISOR_COMMAND = _env_str("HERMX_ADVISOR_COMMAND", str(_ADVISOR_CFG.get("command") or "hermes"))
-HERMX_ADVISOR_SKILLS = _env_str("HERMX_ADVISOR_SKILLS", str(_ADVISOR_CFG.get("skills") or "hermx-control"))
-HERMX_ADVISOR_MODEL = _env_str("HERMX_ADVISOR_MODEL", str(_ADVISOR_CFG.get("model") or ""))
-HERMX_ADVISOR_TIMEOUT_SECONDS = _env_float("HERMX_ADVISOR_TIMEOUT_SECONDS", float(_ADVISOR_CFG.get("timeout_seconds") or 30.0))
+HERMX_ADVISOR_COMMAND = str(_ADVISOR_CFG.get("command") or "hermes")
+HERMX_ADVISOR_SKILLS = str(_ADVISOR_CFG.get("skills") or "hermx-control")
+HERMX_ADVISOR_MODEL = str(_ADVISOR_CFG.get("model") or "")
+HERMX_ADVISOR_TIMEOUT_SECONDS = float(_ADVISOR_CFG.get("timeout_seconds") or 30.0)
 # advisor-decisions, strategy-alerts, and strategy-alert-quarantine were folded into
 # the unified PIPELINE_LEDGER (stages "advisor", "strategy_match", "quarantine").
 # Phase 6 / M2 (REFACTOR_PLAN.md): explicit alert-schema enforcement at intake.
@@ -2064,7 +2074,7 @@ def emit_operator_alert(kind: str, detail: "dict | None" = None, *, severity: st
 
     webhook_url = (os.environ.get("HERMX_ALERT_WEBHOOK_URL") or "").strip()
     if webhook_url:
-        timeout_seconds = float(os.environ.get("HERMX_ALERT_WEBHOOK_TIMEOUT_SECONDS", "2") or "2")
+        timeout_seconds = HERMX_ALERT_WEBHOOK_TIMEOUT_SECONDS
         body = json.dumps(record, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         req = urllib_request.Request(
             webhook_url,

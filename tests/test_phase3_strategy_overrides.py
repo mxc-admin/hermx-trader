@@ -339,7 +339,9 @@ def dash(tmp_path):
     importlib.reload(dash_mod)
 
     # Offline executor stub so api_payload()/dashboard_model() never touch network.
-    dash_mod.okx_live_snapshot = lambda config: {
+    # Accepts the Phase-0 simulated_trading kwarg: dashboard_model reads a separate
+    # snapshot for live strategies, so the stub must mirror the real 2-arg signature.
+    dash_mod.okx_live_snapshot = lambda config, simulated_trading=True: {
         "ok": True, "positions": {}, "account": {}, "error": None,
         "generated_at": "2026-06-25T00:00:00Z",
     }

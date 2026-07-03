@@ -17,6 +17,11 @@ if (-not (Test-Path "engine-config.json")) {
 }
 
 $env:SHADOW_ROOT = $Root
-if (-not $env:CLEAN_DASHBOARD_PORT) { $env:CLEAN_DASHBOARD_PORT = "8098" }
+$env:HERMX_ROOT = $Root
+if (-not $env:HERMX_DASHBOARD_PORT) {
+    if ($env:CLEAN_DASHBOARD_PORT) { $env:HERMX_DASHBOARD_PORT = $env:CLEAN_DASHBOARD_PORT }
+    else { $env:HERMX_DASHBOARD_PORT = "8098" }
+}
+$env:CLEAN_DASHBOARD_PORT = $env:HERMX_DASHBOARD_PORT
 
 python "src/dashboard.py"

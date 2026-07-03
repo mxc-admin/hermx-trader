@@ -1,0 +1,276 @@
+# HermX — Environment Flags Audit
+
+**Date:** 2026-07-03
+**Scope:** Every environment variable read or set across `src/`, `tests/`, `scripts/`, `deploy/`, `skills/`, `setup/`, `docs/`, `dashboard-ui/`, `docker-compose*.yml`, `Dockerfile`, `install.sh`, `run.sh`, `.env`.
+**Method:** static grep for `os.environ` / `os.getenv` / `environ.get` (Python), `${VAR}` / `set_env` / `EnvironmentFile` (shell/systemd/compose), `process.env` / `NEXT_PUBLIC_*` (Next.js).
+**Nature:** audit only — no source files modified.
+
+---
+
+## 1. Executive Summary
+
+| Metric | Count |
+|---|---|
+| Live flags read by runtime code | ~55 (incl. 8 exchange credential families) |
+| Dead flags (set/documented but never read) | 12 |
+| Inconsistent defaults (same flag, different default per file) | 3 |
+| Redundant concepts (multiple names) | 3 |
+| Legacy non-`HERMX_` names still active | 3 (`SHADOW_ROOT`, `SHADOW_PORT`, `CLEAN_DASHBOARD_PORT`) |
+| **Safety-relevant finding** | Windows `smoke_run.ps1` kill-switch (`HERMX_SUBMIT_ENABLED`) is **dead** — no dry-run protection on Windows |
+
+Key takeaways:
+- The `.env` on this host still carries **7 removed flags** (`HERMX_EXEC_API`, `HERMX_SUBMIT_ENABLED`, `HERMX_EXEC_WRITE_BACKEND`, `HERMX_EXEC_SHADOW`, `OKX_SIMULATED_TRADING`, `OKX_SUBMIT_ORDERS`, `HERMX_DASH_AUTH_TOKEN[_CREATED_AT]`) that no code path reads.
+- `HERMX_EXCHANGE` is written by both installers but read by **nothing** — only `HERMX_CCXT_EXCHANGE` is consumed.
+- `HERMX_DATA_DIR` and `HERMX_EXEC_BACKEND` have **inconsistent defaults** across files.
+- The three active service flags (`SHADOW_ROOT`, `SHADOW_PORT`, `CLEAN_DASHBOARD_PORT`) retain pre-rename legacy names.
+
+---
+
+## 2. Complete Catalog by Category
+
+Defaults shown as the literal fallback in code. "Read @" = files that consume the flag. "Set @" = files that write/export it.
+
+### 2.1 Core / Service Flags
+
+| Flag | Read @ | Set @ | Default | Notes |
+|---|---|---|---|---|
+| `SHADOW_ROOT` | `webhook_receiver.py:126`, `dashboard.py:38`, `dashboard_core.py:11` | `run.sh:215`, tests/conftest | repo root (`parents[1]`) | **Legacy name.** App base dir. → rename `HERMX_ROOT`. |
+| `SHADOW_PORT` | `webhook_receiver.py:91` | `run.sh:213-216` | `8891` | **Legacy name.** Receiver port. → `HERMX_RECEIVER_PORT`. |
+| `CLEAN_DASHBOARD_PORT` | `dashboard.py:40` | `run.sh:214-217` | `8098` | **Legacy name** (orphan `CLEAN_` prefix). → `HERMX_DASHBOARD_PORT`. |
+| `HERMX_BIND_HOST` | `webhook_receiver.py:95`, `dashboard.py:44` | `docker-compose.yml:17,39` (`0.0.0.0`) | `127.0.0.1` | Read in 2 files, **default consistent**. |
+| `HERMX_DATA_DIR` | `webhook_receiver.py:132` (ROOT), `dashboard.py:56` (ROOT), `hermx_gate_lib.py:51` (`os.getcwd()`), `hermx_ops.py:37,38,70` (`.`) | compose (`/app/data`), `install-cron-monitors.sh:95` | **INCONSISTENT**: `ROOT` vs `cwd` vs `.` | State snapshot dir. See §3.3. |
+| `HERMX_IMAGE` | `docker-compose*.yml`, `docker-rebuild.sh`, `docker-update.sh:9`, `install-docker.sh:8` | — | `ghcr.io/mxc-admin/hermx-trader:latest` | Compose image tag override. |
+| `HERMX_INSTALL_DIR` | `docker-rebuild.sh:25` (repo root), `docker-update.sh:10` (`/opt/hermx`), `install-docker.sh:9` (`/opt/hermx`) | — | **INCONSISTENT**: repo root vs `/opt/hermx` | Deploy dir. See §3.3. |
+| `HERMX_SCRIPTS_DIR` | `hermx_gate_lib.py:68` | test monkeypatch | `~/.hermes/scripts` | Cron gate sidecar location. |
+
+### 2.2 Dashboard Flags
+
+| Flag | Read @ | Default | Notes |
+|---|---|---|---|
+| `HERMX_DASH_AUTH` | `dashboard.py:45` | `true` | Enable dashboard auth. |
+| `HERMX_DASH_REFRESH_SECONDS` | `dashboard.py:78` | `20` | Backend refresh cadence. Undocumented in `env.example`. |
+| `HERMX_DASH_TZ` | `dashboard_core.py:144` | `""` → UTC | IANA tz name. Undocumented in `env.example`. |
+| `HERMX_DASH_TZ_OFFSET_HOURS` | `dashboard_core.py:152` | `""` → UTC | Signed float fallback if no IANA name. Undocumented. |
+| `HERMX_DEV_CORS` | `dashboard.py:2334` | `""` (off) | Dev-only CORS enable. Security-adjacent. |
+| `HERMX_DASHBOARD_BASE` | `hermx_ops.py:30` | `http://127.0.0.1:8098` | Used by ops skill + health-watch. |
+| `HERMX_RECEIVER_BASE` | `hermx_ops.py:31` | `http://127.0.0.1:8891` | Used by ops skill + health-watch. |
+| `NEXT_PUBLIC_API_BASE` | `dashboard-ui/lib/api.ts:3` | `http://localhost:7070` | **Stale default port** (should be 8098). Build sets `""`. |
+| `NEXT_PUBLIC_HERMX_TOKEN` | `dashboard-ui/lib/api.ts:17` | — | Dev-only UI token; not in any `.env` file. Duplicates `HERMX_SECRET`. |
+| `NEXT_PUBLIC_REFRESH_INTERVAL` | `dashboard-ui/lib/useDashboard.ts:8` | `10000` (ms) | UI refresh. Redundant with `HERMX_DASH_REFRESH_SECONDS` (20s). |
+
+### 2.3 Security / Auth Flags
+
+| Flag | Read @ | Default | Notes |
+|---|---|---|---|
+| `HERMX_SECRET` | `webhook_receiver.py:99`, `dashboard.py:48`, `hermx-health-watch.py:52`, `hermx-reconcile-gate.py:71`, `hermx_ops.py:65` | `""` (fail-closed 401) | **Sole** auth token (webhook + dashboard). Generated by `run.sh`/`install.sh`. |
+| `HERMX_REQUIRE_HMAC` | `webhook_receiver.py:100` | `false` | Require HMAC signature on webhooks. |
+| `HERMX_WEBHOOK_HMAC_KEY` | `webhook_receiver.py:101` | `""` | HMAC signing key. |
+| `HERMX_REPLAY_WINDOW_SECONDS` | `webhook_receiver.py:102` | `300` | HMAC replay window. |
+| `HERMX_MAX_BODY_BYTES` | `webhook_receiver.py:103` | `262144` | Max request body. |
+| `HERMX_RATE_LIMIT_WINDOW_SECONDS` | `webhook_receiver.py:104` | `60` | Rate-limit window. |
+| `HERMX_RATE_LIMIT_MAX_REQUESTS` | `webhook_receiver.py:105` | `120` | Rate-limit max. |
+| `HERMX_DEV_CORS` | `dashboard.py:2334` | `""` | (also Dashboard) dev CORS. |
+
+**Exchange credential families** — resolved by `src/security/credentials.py::resolve_exchange_credentials` (`_pick_first` prefers demo/testnet keys in `mode="demo"`, plain keys in `mode="live"`):
+
+| Venue | Live keys | Sandbox keys |
+|---|---|---|
+| OKX | `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE` | `OKX_DEMO_*` |
+| KuCoin | `KUCOIN_API_KEY`, `KUCOIN_SECRET`/`KUCOIN_SECRET_KEY`, `KUCOIN_PASSPHRASE` | `KUCOIN_PAPER_*` |
+| Bybit | `BYBIT_API_KEY`, `BYBIT_SECRET_KEY` | `BYBIT_TESTNET_*` |
+| Binance | `BINANCE_API_KEY`, `BINANCE_SECRET_KEY` | `BINANCE_TESTNET_*` |
+| Bitget | `BITGET_API_KEY`, `BITGET_SECRET_KEY`, `BITGET_PASSPHRASE` | `BITGET_DEMO_*` |
+| Gate | `GATE_API_KEY`, `GATE_SECRET_KEY` | `GATE_TESTNET_*` |
+| Coinbase | `COINBASE_API_KEY`, `COINBASE_SECRET_KEY` | `COINBASE_SANDBOX_*` |
+| Hyperliquid | `HYPERLIQUID_WALLET_ADDRESS`, `HYPERLIQUID_PRIVATE_KEY` (no passphrase; fail-closed — both required) | `HYPERLIQUID_TESTNET_*` |
+
+> Note: KuCoin secret has **two accepted live names** (`KUCOIN_SECRET` and `KUCOIN_SECRET_KEY`) — mild redundancy inherited from CCXT naming.
+
+**Subprocess passthrough** (`_SAFE_PASSTHROUGH_ENV`, `credentials.py:7`): `PATH`, `PYTHONPATH`, `HOME`, `LANG`, `LC_ALL`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` — least-privilege executor env; not HermX flags.
+
+### 2.4 Execution / Trading Flags
+
+| Flag | Read @ | Default | Notes |
+|---|---|---|---|
+| `HERMX_LIVE_TRADING` | `hermx_shared.py:67`; also alert-gate in `hermx-health-watch.py:69` | unset → **disabled** (fail-closed) | **Global kill switch.** Positive-enable. Set `false` by installers. |
+| `HERMX_EXEC_BACKEND` | `execution/service.py:35` (`""`), `webhook/config.py:10` (`"ccxt"`) | **INCONSISTENT** default | CCXT is sole backend; override only. See §3.3. |
+| `HERMX_CCXT_EXCHANGE` | `ccxt_adapter.py:174` | `okx` | Default venue; overridden by `instrument.exchange`. Set by installers. |
+| `HERMX_SUBMIT_TIMEOUT_SECONDS` | `ccxt_adapter.py:75` **and** `webhook_receiver.py:119` | `45` (consistent) | Read in 2 files, same default. |
+| `HERMX_WORKER_POOL_SIZE` | `webhook_receiver.py:120` | `1` | Dispatch worker count. |
+| `HERMX_QUEUE_MAXSIZE` | `webhook_receiver.py:106` | `200` | Intake queue depth. |
+| `HERMX_QUEUE_SATURATION_ALERT_DEPTH` | `webhook_receiver.py:265` | `100` | Queue depth alert. |
+| `HERMX_QUEUE_LAG_SLO_SECONDS` | `webhook_receiver.py:124` | `30` | Queue lag SLO. |
+| `HERMX_REQUEST_TIMEOUT_SECONDS` | `webhook_receiver.py:125` | `30` | HTTP request timeout. |
+| `HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS` | `webhook_receiver.py:121` | `86400` | Dedupe ledger window. |
+| `HERMX_REPLAY_ENABLED` | `webhook_receiver.py:116` | `true` | WAL replay on startup. |
+| `HERMX_REPLAY_LOOKBACK_SECONDS` | `webhook_receiver.py:117` | `300` | Replay lookback. |
+| `HERMX_REPLAY_MAX_TV_AGE_SECONDS` | `webhook_receiver.py:118` | `120` | Max bar age on replay. |
+| `HERMX_RECONCILE_ENABLED` | `webhook_receiver.py:1895` (`reconcile_post_submit_enabled`) | `false` | Post-submit reconciliation soak gate. |
+| `HERMX_UNKNOWN_RESOLVER_ENABLED` | `webhook_receiver.py:2219` | `true` | Periodic unknown-order resolver. |
+| `HERMX_UNKNOWN_RESOLVER_INTERVAL_SECONDS` | `webhook_receiver.py:255` | `30` | Resolver tick interval. |
+| `HERMX_UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS` | `webhook_receiver.py:256` | `900` | Resolver order timeout. |
+| `HERMX_UNKNOWN_RESOLVER_MAX_ORDERS_PER_TICK` | `webhook_receiver.py:257` | `50` | Resolver batch cap. |
+| `HERMX_PLANNED_ORDER_TIMEOUT_SECONDS` | `webhook_receiver.py:262` | `300` | Planned-order timeout. |
+| `HERMX_WATCHDOG_ENABLED` | `webhook_receiver.py:122` | `true` | Worker watchdog. |
+| `HERMX_WATCHDOG_STALE_SECONDS` | `webhook_receiver.py:123` | `120` | Watchdog stale threshold. |
+| `HERMX_JOURNAL_SEGMENT_MAX_RECORDS` | `webhook_receiver.py:157` | `1000` | Order-journal segment size. |
+| `HERMX_JOURNAL_SEGMENT_RETENTION` | `webhook_receiver.py:161` | `5` | Journal segments kept. |
+| `HERMX_LEDGER_ROTATE_MAX_BYTES` | `webhook_receiver.py:170` | `67108864` (64 MiB) | Ledger rotation size. |
+| `HERMX_LEDGER_ROTATE_RETENTION` | `webhook_receiver.py:171` | `5` | Ledger files kept. |
+| `HERMX_ALERT_WEBHOOK_URL` | `webhook_receiver.py:2065` | `""` | Outbound alert webhook. |
+| `HERMX_ALERT_WEBHOOK_TIMEOUT_SECONDS` | `webhook_receiver.py:2067` | `2` | Alert webhook timeout. |
+
+### 2.5 Advisor / LLM Flags
+
+| Flag | Read @ | Default | Notes |
+|---|---|---|---|
+| `HERMX_ADVISOR_ENABLED` | `webhook_receiver.py:294` (via `_env_bool`), `dashboard.py:49` | config `enabled` / `false` | **Single live-veto switch.** Read in 2 files. |
+| `HERMX_ADVISOR_COMMAND` | `webhook_receiver.py:295` | `hermes` | Hermes CLI on PATH. |
+| `HERMX_ADVISOR_SKILLS` | `webhook_receiver.py:296` | `hermx-control` | Comma-separated skills. |
+| `HERMX_ADVISOR_MODEL` | `webhook_receiver.py:297` | `""` | Optional `-m` override. |
+| `HERMX_ADVISOR_TIMEOUT_SECONDS` | `webhook_receiver.py:298` | `30.0` | Advisor subprocess timeout. |
+
+> Advisor defaults layer: env → `engine-config.json` `advisor` block → `ADVISOR_DEFAULTS` (`webhook/config.py:22`).
+
+### 2.6 Cron / Monitoring Flags
+
+| Flag | Read @ | Default | Notes |
+|---|---|---|---|
+| `HERMX_CRON_DRY_RUN` | `install-cron-monitors.sh:35` | `0` | Print actions only. |
+| `HERMX_CRON_SMOKE` | `install-cron-monitors.sh:36` | `1` | Run `cron run` smoke test. |
+| `HERMX_CRON_CREATE_ONLY` | `install-cron-monitors.sh:37` | `0` | Only create missing jobs. |
+| `HERMX_INTAKE_MAX_AGE_SECONDS` | `hermx-intake-gate.py:28` | `259200` (3d) | Intake-absence gate age. |
+| `HERMX_RECONCILE_LOOKBACK_SECONDS` | `hermx-reconcile-gate.py:25` | `WINDOW["reconcile"]` | Reconcile gate window. |
+| `HERMX_HEALTH_REQUIRE_ARMED` | `hermx-health-watch.py:71` | `""` (off) | Alert when disarmed (opt-in). |
+| `HERMX_HTTP_TIMEOUT` | `hermx-risk-gate.py:25`, `hermx_ops.py:32` | `5` (consistent) | HTTP timeout for gates/ops. |
+| `HERMX_MXC_BASE` | `hermx-risk-gate.py:24` | `https://mxc-kinetic-crypto.replit.app` | **risk-gate is inert** — removed from installer (see memory: "inert monitor"). |
+| `HERMX_SCRIPTS_DIR` | `hermx_gate_lib.py:68` | `~/.hermes/scripts` | (also Core) sidecar dir. |
+| `HERMX_DATA_DIR` | `hermx_gate_lib.py:51` | `os.getcwd()` | (also Core) gate reads rolling windows here. |
+
+### 2.7 Tailscale Sidecar (compose-only, not HermX flags)
+
+`TS_AUTHKEY`, `TS_STATE_DIR` (`/var/lib/tailscale`), `TS_USERSPACE` (`true`), `TS_SERVE_CONFIG` (`/config/serve.json`) — `docker-compose.yml:69-72`, `setup/env.example`.
+
+### 2.8 Test-only Flags
+
+| Flag | Read @ | Notes |
+|---|---|---|
+| `SNAPSHOT_UPDATE` | `tests/conftest.py:225` | Regenerate goldens. |
+| `HERMX_STATE_BACKEND` | `tests/conftest.py` only | **Set in tests, NOT read in `src/`** — stale scaffolding (comment claims receiver reads it at import; it does not). See §4. |
+| `HERMX_RUN_{OKX,KUCOIN,HYPERLIQUID}_PAPER_TESTS` | integration tests | Gate paper integration suites. |
+| `HERMX_RUN_{OKX,KUCOIN,HYPERLIQUID}_WRITE_TESTS` | integration tests | Gate write suites. |
+| `HERMX_{OKX,KUCOIN}_TEST_INST_ID`, `HERMX_HYPERLIQUID_TEST_SYMBOL` | integration tests | Test instrument overrides. |
+
+---
+
+## 3. Cleanup Analysis
+
+### 3.1 Dead flags (set / documented but never read by any code path)
+
+| Flag | Where it lingers | Verdict |
+|---|---|---|
+| `HERMX_EXCHANGE` | `install.sh:151`, `install-docker.sh:62`, docs | **DEAD** — only `HERMX_CCXT_EXCHANGE` is read. Installers write both; one is noise. |
+| `HERMX_SUBMIT_ENABLED` | `.env`, `scripts/smoke_run.ps1:88`, docs | **DEAD** — removed from runtime; Windows smoke script still relies on it (safety hole, §3.5). |
+| `HERMX_EXEC_API` | `.env`, docs | **DEAD** — superseded by `execution_mode` + `HERMX_LIVE_TRADING`. |
+| `HERMX_EXEC_WRITE_BACKEND` | `.env`, docs | **DEAD**. |
+| `HERMX_EXEC_SHADOW` | `.env`, docs | **DEAD**. |
+| `OKX_SIMULATED_TRADING` | `.env`, docs | **DEAD** — explicitly removed (ARCHITECTURE.md:139). |
+| `OKX_SUBMIT_ORDERS` | `.env`, docs | **DEAD** — explicitly removed. |
+| `OKX_FORCE_IPV4` | `.env`, `install.sh:160`, `install-docker.sh:64`, `env.example:72` | **DEAD in code** — set everywhere but read by **no Python**. Relied on a removed monkeypatch. |
+| `HERMX_DASH_AUTH_TOKEN` | `.env` (host), tests confirm removal | **DEAD** — legacy dashboard token; `HERMX_SECRET` is sole source. |
+| `HERMX_DASH_AUTH_TOKEN_CREATED_AT` | `.env` (host) | **DEAD** — never read. |
+| `SHADOW_WEBHOOK_SECRET` | tests only (confirming removal) | **DEAD** — legacy secret fallback removed. |
+| `HERMX_STATE_BACKEND` | `tests/conftest.py` only | **DEAD** — no `src/` reader; stale test scaffolding. |
+
+### 3.2 Redundant flags (same concept, multiple names)
+
+| Concept | Names | Recommendation |
+|---|---|---|
+| App root / data location | `SHADOW_ROOT` (base) + `HERMX_DATA_DIR` (defaults to ROOT) | Two overlapping location knobs. Keep `HERMX_DATA_DIR`; fold `SHADOW_ROOT` → `HERMX_ROOT` and document the relationship. |
+| Dashboard auth token | `HERMX_SECRET` (backend) + `NEXT_PUBLIC_HERMX_TOKEN` (UI) | UI dev token duplicates the unified secret. Document that `NEXT_PUBLIC_HERMX_TOKEN` is dev-only. |
+| Dashboard refresh interval | `HERMX_DASH_REFRESH_SECONDS` (20s, backend) + `NEXT_PUBLIC_REFRESH_INTERVAL` (10000ms, UI) | Two intervals, different units **and** different defaults. Consolidate or at least align defaults. |
+| KuCoin live secret | `KUCOIN_SECRET` + `KUCOIN_SECRET_KEY` | Both accepted; harmless but document canonical (`KUCOIN_SECRET`). |
+| Exchange selector (installers) | `HERMX_EXCHANGE` (dead) + `HERMX_CCXT_EXCHANGE` (live) | Drop `HERMX_EXCHANGE`. |
+
+### 3.3 Inconsistent defaults (same flag, different default per file)
+
+| Flag | Defaults | Risk |
+|---|---|---|
+| `HERMX_DATA_DIR` | `ROOT` (`webhook_receiver.py:132`, `dashboard.py:56`) vs `os.getcwd()` (`hermx_gate_lib.py:51`) vs `.` (`hermx_ops.py:37,38,70`) | Gate scripts and ops skill may read/write a **different directory** than the receiver if CWD ≠ ROOT. Standardize the fallback. |
+| `HERMX_EXEC_BACKEND` | `""` (`execution/service.py:35`, then stripped → profile-driven) vs `"ccxt"` (`webhook/config.py:10`) | Two modules disagree on the empty-value meaning. Pick one (recommend `""` → profile-driven everywhere). |
+| `HERMX_INSTALL_DIR` | repo root (`docker-rebuild.sh:25`) vs `/opt/hermx` (`docker-update.sh:10`, `install-docker.sh:9`) | A rebuild vs update run can target different deploy dirs. Align to `/opt/hermx`. |
+
+### 3.4 Naming collisions (same word, different meanings)
+
+| Token | Meanings in play |
+|---|---|
+| **`SHADOW_`** | (1) active service config `SHADOW_ROOT`/`SHADOW_PORT`; (2) dead `CONFIG["mode"]="shadow"` kill flag; (3) dead `shadow-config.json`; (4) `execution_mode: shadow`. The word means ≥4 different things — a documented source of operator confusion. |
+| **`CLEAN_`** | Orphan prefix — only `CLEAN_DASHBOARD_PORT` uses it; no other `CLEAN_*` flag exists. |
+| **`HERMX_DASH_AUTH` vs `HERMX_DASH_AUTH_TOKEN`** | Boolean enable (live) vs dead token — near-identical names, different meaning/lifecycle. |
+
+### 3.5 Safety-relevant finding — Windows dry-run has no kill switch
+
+`scripts/smoke_run.sh` (POSIX) arms two mechanisms: `HERMX_LIVE_TRADING=false` + runtime `submit_orders=false`.
+`scripts/smoke_run.ps1` (Windows) arms **only** `HERMX_SUBMIT_ENABLED=false` — a **dead** flag no runtime reads.
+→ A Windows operator running the "dry-run" launcher gets **no submit protection**. Fix `smoke_run.ps1` to export `HERMX_LIVE_TRADING=false` instead. (Already flagged in `docs/DOC_AUDIT_REPORT.md:164`.)
+
+### 3.6 Port default inconsistency
+
+`NEXT_PUBLIC_API_BASE` defaults to `http://localhost:7070` (`dashboard-ui/lib/api.ts:3`), but the dashboard actually serves on `8098` (`CLEAN_DASHBOARD_PORT`, `HERMX_DASHBOARD_BASE`). The `7070` default is stale — harmless in production (build injects `""`) but misleading for local dev.
+
+---
+
+## 4. Execution Plan (prioritized, grouped by risk)
+
+### Tier 0 — Safety (do first)
+
+| # | Action | Files to touch |
+|---|---|---|
+| 0.1 | Replace dead `HERMX_SUBMIT_ENABLED=false` in Windows smoke launcher with `HERMX_LIVE_TRADING=false`. | `scripts/smoke_run.ps1` |
+
+### Tier 1 — Safe deletions (no runtime behavior change; flags already unread)
+
+| # | Action | Files to touch |
+|---|---|---|
+| 1.1 | Remove dead flags from the host `.env` and `setup/env.example`: `HERMX_EXEC_API`, `HERMX_SUBMIT_ENABLED`, `HERMX_EXEC_WRITE_BACKEND`, `HERMX_EXEC_SHADOW`, `OKX_SIMULATED_TRADING`, `OKX_SUBMIT_ORDERS`, `HERMX_DASH_AUTH_TOKEN`, `HERMX_DASH_AUTH_TOKEN_CREATED_AT`. | `.env`, `setup/env.example` |
+| 1.2 | Stop writing `HERMX_EXCHANGE` (keep `HERMX_CCXT_EXCHANGE`). | `install.sh:151`, `scripts/install-docker.sh:62`, `docs/DOCKER_PACKAGE_PLAN.md` |
+| 1.3 | Remove `OKX_FORCE_IPV4` set/doc (no reader) — or re-implement the IPv4 pin in `ccxt_adapter.py` if still needed. Decide first. | `install.sh:160`, `scripts/install-docker.sh:64`, `setup/env.example:72`, `INSTALL.md` |
+| 1.4 | Delete stale `HERMX_STATE_BACKEND` scaffolding from tests (and the misleading comment). | `tests/conftest.py` |
+| 1.5 | Purge remaining doc references to removed flags. | `docs/*` (audit report already tracks these) |
+
+### Tier 2 — Consistency fixes (low risk, single-value edits)
+
+| # | Action | Files to touch |
+|---|---|---|
+| 2.1 | Unify `HERMX_DATA_DIR` fallback. Recommend a shared resolver so gate scripts/ops don't diverge from receiver (`ROOT`). | `hermx_gate_lib.py:51`, `skills/hermx-ops/lib/hermx_ops.py:37,38,70` |
+| 2.2 | Unify `HERMX_EXEC_BACKEND` default semantics (empty → profile-driven everywhere). | `src/webhook/config.py:10` (align to `service.py:35`) |
+| 2.3 | Align `HERMX_INSTALL_DIR` default to `/opt/hermx`. | `scripts/docker-rebuild.sh:25` |
+| 2.4 | Fix stale `NEXT_PUBLIC_API_BASE` dev default `7070` → `8098`. | `dashboard-ui/lib/api.ts:3` |
+| 2.5 | Align dashboard refresh defaults (`HERMX_DASH_REFRESH_SECONDS`=20 vs `NEXT_PUBLIC_REFRESH_INTERVAL`=10000ms). | `dashboard.py:78` or `useDashboard.ts:8` |
+| 2.6 | Document currently-undocumented live flags in `env.example`: `HERMX_DASH_REFRESH_SECONDS`, `HERMX_DASH_TZ`, `HERMX_DASH_TZ_OFFSET_HOURS`, `HERMX_DEV_CORS`, `HERMX_HEALTH_REQUIRE_ARMED`, `HERMX_DASHBOARD_BASE`, `HERMX_RECEIVER_BASE`, all `HERMX_*_RESOLVER_*`, journal/ledger rotation flags. | `setup/env.example`, `docs/*` |
+
+### Tier 3 — Renames (behavior-neutral but touches many files; do as one atomic change with fallback)
+
+> These are legacy non-`HERMX_` names. Rename **with a transitional read-fallback** (read new name, fall back to old) so existing `.env` files don't break, then drop the fallback a release later.
+
+| # | Rename | Read sites | Set sites |
+|---|---|---|---|
+| 3.1 | `SHADOW_ROOT` → `HERMX_ROOT` | `webhook_receiver.py:126`, `dashboard.py:38`, `dashboard_core.py:11`, `tests/conftest.py` (+ many phase tests) | `run.sh:215` |
+| 3.2 | `SHADOW_PORT` → `HERMX_RECEIVER_PORT` | `webhook_receiver.py:91` | `run.sh:213-216`, `setup/env.example` |
+| 3.3 | `CLEAN_DASHBOARD_PORT` → `HERMX_DASHBOARD_PORT` | `dashboard.py:40` | `run.sh:214-217`, `setup/env.example` |
+
+> **Shared-library caution (per `dev-rules.md`):** the Tier 3 renames touch `webhook_receiver.py`, `dashboard.py`, `dashboard_core.py`, and the entire `tests/` conftest chain — >3 files and a shared import surface. Break into its own task and get explicit confirmation before implementing.
+
+### Tier 4 — Optional consolidation (design decision required)
+
+- Decide whether `NEXT_PUBLIC_HERMX_TOKEN` should remain a separate dev token or be documented as an alias of `HERMX_SECRET`.
+- Decide whether to keep the dual `KUCOIN_SECRET` / `KUCOIN_SECRET_KEY` acceptance or canonicalize.
+- Resolve the `SHADOW_` word overload (§3.4) with a naming-glossary doc so "shadow" ≠ 4 things.
+
+---
+
+## 5. Cross-references
+- `docs/DOC_AUDIT_REPORT.md` — prior doc-vs-code drift audit (overlaps §3.1).
+- `docs/HERMX_AGENT_SYSTEM_DESIGN.md:816` — canonical "Removed flags" table.
+- `ARCHITECTURE.md:139` — authoritative statement that `OKX_SUBMIT_ORDERS`/`OKX_SIMULATED_TRADING` are removed.
+- Memory: "inert monitor is worse than no monitor" → `HERMX_MXC_BASE`/risk-gate context.

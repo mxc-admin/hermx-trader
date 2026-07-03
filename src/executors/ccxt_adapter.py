@@ -21,6 +21,12 @@ from .base import BaseExecutor, empty_fill_summary, empty_normalized_order
 from security.credentials import redact_secrets, resolve_exchange_credentials
 from hermx_shared import live_trading_enabled
 
+# Submit timeout (seconds) for the ccxt client, mirroring the service-level submit
+# timeout. Hard-coded per the flag fluff audit (no deployment tunes it); kept as a
+# module constant so a test can monkeypatch it. The receiver holds its own copy of
+# the same value -- a shared import here would create a cycle.
+HERMX_SUBMIT_TIMEOUT_SECONDS = 45.0
+
 
 def _to_float(value, default: float | None = None) -> float | None:
     if value in (None, ""):
@@ -71,11 +77,7 @@ def _submit_timeout_ms() -> int:
     """ccxt client `timeout` (ms) derived from HERMX_SUBMIT_TIMEOUT_SECONDS so a
     hung submit fails fast and maps to UNKNOWN (invariant 5) rather than blocking
     forever. Mirrors the service-level submit timeout."""
-    try:
-        seconds = float(os.environ.get("HERMX_SUBMIT_TIMEOUT_SECONDS", "45") or "45")
-    except (TypeError, ValueError):
-        seconds = 45.0
-    return int(max(1.0, seconds) * 1000)
+    return int(max(1.0, HERMX_SUBMIT_TIMEOUT_SECONDS) * 1000)
 
 
 def _is_timeout_error(exc: Exception) -> bool:

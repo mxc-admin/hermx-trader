@@ -35,9 +35,9 @@ except Exception:
     ExecutorFactory = None
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ROOT = Path(os.environ.get("SHADOW_ROOT", REPO_ROOT))
+ROOT = Path(os.environ.get("HERMX_ROOT") or os.environ.get("SHADOW_ROOT", REPO_ROOT))
 LOGS = ROOT / "logs"
-PORT = int(os.environ.get("CLEAN_DASHBOARD_PORT", "8098"))
+PORT = int(os.environ.get("HERMX_DASHBOARD_PORT") or os.environ.get("CLEAN_DASHBOARD_PORT", "8098"))
 # Address the dashboard HTTP server binds to. Default 127.0.0.1 keeps
 # bare-host/systemd deploys loopback-only (unchanged); the Docker bridge compose
 # sets HERMX_BIND_HOST=0.0.0.0 so the container is reachable on the host port map.
@@ -75,7 +75,7 @@ POLICIES = ()
 
 # Client silent-refresh cadence (must match setInterval below). Data older than
 # this is considered stale for the freshness badge / executor banner (D7).
-REFRESH_INTERVAL_SECONDS = int(os.environ.get("HERMX_DASH_REFRESH_SECONDS") or "20")
+REFRESH_INTERVAL_SECONDS = 20
 
 MODEL_CACHE_TTL_SECONDS = 10
 _MODEL_CACHE = {"expires_at": 0.0, "model": None}
@@ -694,7 +694,7 @@ def mark_prices(config):
     return marks
 
 
-def _dashboard_executor(config):
+def _dashboard_executor(config, simulated_trading=True):
     if ExecutorFactory is None:
         return None, "executor_factory_unavailable"
     try:
@@ -710,19 +710,48 @@ def _dashboard_executor(config):
         # removal left this config empty.
         if not exec_cfg.get("ccxt_exchange"):
             exec_cfg["ccxt_exchange"] = "okx"
+        # Phase 0 (demo/live separation): the dashboard must read the account that
+        # matches each strategy's mode. simulated_trading=True -> OKX demo sandbox;
+        # False -> the live real venue (still gated by HERMX_LIVE_TRADING inside the
+        # adapter, ccxt_adapter._client). The unset default stays True so demo-only
+        # deployments are byte-for-byte unchanged from before this phase.
+        exec_cfg["simulated_trading"] = bool(simulated_trading)
         cfg["execution"] = exec_cfg
         return ExecutorFactory.create(cfg, ROOT), None
     except Exception as exc:
         return None, str(exc)
 
 
-def okx_live_snapshot(config):
+def okx_live_snapshot(config, simulated_trading=True):
+    simulated = bool(simulated_trading)
+    mode_key = "demo" if simulated else "live"
+    # Fail-closed (Principle 5): never attempt a live venue read unless the global
+    # HERMX_LIVE_TRADING kill switch is armed. A strategy toggled live while the
+    # switch is off degrades to the demo snapshot with a logged warning instead of
+    # surfacing a connect error or, worse, silently reading the wrong account.
+    if not simulated and not live_trading_enabled()[0]:
+        print(
+            "[dashboard] live positions snapshot requested but HERMX_LIVE_TRADING is "
+            "disarmed; falling back to demo read (fail-closed).",
+            file=sys.stderr,
+        )
+        return okx_live_snapshot(config, simulated_trading=True)
+
     now = time.time()
-    cached = _OKX_LIVE_CACHE.get("snapshot")
-    if cached is not None and now < float(_OKX_LIVE_CACHE.get("expires_at") or 0):
+    snap_cache_key = f"snapshot:{mode_key}"
+    expiry_cache_key = f"expires_at:{mode_key}"
+    cached = _OKX_LIVE_CACHE.get(snap_cache_key)
+    if cached is not None and now < float(_OKX_LIVE_CACHE.get(expiry_cache_key) or 0):
         return cached
-    snapshot = {"ok": False, "positions": {}, "error": None, "generated_at": None}
-    executor, exec_err = _dashboard_executor(config)
+    snapshot = {
+        "ok": False,
+        "positions": {},
+        "error": None,
+        "generated_at": None,
+        "mode": mode_key,
+        "simulated_trading": simulated,
+    }
+    executor, exec_err = _dashboard_executor(config, simulated_trading=simulated)
     if executor is None:
         snapshot["error"] = exec_err or "dashboard_executor_unavailable"
         return snapshot
@@ -763,12 +792,25 @@ def okx_live_snapshot(config):
                 "account": payload.get("account") or {},
                 "positions": positions,
                 "error": None,
+                "mode": mode_key,
+                "simulated_trading": simulated,
             }
     except Exception as exc:
         snapshot["error"] = str(exc)
-    _OKX_LIVE_CACHE["snapshot"] = snapshot
-    _OKX_LIVE_CACHE["expires_at"] = now + OKX_LIVE_CACHE_TTL_SECONDS
+    _OKX_LIVE_CACHE[snap_cache_key] = snapshot
+    _OKX_LIVE_CACHE[expiry_cache_key] = now + OKX_LIVE_CACHE_TTL_SECONDS
     return snapshot
+
+
+def _snapshot_for_mode(okx_live_by_mode, mode):
+    """Pick the positions snapshot matching a strategy's effective mode.
+
+    Only 'live' reads the live account; 'demo' and 'pause' both read the demo
+    sandbox (pause's execution_mode is demo). Falls back to the demo snapshot, then
+    to an empty snapshot, so a missing live snapshot never raises."""
+    by_mode = okx_live_by_mode or {}
+    key = "live" if str(mode or "").lower() == "live" else "demo"
+    return by_mode.get(key) or by_mode.get("demo") or {"ok": False, "positions": {}, "error": None}
 
 
 def okx_order_history_snapshot(config):
@@ -1193,12 +1235,29 @@ def dashboard_model():
     LEDGER_READ_STATS.clear()
     cfg = shadow_config()
     loaded = load_events()
-    okx_live = okx_live_snapshot(cfg)
     strategies = load_strategy_files()
+    # Phase 0 (demo/live separation): read the account that matches each strategy's
+    # mode. Always fetch the demo snapshot (today's behavior). Only fetch the live
+    # snapshot when at least one strategy is effectively live -- okx_live_snapshot
+    # itself fail-closes to demo when HERMX_LIVE_TRADING is disarmed. If no strategy
+    # is live, the live slot reuses the demo snapshot so behavior is unchanged.
+    _ctrl = _load_control_state()
+    _overrides = _ctrl.get("strategy_overrides") if isinstance(_ctrl.get("strategy_overrides"), dict) else {}
+    _any_live = any(_effective_strategy_mode(s, _overrides) == "live" for s in strategies)
+    # Call the demo path with no kwarg (default simulated_trading=True) so any test
+    # stub or legacy caller with a 1-arg signature stays compatible. Only reach for
+    # the live path when a strategy is actually live.
+    okx_live_demo = okx_live_snapshot(cfg)
+    okx_live_live = okx_live_snapshot(cfg, simulated_trading=False) if _any_live else okx_live_demo
+    okx_live_by_mode = {"demo": okx_live_demo, "live": okx_live_live}
+    # Singular okx_live stays the demo snapshot for backward-compatible consumers
+    # (executor_health_summary, freshness, the demo ledger section).
+    okx_live = okx_live_demo
     model = {
         "config": cfg,
         "loaded": loaded,
         "okx_live": okx_live,
+        "okx_live_by_mode": okx_live_by_mode,
         "okx_executions": okx_execution_records(cfg),
         "strategies": strategies,
         "active_strategies": active_strategies(strategies),
@@ -1249,6 +1308,8 @@ def api_payload():
     for s in model.get("active_strategies") or []:
         s = dict(s)
         s["effective_mode"] = _effective_strategy_mode(s, _overrides)
+        # Phase 0: which OKX account this strategy's positions are read from.
+        s["okx_account_source"] = "live" if s["effective_mode"] == "live" else "demo"
         annotated_strategies.append(s)
 
     return {
@@ -1259,6 +1320,7 @@ def api_payload():
         "strategy_overrides": _overrides,
         "strategy_alerts": model.get("strategy_alerts") or [],
         "okx_live": model.get("okx_live"),
+        "okx_live_by_mode": model.get("okx_live_by_mode") or {},
         "okx_executions": model.get("okx_executions") or [],
         "executor": model.get("executor") or {},
         "hermes": {
@@ -1544,14 +1606,19 @@ def metric_cards_colored(items):
     return f'<div class="metrics">{"".join(cells)}</div>'
 
 
-def strategy_card(strategy, okx_live, alerts):
+def strategy_card(strategy, okx_live, alerts, okx_live_by_mode=None):
     sym = strategy.get("asset")
     meta = ASSET_META.get(sym, {"name": sym, "logo": ""})
-    live = (okx_live.get("positions") or {}).get(sym) or {}
     rows = [row for row in alerts if row.get("strategy_id") == strategy.get("strategy_id")]
     # effective_mode (pause/demo/live) is annotated upstream in render(); fall back to
     # the file's execution_mode if a caller passes an un-annotated strategy.
     mode = (strategy.get("effective_mode") or strategy.get("execution_mode") or "demo").lower()
+    # Phase 0: read positions from the account matching this strategy's mode. A live
+    # strategy reads the live snapshot; demo/pause read demo. When no per-mode map is
+    # supplied (legacy callers), fall back to the single snapshot passed in.
+    if okx_live_by_mode:
+        okx_live = _snapshot_for_mode(okx_live_by_mode, mode)
+    live = (okx_live.get("positions") or {}).get(sym) or {}
     _mode_labels = {"pause": "Pause", "demo": "Demo", "live": "Live"}
     mode_label = _mode_labels.get(mode, mode.title())
     mode_kind = "good" if mode == "live" else "muted" if mode == "pause" else "neutral"
@@ -1862,8 +1929,8 @@ def order_state_section():
     """
 
 
-def strategy_trial_tab(strategies, alerts, okx_live, okx_executions):
-    cards = ''.join(strategy_card(strategy, okx_live, alerts) for strategy in strategies)
+def strategy_trial_tab(strategies, alerts, okx_live, okx_executions, okx_live_by_mode=None):
+    cards = ''.join(strategy_card(strategy, okx_live, alerts, okx_live_by_mode) for strategy in strategies)
     strategy_rows = []
     for strategy in strategies:
         strategy_rows.extend(strategy_execution_rows(strategy, okx_executions))
@@ -1997,6 +2064,7 @@ def render():
     model = dashboard_model()
     cfg = model["config"]
     okx_live = model.get("okx_live") or {}
+    okx_live_by_mode = model.get("okx_live_by_mode") or {}
     okx_executions = model.get("okx_executions") or []
     # Annotate each strategy with its effective UI mode (pause/demo/live) so the card
     # badge reflects overrides + the file's submit_orders, mirroring api_payload.
@@ -2006,6 +2074,7 @@ def render():
     for _s in model.get("active_strategies") or []:
         _s = dict(_s)
         _s["effective_mode"] = _effective_strategy_mode(_s, _overrides)
+        _s["okx_account_source"] = "live" if _s["effective_mode"] == "live" else "demo"
         strategies.append(_s)
     strategy_alerts = model.get("strategy_alerts") or []
     source_line = (
@@ -2328,10 +2397,11 @@ tr:target td { background:rgba(242,201,76,.08); }
 # --- Built Next.js SPA (dashboard-ui/out) + dev CORS --------------------------
 # When dashboard-ui/out/ exists (after `npm run build`), the static export takes
 # over "/" and all asset paths; until then the legacy server-rendered HTML is the
-# fallback. HERMX_DEV_CORS lets the Next dev server (localhost:3001) call /api and
-# /health cross-origin during development.
+# fallback. DEV_CORS_ENABLED (dev-only; hard-coded off per the flag fluff audit --
+# security-adjacent, never on in prod) would let the Next dev server (localhost:3001)
+# call /api and /health cross-origin; flip in-source only for local development.
 STATIC_DIR = REPO_ROOT / "dashboard-ui" / "out"
-DEV_CORS_ENABLED = bool((os.environ.get("HERMX_DEV_CORS") or "").strip())
+DEV_CORS_ENABLED = False
 DEV_CORS_ORIGIN = "http://localhost:3001"
 STATIC_MIME_TYPES = {
     ".html": "text/html; charset=utf-8",

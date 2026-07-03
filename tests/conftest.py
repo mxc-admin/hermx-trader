@@ -26,6 +26,10 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 # cannot touch the real repo logs/ or paper-state.json.
 _SHADOW_ROOT = Path(tempfile.mkdtemp(prefix="hermx-test-shadow-root-"))
 (_SHADOW_ROOT / "logs").mkdir(parents=True, exist_ok=True)
+# NOTE: bind via SHADOW_ROOT only. Production reads `HERMX_ROOT or SHADOW_ROOT`,
+# so SHADOW_ROOT alone still works via fallback. We deliberately do NOT set
+# HERMX_ROOT here: it has read-precedence, so a stale env value would silently
+# override per-test fixtures that bind a fresh root via SHADOW_ROOT only.
 os.environ["SHADOW_ROOT"] = str(_SHADOW_ROOT)
 # HERMX_SECRET is the sole source authenticating both the webhook and the dashboard.
 os.environ.setdefault("HERMX_SECRET", "test-secret")
@@ -151,29 +155,22 @@ def wr(wr_root, monkeypatch):
 
 @pytest.fixture
 def reload_wr():
-    """Loader for webhook_receiver bound to an arbitrary populated SHADOW_ROOT and
-    HERMX_STATE_BACKEND (Phase 1 task 1 tests). Unlike `wr`, the returned callable
-    can be invoked multiple times in one test to bind different roots/backends
-    (e.g. a legacy run and a journal run, or a "crash" reload of the same root).
+    """Loader for webhook_receiver bound to an arbitrary populated SHADOW_ROOT.
+    Unlike `wr`, the returned callable can be invoked multiple times in one test to
+    bind different roots (e.g. a "crash" reload of the same root).
 
-    webhook_receiver resolves SHADOW_ROOT and reads HERMX_STATE_BACKEND at import
-    time, so each call sets the env then importlib.reload()s the module. Teardown
-    restores SHADOW_ROOT to the live session root and clears HERMX_STATE_BACKEND so
-    unrelated tests keep a module bound to a non-deleted directory in legacy mode.
+    webhook_receiver resolves SHADOW_ROOT at import time, so each call sets the env
+    then importlib.reload()s the module. Teardown restores SHADOW_ROOT to the live
+    session root so unrelated tests keep a module bound to a non-deleted directory.
     """
     import webhook_receiver as module  # noqa: WPS433
 
     orig_root = os.environ.get("SHADOW_ROOT")
-    orig_backend = os.environ.get("HERMX_STATE_BACKEND")
 
-    def _load(root, backend="legacy"):
+    def _load(root):
         root = Path(root)
         _build_populated_root(root)
         os.environ["SHADOW_ROOT"] = str(root)
-        if backend:
-            os.environ["HERMX_STATE_BACKEND"] = backend
-        else:
-            os.environ.pop("HERMX_STATE_BACKEND", None)
         os.environ.pop("HERMX_LIVE_TRADING", None)
         importlib.reload(module)
         return module
@@ -182,10 +179,6 @@ def reload_wr():
         yield _load
     finally:
         os.environ["SHADOW_ROOT"] = orig_root if orig_root is not None else str(_SHADOW_ROOT)
-        if orig_backend is not None:
-            os.environ["HERMX_STATE_BACKEND"] = orig_backend
-        else:
-            os.environ.pop("HERMX_STATE_BACKEND", None)
         importlib.reload(module)
 
 

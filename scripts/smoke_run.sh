@@ -35,8 +35,10 @@ else
 fi
 
 # --- defaults ---------------------------------------------------------------
-: "${SHADOW_PORT:=8891}"
-: "${CLEAN_DASHBOARD_PORT:=8098}"
+: "${HERMX_RECEIVER_PORT:=${SHADOW_PORT:-8891}}"
+: "${HERMX_DASHBOARD_PORT:=${CLEAN_DASHBOARD_PORT:-8098}}"
+export HERMX_RECEIVER_PORT SHADOW_PORT="$HERMX_RECEIVER_PORT"
+export HERMX_DASHBOARD_PORT CLEAN_DASHBOARD_PORT="$HERMX_DASHBOARD_PORT"
 
 usage() {
   sed -n '3,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -143,8 +145,11 @@ seed_shadow_root
 # Run from the repo root (so src/ resolves) but point every config/strategy/
 # ledger lookup at the throwaway dry-run shadow root seeded above.
 export SHADOW_ROOT="$TMP_SHADOW"
+export HERMX_ROOT="$TMP_SHADOW"
 export SHADOW_PORT
 export CLEAN_DASHBOARD_PORT
+export HERMX_RECEIVER_PORT="$SHADOW_PORT"
+export HERMX_DASHBOARD_PORT="$CLEAN_DASHBOARD_PORT"
 # SAFETY: HERMX_LIVE_TRADING=false blocks live submission; combined with the
 # submit_orders=false strategy copies, no strategy can submit orders at all.
 export HERMX_LIVE_TRADING="false"

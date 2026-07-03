@@ -6,7 +6,7 @@
 # REFACTOR_PLAN.md:181 — run receiver + dashboard against the demo profile
 # locally for manual smoke testing.
 #
-# SAFETY: exports $env:HERMX_SUBMIT_ENABLED="false", which hard-blocks all OKX
+# SAFETY: exports $env:HERMX_LIVE_TRADING="false", which hard-blocks all OKX
 # order submission before any subprocess is spawned (skills/emergency-stop.md,
 # Level 0). This is a smoke-test harness, never a live launcher.
 #
@@ -39,8 +39,18 @@ if (Test-Path (Join-Path $Root ".venv\Scripts\python.exe")) {
 }
 
 # --- defaults ---------------------------------------------------------------
-if (-not $env:SHADOW_PORT) { $env:SHADOW_PORT = "8891" }
-if (-not $env:CLEAN_DASHBOARD_PORT) { $env:CLEAN_DASHBOARD_PORT = "8098" }
+# Canonical env names with backward-compat fallback
+if (-not $env:HERMX_RECEIVER_PORT) {
+    if ($env:SHADOW_PORT) { $env:HERMX_RECEIVER_PORT = $env:SHADOW_PORT }
+    else { $env:HERMX_RECEIVER_PORT = "8891" }
+}
+if (-not $env:HERMX_DASHBOARD_PORT) {
+    if ($env:CLEAN_DASHBOARD_PORT) { $env:HERMX_DASHBOARD_PORT = $env:CLEAN_DASHBOARD_PORT }
+    else { $env:HERMX_DASHBOARD_PORT = "8098" }
+}
+# Re-export old names for backward compat
+$env:SHADOW_PORT = $env:HERMX_RECEIVER_PORT
+$env:CLEAN_DASHBOARD_PORT = $env:HERMX_DASHBOARD_PORT
 
 # --- load .env (ignore comments / blank lines) ------------------------------
 if (Test-Path ".env") {
@@ -72,7 +82,7 @@ if ($Check) {
 
   Write-Host "  SHADOW_PORT:    $($env:SHADOW_PORT)"
   Write-Host "  DASHBOARD_PORT: $($env:CLEAN_DASHBOARD_PORT)"
-  Write-Host "  HERMX_SUBMIT_ENABLED would be forced to: false (dry-run / no submit)"
+  Write-Host "  HERMX_LIVE_TRADING would be forced to: false (dry-run / no submit)"
   if ($ok) { Write-Host "CHECK: OK"; exit 0 }
   else { Write-Host "CHECK: FAILED"; exit 1 }
 }
@@ -84,12 +94,15 @@ if (-not (Test-Path "engine-config.json")) {
 }
 
 $env:SHADOW_ROOT = $Root
+$env:HERMX_ROOT = $Root
+$env:HERMX_RECEIVER_PORT = $env:SHADOW_PORT
+$env:HERMX_DASHBOARD_PORT = $env:CLEAN_DASHBOARD_PORT
 # SAFETY: force the global kill switch ON for smoke runs.
-$env:HERMX_SUBMIT_ENABLED = "false"
+$env:HERMX_LIVE_TRADING = "false"
 
 Write-Host "============================================================"
 Write-Host " HermX SMOKE RUN - DEMO profile"
-Write-Host " DRY-RUN / NO-SUBMIT: HERMX_SUBMIT_ENABLED=false (kill switch ARMED)"
+Write-Host " DRY-RUN / NO-SUBMIT: HERMX_LIVE_TRADING=false (kill switch ARMED)"
 Write-Host " No OKX orders can be submitted in this mode."
 Write-Host "------------------------------------------------------------"
 Write-Host " python:    $Python"

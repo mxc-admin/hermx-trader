@@ -257,7 +257,6 @@ HERMX_WEBHOOK_HMAC_KEY=     # required when HMAC is on; adds X-Webhook-Signature
 If **OKX** (recommended):
 
 ```text
-OKX_FORCE_IPV4=1
 HERMX_LIVE_TRADING=false    # global live switch — KEEP false; demo strategies route to the sandbox regardless
 # Preferred namespaced credentials:
 OKX_DEMO_API_KEY=<okx demo api key>
@@ -303,8 +302,11 @@ dashboard token. Send it as the `X-Dashboard-Token` header, or as the Bearer / B
 **(d) Ports — defaults are correct; change only if a port is already taken**
 
 ```text
-SHADOW_PORT=8891            # webhook receiver (loopback) — legacy naming; code still reads SHADOW_PORT for backward compatibility
-CLEAN_DASHBOARD_PORT=8098   # dashboard (loopback)
+HERMX_RECEIVER_PORT=8891    # webhook receiver (loopback)
+HERMX_DASHBOARD_PORT=8098   # dashboard (loopback)
+# Legacy aliases (deprecated, still honored for backward compatibility):
+# SHADOW_PORT=8891
+# CLEAN_DASHBOARD_PORT=8098
 ```
 
 **(e) Hermes Agent / Telegram values — collect now, store later**
@@ -1009,7 +1011,7 @@ order is blocked (`live_trading_disabled`). Never enable live unless the user ex
 ## Troubleshooting
 
 - **Port already in use** (`Address already in use`): find the holder with `sudo lsof -i :8891`
-  (or `:8098`), stop it, or change the legacy `SHADOW_PORT` / `CLEAN_DASHBOARD_PORT` in `.env` — then re-point
+  (or `:8098`), stop it, or change `HERMX_RECEIVER_PORT` / `HERMX_DASHBOARD_PORT` in `.env` (legacy `SHADOW_PORT` / `CLEAN_DASHBOARD_PORT` still work) — then re-point
   Tailscale Funnel (`sudo tailscale funnel --bg <newport>`) and any agent config.
 - **Tailscale not authenticated / no public URL**: re-run `sudo tailscale up --hostname=hermx`,
   finish the browser login, enable Funnel, then `sudo tailscale funnel --bg 8891`. Check

@@ -69,24 +69,22 @@ def test_checkpoint_load_equals_full_fold_after_rotation(wr, monkeypatch):
     assert wr.latest_order_record("A")["state"] == wr.ORDER_STATE_FILLED  # dedupe still blocks A
 
 
-def test_seq_monotonic_across_rotation_and_restart(reload_wr, tmp_path):
+def test_seq_monotonic_across_rotation_and_restart(reload_wr, tmp_path, monkeypatch):
     root = tmp_path / "root"
     mod = reload_wr(root)
-    import os
-    os.environ["HERMX_JOURNAL_SEGMENT_MAX_RECORDS"] = "3"
-    mod = reload_wr(root)  # reload so the small cap is picked up at import
+    # Small segment cap forces rotation without writing thousands of records. The
+    # constant is hard-coded now (no env read) -- monkeypatch the module attribute.
+    monkeypatch.setattr(mod, "HERMX_JOURNAL_SEGMENT_MAX_RECORDS", 3)
     for cl in ("A", "B", "C"):  # rotate at C (seqs 0,1,2)
         mod.record_order_state(cl, mod.ORDER_STATE_PLANNED, intent=_intent(), prev_state=None)
     assert mod._order_sealed_segment_paths()  # rotation happened
 
     # "Restart": reload the module against the same root. seq must resume past 2.
+    # (The default cap is fine here -- next-seq is recovered from the checkpoint.)
     mod = reload_wr(root)
-    try:
-        assert mod._order_journal_next_seq() == 3
-        # Index rebuilt from checkpoint + (empty) live tail still finds the orders.
-        assert {r["cl_ord_id"] for r in mod.load_open_orders()} == {"A", "B", "C"}
-    finally:
-        os.environ.pop("HERMX_JOURNAL_SEGMENT_MAX_RECORDS", None)
+    assert mod._order_journal_next_seq() == 3
+    # Index rebuilt from checkpoint + (empty) live tail still finds the orders.
+    assert {r["cl_ord_id"] for r in mod.load_open_orders()} == {"A", "B", "C"}
 
 
 def test_midfile_corruption_fails_only_that_order(wr):

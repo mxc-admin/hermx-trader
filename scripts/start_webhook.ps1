@@ -20,6 +20,11 @@ Get-Content ".env" | ForEach-Object {
 }
 
 $env:SHADOW_ROOT = $Root
-if (-not $env:SHADOW_PORT) { $env:SHADOW_PORT = "8891" }
+$env:HERMX_ROOT = $Root
+if (-not $env:HERMX_RECEIVER_PORT) {
+    if ($env:SHADOW_PORT) { $env:HERMX_RECEIVER_PORT = $env:SHADOW_PORT }
+    else { $env:HERMX_RECEIVER_PORT = "8891" }
+}
+$env:SHADOW_PORT = $env:HERMX_RECEIVER_PORT
 
 python "src/webhook_receiver.py"

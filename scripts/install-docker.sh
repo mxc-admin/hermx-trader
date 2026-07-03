@@ -59,9 +59,8 @@ pick_exchange(){
     wallet_address) read -r -p "  Wallet Address: " val; set_env "${prefix}_WALLET_ADDRESS" "$val";;
     private_key) read -r -s -p "  Private Key: " val; echo; set_env "${prefix}_PRIVATE_KEY" "$val";;
     *) warn "Unknown field '$field' — skipping.";; esac; done
-  set_env "HERMX_EXCHANGE" "$ex_id"; set_env "HERMX_CCXT_EXCHANGE" "$ex_id"
+  set_env "HERMX_CCXT_EXCHANGE" "$ex_id"
   set_env "HERMX_LIVE_TRADING" "false"
-  [[ "$ex_id" == "okx" ]] && set_env "OKX_FORCE_IPV4" "1"
 }
 
 phase "PHASE 0: Prerequisites"

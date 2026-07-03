@@ -8,7 +8,7 @@ from pathlib import Path
 import os
 
 
-ROOT = Path(os.environ.get("SHADOW_ROOT", Path(__file__).resolve().parents[1]))
+ROOT = Path(os.environ.get("HERMX_ROOT") or os.environ.get("SHADOW_ROOT", Path(__file__).resolve().parents[1]))
 LOGS = ROOT / "logs"
 SYMBOLS = ["XRPUSDT", "SOLUSDT", "ETHUSDT", "BTCUSDT"]
 OKX_TICKER_CACHE = {"ts": 0.0, "data": {}}

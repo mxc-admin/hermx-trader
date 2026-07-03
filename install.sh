@@ -148,17 +148,11 @@ pick_exchange() {
   done
 
   # Exchange routing markers consumed by the runtime config selection.
-  set_env "HERMX_EXCHANGE" "$ex_id"
   set_env "HERMX_CCXT_EXCHANGE" "$ex_id"
 
   # Global live-trading kill switch -- written false for every venue, so a fresh
   # install is always demo/sandbox until the operator deliberately goes live.
   set_env "HERMX_LIVE_TRADING" "false"
-
-  # OKX keeps its legacy IPv4 pin.
-  if [[ "$ex_id" == "okx" ]]; then
-    set_env "OKX_FORCE_IPV4" "1"
-  fi
 
   # Select the matching DISARMED runtime profile -> engine-config.json. OKX is the
   # reference venue and ships as the generic config/runtime.demo.json (no okx-suffixed file).

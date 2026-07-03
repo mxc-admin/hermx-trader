@@ -210,11 +210,15 @@ ensure_secret
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-: "${SHADOW_PORT:=8891}"
-: "${CLEAN_DASHBOARD_PORT:=8098}"
+# Canonical env names with backward-compat fallback (old names still work).
+# $SHADOW_PORT / $CLEAN_DASHBOARD_PORT now alias the resolved canonical value,
+# so the shell-variable references throughout the rest of this script are unchanged.
+: "${HERMX_RECEIVER_PORT:=${SHADOW_PORT:-8891}}"
+: "${HERMX_DASHBOARD_PORT:=${CLEAN_DASHBOARD_PORT:-8098}}"
+export HERMX_RECEIVER_PORT SHADOW_PORT="$HERMX_RECEIVER_PORT"
+export HERMX_DASHBOARD_PORT CLEAN_DASHBOARD_PORT="$HERMX_DASHBOARD_PORT"
+export HERMX_ROOT="$ROOT"
 export SHADOW_ROOT="$ROOT"
-export SHADOW_PORT
-export CLEAN_DASHBOARD_PORT
 SUMMARY_SHOWN=false
 
 if [[ "$HONOR_SUBMIT" != true ]]; then
