@@ -381,6 +381,38 @@ HermX monitoring uses the Hermes gateway's built-in cron scheduler rather than a
 
 On every code deploy, `deploy/deploy.sh` runs the installer in `HERMX_CRON_CREATE_ONLY=1` mode: missing jobs are created, but existing jobs are never edited — a manually paused or re-scheduled job survives the deploy untouched.
 
+### 8.5 VPS sizing
+
+The full deployment — HermX **plus** the Hermes Agent and its cron monitors (§8.4), both included by default — has these recommended specs:
+
+| Resource | Recommended | Active use |
+|----------|-------------|------------|
+| vCPU     | 2           | Near-idle  |
+| RAM      | 4 GB        | ~1.8–2.5 GB peak |
+| Disk     | 40 GB SSD   | ~3–4 GB    |
+| OS       | Ubuntu 22.04 | — |
+
+A [Hetzner LightNode](https://www.hetzner.com/) instance (or an equivalent DigitalOcean/Linode standard tier) is a good starting point.
+
+**RAM is the practical constraint.** Rough resident/peak footprint:
+
+| Component | Footprint |
+|-----------|-----------|
+| Hermes gateway (resident) | ~250–500 MB |
+| Transient LLM cron spawns | +100–300 MB |
+| HermX receiver + dashboard | ~120–250 MB |
+| Tailscale | ~40 MB |
+| OS baseline | ~400–700 MB |
+| **Peak total** | **~1.8–2.5 GB** |
+
+4 GB gives safe headroom above that peak. **HermX alone fits in ~1 GB and could run on 1 vCPU / 2 GB** — the 2/4/40 spec is driven by the full Hermes + HermX stack.
+
+**CPU** is near-idle in steady state; 2 vCPU is comfort for concurrent services and docker pulls, not a throughput requirement.
+
+**Disk** active usage is ~3–4 GB; 40 GB is generous headroom for image churn, log growth, and Hermes model-cache growth.
+
+**Classification:** the workload is I/O-bound and idle-dominated; RAM is the only resource that meaningfully constrains sizing.
+
 ---
 
 ## 9. Extension Guide

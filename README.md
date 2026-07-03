@@ -152,6 +152,21 @@ All use the `mxc duo-base v2.5` indicator logic. They are configured for demo/sa
 - Free Tailscale account
 - LLM API key (only needed for the optional Hermes Agent)
 
+### VPS sizing
+
+For a full deployment (HermX **plus** the Hermes Agent and its cron monitors, which are included by default), start with:
+
+| Resource | Recommended |
+|----------|-------------|
+| vCPU     | 2 |
+| RAM      | 4 GB |
+| Disk     | 40 GB SSD |
+| OS       | Ubuntu 22.04 |
+
+A [Hetzner LightNode](https://www.hetzner.com/) instance (or an equivalent DigitalOcean/Linode standard tier) is a good starting point.
+
+**RAM is the driver.** Hermes stays resident and transient LLM cron jobs spike total usage to ~2–2.5 GB peak; 4 GB leaves safe headroom. HermX on its own fits in ~1 GB and could run on 1 vCPU / 2 GB — but the full Hermes + HermX stack needs the 2 vCPU / 4 GB / 40 GB spec. See [ARCHITECTURE.md §8.5](ARCHITECTURE.md) for the full breakdown.
+
 ## Philosophy
 
 > Safety lives in code, not in config or prose.  
