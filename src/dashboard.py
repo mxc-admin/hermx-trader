@@ -2435,7 +2435,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
-        if path in {"/dashboard", "/dashboard/", "/dashboard/api", "/dashboard/api/", "/", "/shadow/dashboard", "/api", "/shadow/dashboard/api"} and not self._dashboard_auth_ok():
+        # Prefix check, not an exact allowlist: _serve_static maps directory requests
+        # to index.html, so /dashboard/index.html (which injects the auth token) must
+        # be challenged too. An exact set left it unauthenticated and leaked the token.
+        if (path == "/" or path == "/api" or path.startswith("/dashboard")
+                or path.startswith("/shadow/dashboard")) and not self._dashboard_auth_ok():
             self._auth_challenge()
             return
         if path in {"/api/signals", "/shadow/api/signals", "/dashboard/api/signals"}:

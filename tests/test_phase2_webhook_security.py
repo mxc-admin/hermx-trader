@@ -1,13 +1,14 @@
 """Webhook intake hardening.
 
-The X-Webhook-Secret / query-secret header auth was removed from the receiver:
-the handler no longer calls authenticate_webhook_request, and inbound alerts are
-gated by strategy_id validation (strategy_engine.require_strategy_id) instead of a
-shared secret. These tests cover the controls that remain at the HTTP edge --
-payload-size cap, rate limiting, queue-full back-pressure -- plus the strategy_id
-gate that now decides whether an alert is processed or quarantined. The HMAC
-helpers in security/webhook_auth.py still exist (unit-tested below) even though
-do_POST no longer invokes them. Dashboard /api token auth is unchanged.
+do_POST authenticates every inbound alert via authenticate_webhook_request
+(shared X-Webhook-Secret, plus HMAC when HERMX_REQUIRE_HMAC is set) before it
+writes the intake WAL row or queues the signal -- see
+test_webhook_auth_integration.py for the end-to-end auth path. These tests cover
+the controls at the HTTP edge -- payload-size cap, rate limiting, queue-full
+back-pressure -- and the strategy_id gate that decides whether an authenticated
+alert is processed or quarantined. Requests that reach the auth check therefore
+carry the corpus secret (HERMX_SECRET=test-secret). Dashboard /api token auth is
+unchanged.
 """
 from __future__ import annotations
 
@@ -111,13 +112,13 @@ def test_rate_limit_rejects_excess_requests(wr, monkeypatch):
             server.server_address[1],
             "/webhook",
             {"source": "tradingview"},
-            headers={"CF-Connecting-IP": "1.2.3.4"},
+            headers={"CF-Connecting-IP": "1.2.3.4", "X-Webhook-Secret": "test-secret"},
         )
         status2, body2 = _post(
             server.server_address[1],
             "/webhook",
             {"source": "tradingview"},
-            headers={"CF-Connecting-IP": "1.2.3.4"},
+            headers={"CF-Connecting-IP": "1.2.3.4", "X-Webhook-Secret": "test-secret"},
         )
         assert status1 == 200
         assert status2 == 429
@@ -137,6 +138,7 @@ def test_queue_full_returns_503_and_drops(wr, monkeypatch):
             server.server_address[1],
             "/webhook",
             {"source": "tradingview"},
+            headers={"X-Webhook-Secret": "test-secret"},
         )
         assert status == 503
         assert body.get("error") == "queue_full"

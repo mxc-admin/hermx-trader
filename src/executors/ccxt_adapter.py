@@ -146,9 +146,16 @@ class CcxtExecutor(BaseExecutor):
         self._cached_client = None
 
     def _exchange_id(self) -> str:
-        return str(self.execution_cfg.get("ccxt_exchange") or self.execution_cfg.get("exchange") or "okx").lower()
+        # "ccxt" is the ADAPTER backend name, not a venue. When it (or nothing) is
+        # supplied, fall back to a real venue so getattr(ccxt, "ccxt") -> None can't
+        # silently disable reconciliation.
+        raw = str(self.execution_cfg.get("ccxt_exchange")
+                  or self.execution_cfg.get("exchange") or "").strip().lower()
+        if raw in ("", "ccxt"):
+            raw = str(os.environ.get("HERMX_CCXT_EXCHANGE") or "okx").strip().lower()
+        return raw
 
-    def _client(self):
+    def _client(self, *, close_only: bool = False):
         if self._cached_client is not None:
             return self._cached_client
         if ccxt is None:
@@ -233,8 +240,11 @@ class CcxtExecutor(BaseExecutor):
         else:
             # Fail-closed defense in depth: even if the service-level live gate is
             # somehow bypassed, the adapter refuses to connect to a real venue unless
-            # HERMX_LIVE_TRADING is explicitly armed.
-            if not live_trading_enabled()[0]:
+            # HERMX_LIVE_TRADING is explicitly armed. A close-only flatten bypasses
+            # this gate (it only REDUCES exposure) to mirror the service-level bypass
+            # in execution/service.py -- otherwise an emergency close can never reach
+            # the venue while the kill switch is off.
+            if not close_only and not live_trading_enabled()[0]:
                 raise RuntimeError(
                     "live_trading_disabled: CcxtExecutor refuses to connect to live venue "
                     "without HERMX_LIVE_TRADING=true"
@@ -487,7 +497,7 @@ class CcxtExecutor(BaseExecutor):
             )
 
         try:
-            client = self._client()
+            client = self._client(close_only=close_only)
             if not symbol:
                 raise RuntimeError("symbol_unresolved")
 

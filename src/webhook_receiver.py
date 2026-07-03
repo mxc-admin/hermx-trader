@@ -823,7 +823,11 @@ PIPELINE_STAGES = frozenset({
     "startup_replay",
 })
 # Valid ``phase`` values for record_raw_webhook() (raw-webhooks.jsonl).
-RAW_WEBHOOK_PHASES = frozenset({"intake", "webhook"})
+#   "intake"  = raw HTTP receipt (accepted, queued)
+#   "webhook" = post-normalization outcome (dequeued + processed)
+#   "dropped" = terminal: accepted-to-WAL but never queued (e.g. queue full → 503),
+#               so replay must NOT resurrect it.
+RAW_WEBHOOK_PHASES = frozenset({"intake", "webhook", "dropped"})
 
 
 def _next_sealed_ledger_index(path: Path) -> int:
@@ -2117,8 +2121,10 @@ def _effective_execution_config() -> dict:
     (_reconciliation_executor) BOTH resolve through this, so the backend used to
     submit an order can never diverge from the backend used to reconcile it. The
     active CCXT venue + type come from the strategy instrument block at submit time
-    (resolve_execution_config), so nothing else is needed here."""
-    return {"execution": {"exchange": EXEC_BACKEND}}
+    (resolve_execution_config). Reconciliation has no instrument block, so seed the
+    default venue from EXECUTION_DEFAULTS -- otherwise the adapter would see only the
+    "ccxt" backend selector and have no real venue to query."""
+    return {"execution": {"exchange": EXEC_BACKEND, "ccxt_exchange": EXECUTION_DEFAULTS["ccxt_exchange"]}}
 
 
 def _reconciliation_executor():
@@ -3199,7 +3205,7 @@ def replay_intake_webhooks(now_seconds=None) -> "tuple[int, int, int]":
     processed = {
         r.get("received_at")
         for r in rows
-        if isinstance(r, dict) and r.get("phase") == "webhook" and r.get("received_at")
+        if isinstance(r, dict) and r.get("phase") in ("webhook", "dropped") and r.get("received_at")
     }
     intake_rows = [
         r for r in rows
@@ -3397,6 +3403,10 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send(400, {"ok": False, "error": "invalid_json", "detail": str(exc)})
             return
+        auth_ok, auth_status, auth_error = authenticate_webhook_request(self, raw_body)
+        if not auth_ok:
+            self._send(auth_status, {"ok": False, "error": auth_error})
+            return
         intake_received_at = now_iso()
         record_raw_webhook("intake", {"received_at": intake_received_at, "payload": payload, "path": parsed.path})
         work_item = _queue_work_item(payload, intake_received_at)
@@ -3404,6 +3414,11 @@ class Handler(BaseHTTPRequestHandler):
             PROCESS_QUEUE.put_nowait(work_item)
         except queue.Full:
             _burn_symbol_ticket(work_item[2], work_item[3])
+            # Terminal marker: the intake row was written but the signal never made it
+            # onto the queue (503 to the client). Without this, replay's processed set
+            # (built from "webhook" outcomes) would resurrect the dropped signal on the
+            # next restart.
+            record_raw_webhook("dropped", {"received_at": intake_received_at, "reason": "queue_full"})
             emit_operator_alert(
                 ALERT_QUEUE_SATURATION,
                 {

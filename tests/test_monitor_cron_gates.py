@@ -11,7 +11,6 @@ frozen (repo convention). No Hermes gateway is required.
 """
 
 import importlib.util
-import io
 import json
 import sys
 import urllib.error
@@ -19,7 +18,6 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO / "deploy" / "hermes-scripts"

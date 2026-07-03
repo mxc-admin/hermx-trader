@@ -119,6 +119,25 @@ def test_intake_with_webhook_pair_skipped(replay_env):
 
 
 # ---------------------------------------------------------------------------
+# 2b. intake + terminal "dropped" marker (queue-full 503 at intake) => skipped.
+#
+# M1 regression: a queue-full drop writes a "dropped" row (never a "webhook"
+# outcome). If replay's processed set only counts "webhook" rows, the dropped
+# signal is resurrected on the next restart. The "dropped" marker must suppress it.
+# ---------------------------------------------------------------------------
+
+def test_intake_with_dropped_marker_skipped(replay_env):
+    now = replay_env.now
+    payload = _eligible_payload(now)
+    intake = _intake_row(now, payload)
+    dropped = {"phase": "dropped", "received_at": intake["received_at"], "reason": "queue_full"}
+    _write_raw_webhooks(replay_env.raw, [intake, dropped])
+
+    assert wr.replay_intake_webhooks(now_seconds=now) == (0, 1, 0)
+    assert wr.PROCESS_QUEUE.qsize() == 0
+
+
+# ---------------------------------------------------------------------------
 # 3. lone fresh intake row, no dupe => replayed.
 # ---------------------------------------------------------------------------
 

@@ -155,7 +155,7 @@ def test_symbol_mapping_linear_and_inverse_swap():
 def test_execute_contract_sizing_and_close_flip_semantics(monkeypatch):
     ex = _executor()
     fake = _FakeClient()
-    monkeypatch.setattr(ex, "_client", lambda: fake)
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
 
     readiness = {
         "signal_side": "buy",
@@ -195,7 +195,7 @@ def test_execute_contract_sizing_and_close_flip_semantics(monkeypatch):
 def test_get_order_history_raw_shape(monkeypatch):
     ex = _executor()
     fake = _FakeClient()
-    monkeypatch.setattr(ex, "_client", lambda: fake)
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
 
     rows = ex.get_order_history_raw(["BTC-USDT-SWAP"], limit=10)
 
@@ -210,7 +210,7 @@ def test_get_order_history_raw_shape(monkeypatch):
 def test_health_snapshot_shape(monkeypatch):
     ex = _executor()
     fake = _FakeClient()
-    monkeypatch.setattr(ex, "_client", lambda: fake)
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
 
     snap = ex.health()
 
@@ -299,7 +299,7 @@ def test_to_hyperliquid_cloid_format_and_determinism():
 def test_hyperliquid_params_sets_cloid_and_drops_okx_fields(monkeypatch):
     ex = _hl_executor()
     fake = _FakeHLClient()
-    monkeypatch.setattr(ex, "_client", lambda: fake)
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
 
     out = ex.execute(_hl_open_readiness())
 
@@ -316,7 +316,7 @@ def test_hyperliquid_params_sets_cloid_and_drops_okx_fields(monkeypatch):
 def test_hyperliquid_market_order_passes_reference_price(monkeypatch):
     ex = _hl_executor()
     fake = _FakeHLClient()
-    monkeypatch.setattr(ex, "_client", lambda: fake)
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
 
     ex.execute(_hl_open_readiness())
 
@@ -327,7 +327,7 @@ def test_hyperliquid_market_order_passes_reference_price(monkeypatch):
 def test_okx_params_unchanged_regression_guard(monkeypatch):
     ex = _executor()
     fake = _FakeClient()
-    monkeypatch.setattr(ex, "_client", lambda: fake)
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
 
     # _FakeClient reports a short position, so an OPEN_LONG must be preceded by a
     # CLOSE_OPPOSITE_IF_ANY (same shape as the existing flip-semantics test) for
@@ -390,7 +390,7 @@ def test_operator_close_long_without_target_direction(monkeypatch):
     must NOT reject this as submit_failed/invalid_direction when close_only is set."""
     ex = _executor()
     fake = _FakeLongClient()
-    monkeypatch.setattr(ex, "_client", lambda: fake)
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
 
     # Shape matches build_operator_close_readiness output.
     readiness = {
@@ -547,7 +547,7 @@ def test_hyperliquid_get_order_direct_cloid_fetch_before_scan(monkeypatch):
             return []
 
     fake = _Client()
-    monkeypatch.setattr(ex, "_client", lambda: fake)
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
 
     out = ex.get_order("SOL-USDC-SWAP", cl_ord_id=hermx_id)
 
@@ -592,7 +592,7 @@ def test_hyperliquid_get_order_scan_matches_hashed_cloid(monkeypatch):
             ]
 
     fake = _Client()
-    monkeypatch.setattr(ex, "_client", lambda: fake)
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
 
     out = ex.get_order("SOL-USDC-SWAP", cl_ord_id=hermx_id)
 
@@ -606,7 +606,7 @@ def test_okx_get_order_scan_uses_raw_cl_ord_id(monkeypatch):
     # hash it. _FakeClient.fetch_closed_orders returns clientOrderId="cid-1".
     ex = _executor()
     fake = _FakeClient()
-    monkeypatch.setattr(ex, "_client", lambda: fake)
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
 
     out = ex.get_order("BTC-USDT-SWAP", cl_ord_id="cid-1")
 
@@ -617,7 +617,7 @@ def test_okx_get_order_scan_uses_raw_cl_ord_id(monkeypatch):
 def test_hyperliquid_close_leg_gets_cloid(monkeypatch):
     ex = _hl_executor()
     fake = _FakeHLLongClient()
-    monkeypatch.setattr(ex, "_client", lambda: fake)
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
 
     readiness = {
         "signal_side": "sell",
