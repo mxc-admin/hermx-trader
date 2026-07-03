@@ -122,7 +122,8 @@ REPLAY_MAX_TV_AGE_SECONDS = 120.0
 HERMX_SUBMIT_TIMEOUT_SECONDS = 45.0
 HERMX_WORKER_POOL_SIZE = 1
 HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS = 86400.0
-HERMX_WATCHDOG_ENABLED = (os.environ.get("HERMX_WATCHDOG_ENABLED") or "true").strip().lower() not in {"0", "false", "no", ""}
+# Liveness watchdog: STALE_SECONDS is the single knob. <= 0 disables the watchdog
+# entirely (merged the former HERMX_WATCHDOG_ENABLED bool into this per the flag audit).
 HERMX_WATCHDOG_STALE_SECONDS = float(os.environ.get("HERMX_WATCHDOG_STALE_SECONDS", "120") or "120")
 HERMX_QUEUE_LAG_SLO_SECONDS = 30.0
 HERMX_REQUEST_TIMEOUT_SECONDS = 30.0
@@ -218,8 +219,8 @@ ORDER_NON_TERMINAL_STATES = frozenset({ORDER_STATE_PLANNED, ORDER_STATE_SUBMITTE
 #                   reconcile_post_submit_enabled() (HERMX_RECONCILE_ENABLED, default
 #                   OFF => byte-identical to pre-Task-4 stdout-driven outcome, :223).
 #   3. PERIODIC     unknown_resolver_loop() -- a daemon thread polling every ~30s,
-#                   gated by unknown_resolver_enabled() (HERMX_UNKNOWN_RESOLVER_ENABLED,
-#                   default ON); re-reconciles still-open SUBMITTED/UNKNOWN orders.
+#                   gated by unknown_resolver_enabled() (UNKNOWN_RESOLVER_INTERVAL_SECONDS
+#                   > 0, default ON); re-reconciles still-open SUBMITTED/UNKNOWN orders.
 # "read-only" above means read-only against the EXCHANGE: all three may persist a
 # legal SUBMITTED/UNKNOWN -> terminal transition to the local order journal.
 #
@@ -615,7 +616,9 @@ def _queue_oldest_age_seconds() -> float:
 
 
 def liveness_watchdog_loop(stop_event: "threading.Event | None" = None, sleep=time.sleep) -> None:
-    if not HERMX_WATCHDOG_ENABLED:
+    # STALE_SECONDS <= 0 disables the watchdog. Short-circuit BEFORE the max(5.0, ...)
+    # floor below so 0 means "off", not "everything is instantly stale".
+    if HERMX_WATCHDOG_STALE_SECONDS <= 0:
         return
     interval = max(1.0, min(10.0, HERMX_WATCHDOG_STALE_SECONDS / 4.0))
     while True:
@@ -2222,11 +2225,12 @@ def reconcile_startup(executor=None) -> dict:
 def unknown_resolver_enabled() -> bool:
     """Observe-only gate for the PERIODIC background resolver (unknown_resolver_loop).
 
-    Defaults ON (``HERMX_UNKNOWN_RESOLVER_ENABLED`` unset => enabled); a falsey value
-    disables the daemon thread. Like the other two paths it only updates the order
-    journal / emits alerts and never submits, cancels, or auto-trades.
+    Defaults ON. INTERVAL_SECONDS is the single knob (merged the former
+    HERMX_UNKNOWN_RESOLVER_ENABLED bool per the flag audit): <= 0 disables the daemon
+    thread. Like the other two paths it only updates the order journal / emits alerts
+    and never submits, cancels, or auto-trades.
     """
-    return _reconcile_flag_enabled("HERMX_UNKNOWN_RESOLVER_ENABLED", default=True)
+    return UNKNOWN_RESOLVER_INTERVAL_SECONDS > 0
 
 
 def _order_age_seconds(order_record: dict, now_ts: "str | None" = None) -> "float | None":
@@ -2487,6 +2491,10 @@ def resolve_unknown_orders_once(executor=None, *, now_ts: "str | None" = None, m
 
 
 def unknown_resolver_loop(stop_event: "threading.Event | None" = None, sleep=time.sleep) -> None:
+    # INTERVAL_SECONDS <= 0 disables the resolver. Short-circuit BEFORE the max(1.0, ...)
+    # floor below so 0 means "off", not "poll every 1s".
+    if UNKNOWN_RESOLVER_INTERVAL_SECONDS <= 0:
+        return
     interval = max(1.0, UNKNOWN_RESOLVER_INTERVAL_SECONDS)
     while True:
         if stop_event is not None and stop_event.is_set():
@@ -3481,7 +3489,7 @@ def log_execution_arm_state() -> None:
         PROCESS_QUEUE.maxsize,
         max(1, HERMX_WORKER_POOL_SIZE),
         max(1.0, HERMX_SUBMIT_TIMEOUT_SECONDS),
-        HERMX_WATCHDOG_ENABLED,
+        HERMX_WATCHDOG_STALE_SECONDS > 0,
     )
 
 
@@ -3559,7 +3567,7 @@ def main():
         _WORKER_NAMES.append(worker_name)
         _set_worker_heartbeat(worker_name)
         threading.Thread(target=worker_loop, args=(worker_name,), daemon=True, name=worker_name).start()
-    if HERMX_WATCHDOG_ENABLED:
+    if HERMX_WATCHDOG_STALE_SECONDS > 0:
         threading.Thread(target=liveness_watchdog_loop, daemon=True, name="watchdog").start()
     server = ThreadingHTTPServer((HERMX_BIND_HOST, PORT), Handler)
     logging.info("MXC VPS shadow receiver listening on %s:%s", HERMX_BIND_HOST, PORT)

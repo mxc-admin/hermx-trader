@@ -291,10 +291,11 @@ def test_display_timezone_configurable(dash):
     _dash, core, _root = dash
     # Default UTC.
     assert core.display_time("2026-06-27T12:00:00Z") == "2026-06-27 12:00"
-    # Offset env shifts the rendered wall-clock.
-    os.environ["HERMX_DASH_TZ_OFFSET_HOURS"] = "-5"
+    # A numeric offset in HERMX_DASH_TZ shifts the rendered wall-clock (the former
+    # separate HERMX_DASH_TZ_OFFSET_HOURS flag was merged into HERMX_DASH_TZ).
+    os.environ["HERMX_DASH_TZ"] = "-5"
     assert core.display_time("2026-06-27T12:00:00Z") == "2026-06-27 07:00"
-    os.environ.pop("HERMX_DASH_TZ_OFFSET_HOURS", None)
+    os.environ.pop("HERMX_DASH_TZ", None)
 
 
 def test_freshness_stale_and_fresh(dash):

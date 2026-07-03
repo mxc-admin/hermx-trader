@@ -399,21 +399,29 @@ def test_post_submit_gate_defaults_off(wr, monkeypatch):
     assert wr.reconcile_post_submit_enabled() is False
 
 
-def test_unknown_resolver_gate_defaults_on(wr, monkeypatch):
-    monkeypatch.delenv("HERMX_UNKNOWN_RESOLVER_ENABLED", raising=False)
+def test_unknown_resolver_gate_defaults_on(wr):
+    # The resolver enable bool was merged into UNKNOWN_RESOLVER_INTERVAL_SECONDS
+    # (> 0 => on). Default interval is positive, so the gate defaults ON.
     assert wr.unknown_resolver_enabled() is True
+
+
+@pytest.mark.parametrize("interval,expected", [
+    (30.0, True), (1.0, True), (0.0, False), (-5.0, False),
+])
+def test_unknown_resolver_gate_follows_interval(wr, monkeypatch, interval, expected):
+    # INTERVAL_SECONDS <= 0 disables the resolver; any positive interval enables it.
+    monkeypatch.setattr(wr, "UNKNOWN_RESOLVER_INTERVAL_SECONDS", interval)
+    assert wr.unknown_resolver_enabled() is expected
 
 
 @pytest.mark.parametrize("value,expected", [
     ("1", True), ("true", True), ("yes", True), ("on", True), ("enabled", True),
     ("false", False), ("0", False), ("no", False), ("", False), ("  FALSE  ", False),
 ])
-def test_both_gates_share_identical_truthiness(wr, monkeypatch, value, expected):
-    # Both flags parse a SET value the same way -- only the unset default differs.
+def test_reconcile_gate_truthiness(wr, monkeypatch, value, expected):
+    # The POST-SUBMIT reconcile gate still parses HERMX_RECONCILE_ENABLED from env.
     monkeypatch.setenv("HERMX_RECONCILE_ENABLED", value)
-    monkeypatch.setenv("HERMX_UNKNOWN_RESOLVER_ENABLED", value)
     assert wr.reconcile_post_submit_enabled() is expected
-    assert wr.unknown_resolver_enabled() is expected
 
 
 # ---------------------------------------------------------------------------

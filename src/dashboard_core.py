@@ -137,9 +137,10 @@ def parse_dt(value):
 def display_tz():
     """Resolve the dashboard display timezone (configurable, default UTC — D6).
 
-    ``HERMX_DASH_TZ`` (IANA name, e.g. ``America/Bogota``) takes precedence; then
-    ``HERMX_DASH_TZ_OFFSET_HOURS`` (signed float). Anything unset/invalid → UTC.
-    Read on each call so the timezone is configurable without reimport.
+    ``HERMX_DASH_TZ`` accepts either an IANA name (e.g. ``America/Bogota``) OR a
+    signed numeric offset in hours (e.g. ``-5`` / ``+5.5``). Anything unset/invalid → UTC.
+    (The former separate ``HERMX_DASH_TZ_OFFSET_HOURS`` flag was merged in here per the
+    flag audit.) Read on each call so the timezone is configurable without reimport.
     """
     name = (os.environ.get("HERMX_DASH_TZ") or "").strip()
     if name:
@@ -149,10 +150,9 @@ def display_tz():
             return ZoneInfo(name)
         except Exception:
             pass
-    offset = (os.environ.get("HERMX_DASH_TZ_OFFSET_HOURS") or "").strip()
-    if offset:
+        # Fall back to interpreting the value as a signed numeric hour offset.
         try:
-            return timezone(timedelta(hours=float(offset)))
+            return timezone(timedelta(hours=float(name)))
         except Exception:
             pass
     return timezone.utc

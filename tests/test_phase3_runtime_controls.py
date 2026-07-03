@@ -68,7 +68,6 @@ def test_watchdog_pause_blocks_submission(monkeypatch):
 
 
 def test_watchdog_loop_enters_degraded_state(monkeypatch):
-    monkeypatch.setattr(wr, "HERMX_WATCHDOG_ENABLED", True)
     monkeypatch.setattr(wr, "HERMX_WATCHDOG_STALE_SECONDS", 1.0)
     monkeypatch.setattr(wr, "HERMX_QUEUE_LAG_SLO_SECONDS", 9999.0)
     monkeypatch.setattr(wr, "_WORKER_NAMES", ["shadow-policy-worker-1"])
@@ -90,7 +89,6 @@ def test_watchdog_loop_enters_degraded_state(monkeypatch):
 
 
 def test_watchdog_queue_lag_triggers_pause(monkeypatch):
-    monkeypatch.setattr(wr, "HERMX_WATCHDOG_ENABLED", True)
     monkeypatch.setattr(wr, "HERMX_WATCHDOG_STALE_SECONDS", 9999.0)
     monkeypatch.setattr(wr, "HERMX_QUEUE_LAG_SLO_SECONDS", 1.0)
     monkeypatch.setattr(wr, "_WORKER_NAMES", ["shadow-policy-worker-1"])
@@ -112,7 +110,6 @@ def test_watchdog_queue_lag_triggers_pause(monkeypatch):
 
 
 def test_watchdog_recovery_clears_pause(monkeypatch):
-    monkeypatch.setattr(wr, "HERMX_WATCHDOG_ENABLED", True)
     monkeypatch.setattr(wr, "HERMX_WATCHDOG_STALE_SECONDS", 9999.0)
     monkeypatch.setattr(wr, "HERMX_QUEUE_LAG_SLO_SECONDS", 9999.0)
     monkeypatch.setattr(wr, "_WORKER_NAMES", ["shadow-policy-worker-1"])
