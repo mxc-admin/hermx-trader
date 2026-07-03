@@ -399,6 +399,7 @@ def test_run_audit_sorted_by_severity(tmp_path):
 
 def test_broken_check_does_not_abort(tmp_path, monkeypatch):
     def boom(root, fast=False):
+        del root, fast  # unused; signature must match production check functions (run_audit calls fn(root, fast=fast))
         raise RuntimeError("kaboom")
     monkeypatch.setattr(audit, "CHECKS", [("secrets", boom), ("dangerous", audit.check_dangerous)])
     findings, statuses = audit.run_audit(tmp_path)

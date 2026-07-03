@@ -35,7 +35,7 @@ except Exception:
     ExecutorFactory = None
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ROOT = Path(os.environ.get("HERMX_ROOT") or os.environ.get("SHADOW_ROOT", REPO_ROOT))
+ROOT = Path(os.environ.get("HERMX_ROOT") or REPO_ROOT)
 LOGS = ROOT / "logs"
 PORT = int(os.environ.get("HERMX_DASHBOARD_PORT") or os.environ.get("CLEAN_DASHBOARD_PORT", "8098"))
 # Address the dashboard HTTP server binds to. Default 127.0.0.1 keeps
@@ -666,22 +666,6 @@ def load_events():
 
 def target_side(event):
     return "long" if str(event.get("side")).lower() == "buy" else "short"
-
-
-def position_pnl(pos, price, fee_rate):
-    if not pos or not price:
-        return {"gross": 0.0, "exit_fee": 0.0, "net": 0.0}
-    entry = float(pos["entry"])
-    notional = float(pos["notional"])
-    if pos["side"] == "long":
-        gross = notional * (float(price) / entry - 1.0)
-        exit_notional = notional * (float(price) / entry)
-    else:
-        gross = notional * (entry / float(price) - 1.0)
-        exit_notional = notional * (entry / float(price))
-    exit_fee = exit_notional * fee_rate
-    net = gross - float(pos.get("entry_fee") or 0.0) - exit_fee
-    return {"gross": gross, "exit_fee": exit_fee, "net": net}
 
 
 def mark_prices(config):
@@ -2064,7 +2048,6 @@ def render():
     model = dashboard_model()
     cfg = model["config"]
     okx_live = model.get("okx_live") or {}
-    okx_live_by_mode = model.get("okx_live_by_mode") or {}
     okx_executions = model.get("okx_executions") or []
     # Annotate each strategy with its effective UI mode (pause/demo/live) so the card
     # badge reflects overrides + the file's submit_orders, mirroring api_payload.

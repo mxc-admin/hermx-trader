@@ -74,8 +74,6 @@ from webhook.config import (  # noqa: E402  F401
     EXECUTION_DEFAULTS,
     resolve_default_type,
     _env_bool,
-    _env_float,
-    _env_str,
 )
 
 
@@ -130,7 +128,7 @@ HERMX_REQUEST_TIMEOUT_SECONDS = 30.0
 # Outbound operator-alert webhook timeout (URL itself stays env-facing at emit time
 # -- URL presence is the real feature toggle; the timeout is not operator-tuned).
 HERMX_ALERT_WEBHOOK_TIMEOUT_SECONDS = 2.0
-ROOT = Path(os.environ.get("HERMX_ROOT") or os.environ.get("SHADOW_ROOT", Path(__file__).resolve().parents[1]))
+ROOT = Path(os.environ.get("HERMX_ROOT") or Path(__file__).resolve().parents[1])
 LOG_DIR = ROOT / "logs"
 # Mutable per-process state snapshots live under DATA_DIR so they can be mapped
 # to a dedicated, persistent location (a named volume under Docker) independent
@@ -310,7 +308,7 @@ HERMX_ADVISOR_TIMEOUT_SECONDS = float(_ADVISOR_CFG.get("timeout_seconds") or 30.
 # advisor-decisions, strategy-alerts, and strategy-alert-quarantine were folded into
 # the unified PIPELINE_LEDGER (stages "advisor", "strategy_match", "quarantine").
 # Phase 6 / M2 (REFACTOR_PLAN.md): explicit alert-schema enforcement at intake.
-# The JSON schema lives in the source repo (NOT under SHADOW_ROOT, which tests
+# The JSON schema lives in the source repo (NOT under HERMX_ROOT, which tests
 # redirect to a temp dir), so resolve it relative to this file's repo root.
 ALERT_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "tradingview-alert.schema.json"
 # Observe-only counters for the alert-schema feature. Mutating a dict needs no
