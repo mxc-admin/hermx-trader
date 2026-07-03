@@ -226,7 +226,7 @@ def test_health_snapshot_shape(monkeypatch):
 # Hyperliquid-specific fixes
 # ---------------------------------------------------------------------------
 
-_CLOID_RE = re.compile(r"^0x[0-9a-f]{64}$")
+_CLOID_RE = re.compile(r"^0x[0-9a-f]{32}$")
 
 
 def _hl_executor() -> CcxtExecutor:
@@ -306,9 +306,11 @@ def test_hyperliquid_params_sets_cloid_and_drops_okx_fields(monkeypatch):
     assert out["ok"] is True
     assert len(fake.calls) == 1
     params = fake.calls[0]["params"]
-    assert _CLOID_RE.match(params.get("cloid") or "") is not None
+    # The cloid must be carried under ``clientOrderId`` -- the key ccxt actually reads
+    # for Hyperliquid. A ``cloid`` key would be silently dropped (order carries no id).
+    assert _CLOID_RE.match(params.get("clientOrderId") or "") is not None
+    assert "cloid" not in params
     assert "clOrdId" not in params
-    assert "clientOrderId" not in params
     assert "tdMode" not in params
     assert "reduceOnly" not in params
 
@@ -636,6 +638,7 @@ def test_hyperliquid_close_leg_gets_cloid(monkeypatch):
 
     assert len(fake.calls) == 1
     close_params = fake.calls[0]["params"]
-    assert _CLOID_RE.match(close_params.get("cloid") or "") is not None
+    assert _CLOID_RE.match(close_params.get("clientOrderId") or "") is not None
     assert close_params.get("reduceOnly") is True
     assert "clOrdId" not in close_params
+    assert "cloid" not in close_params
