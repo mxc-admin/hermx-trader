@@ -8,6 +8,7 @@ import executors.ccxt_adapter as ccxt_adapter
 from executors.ccxt_adapter import (
     CcxtExecutor,
     _inst_id_to_ccxt_symbol,
+    _order_fully_filled,
     _to_hyperliquid_cloid,
 )
 
@@ -641,4 +642,95 @@ def test_hyperliquid_close_leg_gets_cloid(monkeypatch):
     assert _CLOID_RE.match(close_params.get("clientOrderId") or "") is not None
     assert close_params.get("reduceOnly") is True
     assert "clOrdId" not in close_params
+
+
+# ---------------------------------------------------------------------------
+# Hyperliquid fill-at-submit (reconciliation on Hyperliquid can't confirm fills
+# in time, so a fully-filled create_order response is recorded FILLED directly)
+# ---------------------------------------------------------------------------
+
+
+def test_order_fully_filled_compares_against_requested_size():
+    # Fill completeness is judged against the size WE submitted, so a partial fill is
+    # never terminalized as complete even if the response self-reports no remainder.
+    assert _order_fully_filled({"filled": 0.10}, 0.19) is False  # partial
+    assert _order_fully_filled({"filled": 0.19}, 0.19) is True   # full
+    assert _order_fully_filled({"filled": 0.0}, 0.19) is False   # nothing filled
+    assert _order_fully_filled({"filled": 0.19}, None) is False  # no requested size -> ACK
+
+
+def _record_fill(client, symbol, order_type, side, amount, price, params, *, filled, status=None, info=None):
+    """Record the create_order call and return a fill response with the given filled
+    size. Shared by the fill-scenario fakes so the recorded shape lives in one place."""
+    client.calls.append({"symbol": symbol, "type": order_type, "side": side,
+                         "amount": amount, "price": price, "params": dict(params or {})})
+    resp = {
+        "id": f"ord-{len(client.calls)}",
+        "symbol": symbol,
+        "clientOrderId": params.get("clientOrderId"),
+        "status": status,
+        "average": 60000.0,
+        "filled": filled,
+        "amount": amount,
+    }
+    if info is not None:
+        resp["info"] = info
+    return resp
+
+
+class _FakeHLFillClient(_FakeHLClient):
+    """create_order echoes a caller-chosen filled size so a test can drive full vs partial."""
+
+    def __init__(self, filled: float):
+        super().__init__()
+        self._filled = filled
+
+    def create_order(self, symbol, order_type, side, amount, price, params):
+        return _record_fill(self, symbol, order_type, side, amount, price, params, filled=self._filled)
+
+
+class _FakeOKXFullFillClient(_FakeClient):
+    def create_order(self, symbol, order_type, side, amount, price, params):
+        return _record_fill(self, symbol, order_type, side, amount, price, params,
+                            filled=amount, status="closed", info={"clOrdId": params.get("clOrdId")})
+
+
+def test_hyperliquid_full_fill_recorded_as_filled(monkeypatch):
+    ex = _hl_executor()
+    monkeypatch.setattr(ex, "_client", lambda **_kw: _FakeHLFillClient(filled=0.0008333))  # $50/60000
+    out = ex.execute(_hl_open_readiness())
+    assert out["ok"] is True
+    assert out["fill_summary"]["status"] == "filled"
+
+
+def test_hyperliquid_partial_fill_stays_submitted(monkeypatch):
+    # Venue fills less than the requested ~0.0008; the order must stay an ACK for
+    # reconciliation, not be terminalized as filled.
+    ex = _hl_executor()
+    monkeypatch.setattr(ex, "_client", lambda **_kw: _FakeHLFillClient(filled=0.0004))
+    out = ex.execute(_hl_open_readiness())
+    assert out["ok"] is True
+    assert out["fill_summary"]["status"] == "submitted"
+
+
+def test_okx_full_fill_stays_submitted_not_filled(monkeypatch):
+    # The fill-at-submit shortcut is Hyperliquid-only: OKX must keep returning
+    # "submitted" on a complete fill so its submit->reconcile path is byte-identical.
+    ex = _executor()
+    monkeypatch.setattr(ex, "_client", lambda **_kw: _FakeOKXFullFillClient())
+    readiness = {
+        "signal_side": "buy",
+        "signal_price": 60000.0,
+        "inst_id": "BTC-USDT-SWAP",
+        "td_mode": "cross",
+        "execution_intent": {
+            "client_order_id": "cid-okx-fill",
+            "target_direction": "long",
+            "planned_notional_usd": 1500.0,
+            "actions": ["CLOSE_OPPOSITE_IF_ANY", "OPEN_LONG"],
+        },
+    }
+    out = ex.execute(readiness)
+    assert out["ok"] is True
+    assert out["fill_summary"]["status"] == "submitted"
     assert "cloid" not in close_params
