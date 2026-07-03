@@ -1,10 +1,10 @@
 # P&L & Dashboard Accounting — Master Plan
 
-> **Status:** proposal (plan only, no code). Author: accounting-correctness consolidation, 2026-07-03.
+> **Status:** in progress. **Phase 0 (demo/live account separation) is shipped** — `HERMX_LIVE_TRADING` kill-switch gating and mode-aware snapshot resolution are live in `dashboard.py`/`ccxt_adapter.py`. Phases 1–7 are plan-only. Author: accounting-correctness consolidation, 2026-07-03.
 > **Supersedes:** `PNL_ACCOUNTING_EXECUTION_PLAN.md` and `CCXT_VENUE_NEUTRALITY_VALIDATION.md` as the single source of truth. Those remain as source material; this document is authoritative where they disagree.
 > **Scope:** durable closed P&L, fee-correct net, accounting window, demo/live separation, venue-neutral normalization, React↔Python contract, dynamic budget, external-order attribution.
 
-This is the definitive reference for the P&L/dashboard accounting work. All findings are verified against code (`dashboard.py`, `ccxt_adapter.py`, `webhook_receiver.py`, `StrategyCard.tsx`) and the installed CCXT source (`4.5.61`).
+This is the definitive reference for the P&L/dashboard accounting work. All findings are verified against code (`dashboard.py`, `ccxt_adapter.py`, `webhook_receiver.py`, `StrategyCard.tsx`) and the installed CCXT source (`4.5.61`), and against the environment-flag catalog (see **Flag Dependencies**, end of Section 4).
 
 ---
 
@@ -24,13 +24,13 @@ This is the definitive reference for the P&L/dashboard accounting work. All find
 | **11** | **HIGH** | **`info.get("pnl")` is OKX-only.** CCXT `safe_order` has no `pnl` key (verified base `4403-4429`). Per-order realized P&L lives only in each venue's raw `info`: OKX `info.pnl`, **Hyperliquid `info.closedPnl`**, Binance `trade.info.realizedPnl`, Bybit `fetch_positions_history` closed-pnl. A bare `info.get("pnl")` returns **`None` → silent $0** on Hyperliquid. | Ledger records $0 realized P&L on every non-OKX close, no error, no log. | OKX-only deployment. | `ccxt_adapter.py:828-830`; CCXT `okx.py:3827`, `hyperliquid.py:3075` |
 | **15** | **HIGH** | **Hyperliquid `clOrdId` hashing breaks attribution.** Hyperliquid rejects arbitrary client order ids; the adapter hashes HermX `mxc…` into the venue's numeric `cloid`. `startswith("mxc")` attribution fails on the venue-returned order. | HermX closes on Hyperliquid are misclassified as external → excluded from strategy P&L. | OKX-only deployment. | `webhook_receiver.py:707-709`; CCXT `hyperliquid.py` cloid path |
 | **16** | **HIGH** | **Reduce-only gate is derivatives-only.** Coinbase/spot venues return `reduceOnly=None` (CCXT `coinbase.py:3204`), so a reconcile filter of "row is reduce-only" drops **every** spot close. | On any spot venue, no closes are ever reconciled into the ledger. | Derivatives-only deployment. | CCXT `coinbase.py:3204` |
-| **17** | **HIGH** | **No `cl_ord_id`-based P&L attribution.** `enrich_close_rows_with_okx_history` matches by `instId` + `side` + `reduceOnly` + time-delta. An external/manual order coincident in time can be bound to a HermX close. | Manual trades can be miscredited to a strategy, corrupting its P&L. | Don't trade manually on the same symbol. | `enrich_close_rows_with_okx_history`, `dashboard.py:871` |
+| **17** | **HIGH** | **No `cl_ord_id`-based P&L attribution.** `enrich_close_rows_with_okx_history` matches by `instId` + `side` + `reduceOnly` + time-delta. An external/manual order coincident in time can be bound to a HermX close. | Manual trades can be miscredited to a strategy, corrupting its P&L. | Don't trade manually on the same symbol. | `enrich_close_rows_with_okx_history`, `dashboard.py:913` |
 | **6** | **MEDIUM** | **No accounting start / clean window.** No `accounting_start_at` anywhere. Old exchange history contaminates new dashboard state. | Numbers include pre-HermX or pre-reset history with no way to zero a strategy. | None. | (absent) |
 | **9** | **MEDIUM** | **`pipeline.jsonl` bounded to 500 events.** `SIGNALS_MAX_N = 500`. Not a lifetime ledger. | Cannot be used as the durable P&L source; silently truncates. | None. | `SIGNALS_MAX_N` |
 | **12** | **MEDIUM** | **`info.get("reduceOnly")` is OKX-only.** CCXT unifies `reduceOnly` at top-level (`safe_order:4422`), but `ccxt_adapter.py:831` still reads `info.get("reduceOnly")`. Works on OKX only because OKX's raw key coincidentally matches (and is a string `'true'`/`'false'`). | Reduce-only detection is fragile/venue-coincidental; downstream truthiness must handle the `"false"` string. | OKX-only deployment. | `ccxt_adapter.py:831`; CCXT base `4422` |
-| **13** | **MEDIUM** | **Position `realizedPnl` not unified, and not surfaced.** Only OKX (`okx.py:5969`) and Bybit (`bybit.py:6493`) set it in `parse_position`; Binance/Hyperliquid don't. `get_positions()`/`health()` never read `row.get("realizedPnl")` (`ccxt_adapter.py:852-876` maps only `unrealizedPnl → upl`). | The Phase-2 empirical fee check is not executable today without an adapter change, and is OKX/Bybit-only. | None. | `ccxt_adapter.py:852-876` |
+| **13** | **MEDIUM** | **Position `realizedPnl` unified only on OKX/Bybit; adapter surfaces only the *raw* OKX value.** Only OKX (`okx.py:5969`) and Bybit (`bybit.py:6493`) set `realizedPnl` in `parse_position`; Binance/Hyperliquid don't. `health()` **does** now surface it, but from the raw OKX blob — `realizedPnl: info.get("realizedPnl")` (`ccxt_adapter.py:925`) — which is OKX-only and not the CCXT-unified `row.get("realizedPnl")`. `get_positions()` still maps only `unrealizedPnl → upl` (`ccxt_adapter.py:872`). | The Phase-2 empirical fee check is executable today on OKX (raw `realizedPnl` is already surfaced) but venue-fragile; a portable check needs the unified read. Phase 1(c) is an **upgrade** (raw→unified + add to `get_positions()`), not net-new. | None. | `ccxt_adapter.py:872` (`get_positions`), `:925` (`health`) |
 | **14** | **MEDIUM** | **`fetch_positions_history` only OKX + Bybit.** Binance/Hyperliquid/Coinbase do not implement it. Not a portable primitive. | Cannot build the ledger's realized-P&L path on it. | N/A (informs design). | CCXT `okx.py`, `bybit.py:8486` |
-| **19** | **MEDIUM** | **Writable-mount requirement.** Dashboard writes `control-state.json` and must have `hermx-state:/app/data` mounted rw even with `read_only: true` on root fs; otherwise writes fail silently. New `closed-trades.jsonl` inherits this. | Accounting-window resets and the ledger silently fail to persist if the mount is missing. | Ensure compose mounts `hermx-state`. | code-quality memory; `dashboard.py:2497-2518` |
+| **19** | **MEDIUM** | **Writable-mount + env-driven path requirement.** The ledger and `control-state.json` both resolve under `HERMX_DATA_DIR` (defaults to `HERMX_ROOT`, which itself falls back to `SHADOW_ROOT` then repo root). In production `HERMX_DATA_DIR=/app/data` on the `hermx-state:/app/data` rw mount, which must be writable even with `read_only: true` on root fs; otherwise writes fail silently. New `closed-trades.jsonl` inherits both the path resolution and the mount requirement. | Accounting-window resets and the ledger silently fail to persist if the mount is missing or `HERMX_DATA_DIR` points off the rw mount. | Ensure compose mounts `hermx-state`; leave `HERMX_DATA_DIR` at its `/app/data` default. | code-quality memory; `dashboard.py:56` (`HERMX_DATA_DIR`), `webhook_receiver.py:133,139`, `dashboard.py:2497-2518` |
 | **7** | **LOW** | **`reinvest` flag is dead.** Present in `capital.reinvest: true` and `types.ts:25`, never read in business logic. | Operators may believe reinvestment is on; it does nothing. | None. | `strategies/*.json`, `types.ts:25` |
 | **18** | **LOW** | **`budget_usd` lives in strategy config JSON.** `capital.budget_usd` in `strategies/*.json` mixes accounting state into strategy definition. | Strategy config is polluted with mutable accounting state; hard to reset without editing strategy files. | Edit the strategy JSON. | `strategies/*.json` |
 
@@ -59,6 +59,7 @@ Invariants any fix must preserve. The first six were established in review; the 
 7. **Attribution before matching.** HermX ownership is established by `clOrdId` prefix (`mxc` / `operator_close_`) *before* any time/heuristic match, and the `ordId` is the durable dedupe key. Prefix matching is OKX-shaped and must be reversed/mapped on venues that rewrite client ids (Hyperliquid `cloid`). (Drives #15, #17.)
 8. **Accounting state is not strategy config.** Budget and accounting window are accounting state, stored in the state store (`control-state.json` / ledger), not baked into `strategies/*.json`. (Drives #6, #18.)
 9. **Persistence requires a writable mount.** Any new state file lives under `HERMX_DATA_DIR` on the `hermx-state:/app/data` rw mount, even under `read_only: true`. Verify the compose file before deploy. (Drives #19.)
+10. **Ledger path is env-driven; rotation constants are module-level, not env-facing — and the P&L ledger never prunes.** `closed-trades.jsonl` resolves from `HERMX_DATA_DIR` (→ `HERMX_ROOT` → repo root), never a hard-coded path — identical resolution to `control-state.json` and the receiver `DATA_DIR`, so all processes agree. Size-rotation constants (`HERMX_LEDGER_ROTATE_MAX_BYTES` = 64 MB, `HERMX_LEDGER_ROTATE_RETENTION` = 5) are module-level in `webhook_receiver.py` and govern the **WAL** ledgers (`raw-webhooks.jsonl`), which are prune-safe because they are only replayed for *recent* recovery. The P&L ledger is a **lifetime** book (the whole point of #10): it must **not** reuse `_rotate_ledger_if_large`'s pruning path — sealing is acceptable, but no segment holding a recorded close may ever be deleted. (Drives #10, #19; guards the WAL/ledger rotation distinction.)
 
 ---
 
@@ -68,25 +69,28 @@ Revised and re-numbered from the source plan to fold in demo/live separation (no
 
 **Foundations that span phases:**
 - **Attribution key.** Signal closes: `clOrdId = "mxc" + sha256(...)` (`webhook_receiver.py:707-709`). Operator closes: `operator_close_<symbol>_<strategy_id>_<UTCday>` (`webhook_receiver.py:2571-2577`). Anything else = external/manual. `ordId` = durable dedupe key.
-- **New state file.** `HERMX_DATA_DIR / "closed-trades.jsonl"` on the rw mount (Principle 9).
+- **New state file.** `HERMX_DATA_DIR / "closed-trades.jsonl"` — same env resolution as `control-state.json` (`HERMX_DATA_DIR` → `HERMX_ROOT` → repo root), on the rw mount (Principles 9, 10). Lifetime ledger: never pruned by the WAL rotation path.
+- **Mandatory `mode` column.** Every ledger row carries `mode` (`demo` | `live`), decided at write time from the strategy's effective mode (Phase 0). This is **required**, not optional (resolves Open Decision 7 in favor of a single file + column). Demo and live rows never mix; aggregation filters on `mode` (Principle 2).
 - **Venue-neutral read.** Reduce-only via `order.get("reduceOnly")` with `info.reduceOnly` fallback; realized P&L via an adapter-normalized `realized_pnl` field, never a raw path.
 
 ---
 
-### PHASE 0 — Demo/live account separation (NEW prerequisite)
+### PHASE 0 — Demo/live account separation (SHIPPED)
 
 **Goal.** Make the dashboard read the account that matches each strategy's mode, and namespace all P&L state by mode so live and demo never mix. Without this, every later phase records numbers from the wrong account.
 
+**Status.** Shipped. The mode-aware snapshot resolution and the `HERMX_LIVE_TRADING` gate are live: `okx_live_snapshot()` fail-closes to demo unless the global `HERMX_LIVE_TRADING` kill switch is armed (`dashboard.py:729-734`), and the live snapshot is requested only when at least one strategy is effectively live (`dashboard.py:1241-1251`). `ccxt_adapter.py` refuses live submission without `HERMX_LIVE_TRADING=true` (`:264-271`). Paths resolve via `HERMX_ROOT` (→ `SHADOW_ROOT` fallback) and `HERMX_DATA_DIR`.
+
 **Files changed.**
-- `src/dashboard.py` — `_dashboard_executor()` (`697-716`) resolves `simulated_trading` from the strategy's effective mode (via `strategy_overrides` / `control-state.json`) instead of defaulting to `True`. Snapshot path consults mode so live strategies read the live account.
-- `src/executors/ccxt_adapter.py` — ensure `simulated_trading` is honored end-to-end (sandbox flag set per resolved mode, not per adapter default).
+- `src/dashboard.py` — `_dashboard_executor()` (`697-716`) resolves `simulated_trading` from the strategy's effective mode (via `strategy_overrides` / `control-state.json`) instead of defaulting to `True`. Snapshot path consults mode so live strategies read the live account; the live read is additionally gated by the global `HERMX_LIVE_TRADING` kill switch (fail-closed to demo when disarmed).
+- `src/executors/ccxt_adapter.py` — `simulated_trading` honored end-to-end (sandbox flag per resolved mode); live submission blocked unless `HERMX_LIVE_TRADING=true`.
 - `src/webhook_receiver.py` *(control-state read helper only, if needed)* — expose the resolved mode to the dashboard path. **Requires explicit confirmation before touching (shared file).**
 
 **Tests.** `test_dashboard_executor_live_reads_live_account`; `test_dashboard_executor_demo_reads_sandbox`; `test_mode_toggle_switches_account_source`; `test_default_mode_is_demo_when_unset`.
 
 **Rollback safety.** Revert the resolution logic → adapter falls back to sandbox default (today's behavior). No stored data.
 
-**Known limitations.** Ledger mode-namespacing (`closed-trades.jsonl` keyed/segregated by mode, or a `mode` column) is defined here but consumed starting Phase 1. Single venue account assumed per mode.
+**Known limitations.** Ledger mode-namespacing is fixed as a **mandatory `mode` column** on a single `closed-trades.jsonl` (Foundations; Open Decision 7 resolved), decided at write time from the Phase-0 effective mode and consumed starting Phase 1. Single venue account assumed per mode.
 
 **Fixes:** #2, #3 (and unblocks correct data for all later phases).
 
@@ -97,9 +101,9 @@ Revised and re-numbered from the source plan to fold in demo/live separation (no
 **Goal.** Persist every confirmed HermX close to `closed-trades.jsonl` so closed P&L survives FLAT and the 100-row bound. Apply the venue-neutral adapter fixes the ledger depends on.
 
 **Files changed.**
-- `src/pnl_ledger.py` **(new).** `is_hermx_cl_ord_id()`; `read_closed_trades()` (reverse-tail, corrupt-line tolerant); `reconcile_from_order_history(history_rows, config)` (append normalized row per reduce-only, terminal, HermX-attributed row whose `ordId` is new; returns count); `append_closed_trades()` (atomic + fsync). Row schema v1 is snake_case with OKX-only raw fields under a `venue_meta` sub-dict; `mode` recorded per row.
-- `src/executors/ccxt_adapter.py` — **(a)** reduce-only via `order.get("reduceOnly")` + `info.reduceOnly` fallback, handling the OKX `"false"` string (fixes #12, line 831); **(b)** populate a normalized `realized_pnl` per venue in `get_order_history_raw`: OKX `info.pnl`, **Hyperliquid `info.closedPnl`**, Binance `trade.info.realizedPnl`, Bybit via `fetch_positions_history` closed-pnl (fixes #11, #14); **(c)** surface position `realizedPnl` from `row.get("realizedPnl")` in `get_positions()`/`health()` (fixes #13, unblocks Phase 2).
-- `src/dashboard.py` — in `exchange_order_history_snapshot()` (`774`), after the raw read succeeds, call `reconcile_from_order_history(...)` inside a `try/except` that never fails the snapshot.
+- `src/pnl_ledger.py` **(new).** Resolves its file as `Path(os.environ.get("HERMX_DATA_DIR", ROOT)) / "closed-trades.jsonl"` — the same expression `dashboard.py:56` uses for `control-state.json`, so receiver and dashboard agree. `is_hermx_cl_ord_id()`; `read_closed_trades()` (reverse-tail, corrupt-line tolerant); `reconcile_from_order_history(history_rows, config)` (append normalized row per reduce-only, terminal, HermX-attributed row whose `ordId` is new; returns count) — a **distinct** function from the receiver's `reconcile_post_submit_enabled()`/`HERMX_RECONCILE_ENABLED` submit-path reconcile, which it must not be confused with or gated by; `append_closed_trades()` (atomic + fsync, **append-only, no size-pruning** per Principle 10). Row schema v1 is snake_case with OKX-only raw fields under a `venue_meta` sub-dict; the mandatory `mode` column is recorded per row.
+- `src/executors/ccxt_adapter.py` — **(a)** reduce-only via `order.get("reduceOnly")` + `info.reduceOnly` fallback, handling the OKX `"false"` string (fixes #12, line 831); **(b)** populate a normalized `realized_pnl` per venue in `get_order_history_raw`: OKX `info.pnl`, **Hyperliquid `info.closedPnl`**, Binance `trade.info.realizedPnl`, Bybit via `fetch_positions_history` closed-pnl (fixes #11, #14); **(c)** upgrade position-`realizedPnl` surfacing from raw→unified: `health()` already emits the raw OKX value (`info.get("realizedPnl")`, `ccxt_adapter.py:925`), so this switches it to the CCXT-unified `row.get("realizedPnl")` and adds the same field to `get_positions()` (which today surfaces only `upl`) — an upgrade, not net-new (fixes #13, unblocks Phase 2).
+- `src/dashboard.py` — in `okx_order_history_snapshot()` (`816`), after the raw read succeeds, call `reconcile_from_order_history(...)` inside a `try/except` that never fails the snapshot.
 
 **Deletion.** Remove dead `position_pnl()` (`dashboard.py:671-684`) — zero callers, misleading second implementation (fixes #4's dead-code half).
 
@@ -143,7 +147,7 @@ Revised and re-numbered from the source plan to fold in demo/live separation (no
 - `src/pnl_ledger.py` — `aggregate_strategy_pnl(strategy_id, budget_usd, since_iso, cl_ord_id_to_strategy) -> dict` returning `{budget_usd, closed_realized_pnl_usd, closed_fees_usd, closed_net_pnl_usd, open_upl_usd, equity_now_usd, closed_order_count, accounting_start_at}`. Attribution resolves `mxc` via the cl_ord_id→strategy map (with **Hyperliquid cloid reverse-map / side-map**, fixing #15) and operator ids via embedded id.
 - `src/dashboard.py` — build `strategy_pnl` in API assembly, attach per strategy; provide the cl_ord_id→strategy map from the strategy set; flag `strategy_ambiguous` where a symbol is traded by >1 strategy.
 
-**Also.** Add a non-LLM Hermes cron safety net calling reconcile on a fixed cadence (captures closes even when the dashboard is idle). Per monitor-pivot memory; no `--provider/--model` pin needed (not an LLM job).
+**Also.** Add a non-LLM Hermes cron safety net calling the **ledger** `reconcile_from_order_history` on a fixed cadence (captures closes even when the dashboard is idle). This is the P&L-ledger reconcile — **not** the receiver's `HERMX_RECONCILE_ENABLED` submit-path reconcile — and is unaffected by that flag. Per monitor-pivot memory; no `--provider/--model` pin needed (not an LLM job).
 
 **Tests.** `test_aggregate_respects_accounting_start`; `test_equity_now_formula`; `test_closed_order_count_matches_rows`; `test_accounting_start_roundtrip` (writable-mount path); `test_strategy_pnl_absent_ledger` (zeros, not errors); `test_ambiguous_symbol_falls_back_to_inst_level`; `test_hyperliquid_close_attributes_to_strategy`.
 
@@ -179,7 +183,7 @@ Revised and re-numbered from the source plan to fold in demo/live separation (no
 **Goal.** A `portfolio` object with account/global equity independent of any strategy.
 
 **Files changed.**
-- `src/dashboard.py` — build `portfolio` from `exchange_live_snapshot()["account"]` (`763`) + ledger totals: `{account_equity_usd, total_budget_usd, total_closed_net_pnl_usd, total_open_upl_usd, hermx_equity_usd, unattributed_pnl_usd}`. Attach to `api_payload`.
+- `src/dashboard.py` — build `portfolio` from `okx_live_snapshot()["account"]` + ledger totals: `{account_equity_usd, total_budget_usd, total_closed_net_pnl_usd, total_open_upl_usd, hermx_equity_usd, unattributed_pnl_usd}`. Attach to `api_payload`.
 - `dashboard-ui/lib/types.ts` — `Portfolio` interface.
 - `dashboard-ui/app/page.tsx` — portfolio header card above the strategy grid.
 
@@ -217,7 +221,7 @@ Revised and re-numbered from the source plan to fold in demo/live separation (no
 **Goal.** Surface and exclude venue activity HermX did not originate.
 
 **Files changed.**
-- `src/pnl_ledger.py` — `classify_orders()` (hermx vs external by `is_hermx_cl_ord_id`); `external_pnl()` summing external reduce-only `pnl+fee`. Harden `enrich_close_rows_with_order_history` (`dashboard.py:871`) to **prefer clOrdId match** before the inst_id+side+reduceOnly+time-delta heuristic (completes #17).
+- `src/pnl_ledger.py` — `classify_orders()` (hermx vs external by `is_hermx_cl_ord_id`); `external_pnl()` summing external reduce-only `pnl+fee`. Harden `enrich_close_rows_with_okx_history` (`dashboard.py:913`) to **prefer clOrdId match** before the inst_id+side+reduceOnly+time-delta heuristic (completes #17).
 - `src/dashboard.py` — set `portfolio.unattributed_pnl_usd` from `external_pnl(...)`; add `external_activity` flag/count.
 - `dashboard-ui/app/page.tsx` — "manual/external activity" indicator when nonzero.
 
@@ -248,6 +252,27 @@ Revised and re-numbered from the source plan to fold in demo/live separation (no
 
 ---
 
+### Flag Dependencies
+
+Reconciled against the full environment-flag catalog. **The P&L work introduces no new env flags.** It depends only on flags/constants that already exist:
+
+| Mechanism | Kind | Default | Role in the P&L plan |
+|-----------|------|---------|----------------------|
+| `HERMX_DATA_DIR` | env-facing | `HERMX_ROOT` | Directory for `closed-trades.jsonl` and `control-state.json`. Same resolution across receiver + dashboard (`dashboard.py:56`, `webhook_receiver.py:139`). |
+| `HERMX_ROOT` | env-facing | `SHADOW_ROOT` → repo root | Base path; `HERMX_DATA_DIR` falls back to it. Replaces the legacy `SHADOW_ROOT`, which is still honored as a fallback — so no test-isolation regression (both vars work; the new canonical name is additive). |
+| `HERMX_LIVE_TRADING` | core, fail-closed | disarmed | Global kill switch. Gates the Phase-0 live-account read (`dashboard.py:729-734`) and live submission (`ccxt_adapter.py:264-271`). No live P&L is read when disarmed. |
+| `HERMX_CCXT_EXCHANGE` | core | `okx` | Default venue when a strategy instrument is empty (`ccxt_adapter.py:176`). Determines which venue's raw `realized_pnl` normalization applies. |
+| `HERMX_LEDGER_ROTATE_MAX_BYTES` / `_RETENTION` | module-level constant | 64 MB / 5 | Governs **WAL** ledger rotation, **not** the P&L ledger. Called out so the P&L ledger is deliberately excluded from pruning (Principle 10). Not env-facing. |
+| `SIGNALS_MAX_N`, `REPLAY_LOOKBACK_SECONDS` | module-level constant | 500, 300 s | Bound `pipeline.jsonl` (#9) and replay freshness. Confirm the P&L ledger is independent of both — it is a separate, unbounded file. |
+
+**Flags checked and confirmed *not* to affect the plan:**
+- `HERMX_RECONCILE_ENABLED` (default OFF) — gates the receiver's **post-submit** reconcile (`reconcile_post_submit_enabled`, `webhook_receiver.py:1899`). This is a different mechanism from the plan's `reconcile_from_order_history` ledger reconcile; the ledger path and the Phase-3 cron are neither gated by nor confused with it. Naming-collision hazard only — documented in Phase 1 and Phase 3.
+- `HERMX_ADVISOR_ENABLED` (default from advisor cfg) — gates the Hermes LLM advisor (`webhook_receiver.py:305`, `dashboard.py:49`). No P&L accounting impact.
+
+**Net effect on breakers:** none introduced. The only newly-surfaced hazard is a *design constraint*, not a code breaker — the P&L ledger must not inherit the WAL's size-pruning (Principle 10). The `HERMX_ROOT`/`SHADOW_ROOT` dual-read makes test isolation slightly **better**, not worse.
+
+---
+
 ## Section 5 — Open Decisions
 
 Pending operator input before the affected phase ships.
@@ -258,7 +283,7 @@ Pending operator input before the affected phase ships.
 4. **Hyperliquid cloid reverse-map (#15).** Confirm the adapter can recover HermX ownership from the numeric `cloid` (deterministic reverse of the hash, or a side/time map carried at submit). If not reversible, Hyperliquid attribution needs a submit-time local map file.
 5. **Budget migration (#18).** Fully move `budget_usd` out of `strategies/*.json` into accounting state, or leave it as the canonical seed and layer `effective_budget` on top? Full migration is a larger, riskier change touching the strategy loader.
 6. **History-window backfill (#8).** Accept the "reconcile-before-age-out" mitigation (render + cron), or build a one-time `get_order_history_archive` / venue `fills-history` backfill? Currently documented but not automated.
-7. **Ledger mode-namespacing shape.** Single `closed-trades.jsonl` with a `mode` column, or separate demo/live files? Affects Phase 0/1 schema.
+7. **Ledger mode-namespacing shape. — RESOLVED (required).** Single `closed-trades.jsonl` with a **mandatory `mode` column** (not separate demo/live files). Chosen because Phase 0 already resolves the effective mode at write time, one file keeps the reverse-tail reader and `ordId` dedupe simple, and aggregation filters on `mode`. No longer optional; the schema in Phase 1 must include `mode` on every row.
 
 ---
 
@@ -277,6 +302,8 @@ Pending operator input before the affected phase ships.
 | **Manual order miscredited to a strategy** (#17). | Medium | Medium | clOrdId-first attribution (Phase 3) before any time heuristic; `test_enrich_prefers_clordid_over_time_match`. |
 | **Multi-strategy-per-symbol misattribution** — ambiguous inst_id. | Medium | Medium | `strategy_ambiguous` flag surfaced (Phase 3); heuristic documented, not silently guessed. |
 | **Shared-file regression** — `webhook_receiver.py` edit breaks intake. | Low | High | Additive keys/functions only; no change to `strategy_overrides` semantics; explicit confirmation gate (Open Decision 1). |
+| **P&L ledger inherits WAL pruning** — a future edit wires `_rotate_ledger_if_large` (64 MB / retention 5) onto `closed-trades.jsonl`, silently deleting sealed segments that hold recorded closes → the exact lifetime-loss #10 exists to prevent. | Low | High | Principle 10: P&L ledger is append-only, never pruned; `append_closed_trades()` does not call the rotation helper. Distinct from the WAL, which is prune-safe. |
+| **`reconcile` naming collision** — a future edit gates the ledger reconcile on `HERMX_RECONCILE_ENABLED` (the receiver's unrelated post-submit flag, default OFF) → ledger silently stops recording. | Low | High | Flag Dependencies + Phase 1/3 note the two reconciles are distinct; the ledger path and cron are never gated by that flag. |
 
 ---
 
