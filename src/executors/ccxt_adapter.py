@@ -138,6 +138,24 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _order_fully_filled(order: dict, requested_amount: float | None) -> bool:
+    """True only when the create_order response proves the FULL submitted size filled:
+    the response's ``filled`` reaches the size WE submitted for this leg. Comparing
+    against the requested size (not the response's own ``remaining``/``amount``) means a
+    partial IOC fill -- which can self-report ``remaining == 0`` on an executed-derived
+    amount -- is never terminalized as complete. Conservative: any ambiguity (non-dict
+    order, no fill, or no requested size) returns False, leaving the order an ACK to be
+    reconciled rather than a falsely-claimed fill."""
+    if not isinstance(order, dict):
+        return False
+    filled = _to_float(order.get("filled"), 0.0)
+    req = _to_float(requested_amount, None)
+    if filled <= 0 or req is None or req <= 0:
+        return False
+    # Tiny tolerance for float/rounding; a genuine partial fill is far below this.
+    return filled >= req - 1e-9
+
+
 class CcxtExecutor(BaseExecutor):
     key = "ccxt"
 
@@ -553,6 +571,7 @@ class CcxtExecutor(BaseExecutor):
                             "submitted": True,
                             "status": "submitted",
                             "order": order,
+                            "requested_amount": close_amount,
                         })
                         current_side = "flat"
                         current_contracts = 0.0
@@ -618,6 +637,7 @@ class CcxtExecutor(BaseExecutor):
                             "submitted": True,
                             "status": "submitted",
                             "order": order,
+                            "requested_amount": open_amount,
                         })
                         current_side = target_side
                         current_contracts = open_amount
@@ -651,7 +671,21 @@ class CcxtExecutor(BaseExecutor):
             elif bad:
                 status = str(bad[0].get("status") or "rejected")
             elif submitted:
-                status = "submitted"
+                # Hyperliquid only: if every submitted leg came back FULLY filled, report
+                # "filled" so the service records FILLED directly. Reconciliation on
+                # Hyperliquid can't confirm the fill in time -- its reconcile executor
+                # defaults to a single venue and the order-status endpoint lags minutes
+                # after a market IOC fill -- so without this the order sits UNKNOWN until
+                # the resolver timeout and pauses the symbol. Gated to Hyperliquid so
+                # OKX's submit->reconcile path stays byte-identical.
+                if (
+                    exchange_id == "hyperliquid"
+                    and succeeded
+                    and all(_order_fully_filled(r.get("order"), r.get("requested_amount")) for r in succeeded)
+                ):
+                    status = "filled"
+                else:
+                    status = "submitted"
             else:
                 status = "dry_run"
 
