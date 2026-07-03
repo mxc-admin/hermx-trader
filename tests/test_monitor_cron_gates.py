@@ -289,6 +289,14 @@ def _health_router(dashboard=None, receiver=None):
     return router
 
 
+def _health_fps(conds):
+    return [c["fingerprint"] for c in conds]
+
+
+def _health_titles(conds):
+    return [c["title"] for c in conds]
+
+
 def test_health_all_ok_empty(monkeypatch):
     _install_urlopen(monkeypatch, _health_router())
     assert health.check(hermx_ops) == []
@@ -297,18 +305,27 @@ def test_health_all_ok_empty(monkeypatch):
 def test_health_dashboard_unreachable(monkeypatch):
     router = _health_router(dashboard={"ok": False})
     _install_urlopen(monkeypatch, router)
-    assert "dashboard: unreachable" in health.check(hermx_ops)
+    conds = health.check(hermx_ops)
+    assert "health:dashboard_unreachable" in _health_fps(conds)
+    (c,) = [c for c in conds if c["fingerprint"] == "health:dashboard_unreachable"]
+    assert c["severity"] == "critical" and c["title"] == "dashboard: unreachable"
 
 
 def test_health_receiver_down(monkeypatch):
     _install_urlopen(monkeypatch, _health_router(receiver={"ok": False}))
-    assert "receiver: down" in health.check(hermx_ops)
+    conds = health.check(hermx_ops)
+    assert "health:receiver_down" in _health_fps(conds)
+    (c,) = [c for c in conds if c["fingerprint"] == "health:receiver_down"]
+    assert c["severity"] == "critical" and c["title"] == "receiver: down"
 
 
 def test_health_kill_switch_engaged(monkeypatch):
     router = _health_router(dashboard={"ok": True, "arm": {"armed": True, "kill_switch_engaged": True}})
     _install_urlopen(monkeypatch, router)
-    assert "arm: kill-switch engaged" in health.check(hermx_ops)
+    conds = health.check(hermx_ops)
+    assert "health:kill_switch_engaged" in _health_fps(conds)
+    (c,) = [c for c in conds if c["fingerprint"] == "health:kill_switch_engaged"]
+    assert c["severity"] == "warning" and c["title"] == "arm: kill-switch engaged"
 
 
 def test_health_disarmed_only_when_required(monkeypatch):
@@ -316,21 +333,111 @@ def test_health_disarmed_only_when_required(monkeypatch):
     _install_urlopen(monkeypatch, router)
     assert health.check(hermx_ops) == []  # disarmed not a problem by default
     monkeypatch.setenv("HERMX_HEALTH_REQUIRE_ARMED", "true")
-    assert "arm: disarmed" in health.check(hermx_ops)
+    conds = health.check(hermx_ops)
+    assert "health:disarmed" in _health_fps(conds)
+    (c,) = [c for c in conds if c["fingerprint"] == "health:disarmed"]
+    assert c["severity"] == "warning" and c["title"] == "arm: disarmed"
 
 
-def test_health_main_healthy_empty_stdout(monkeypatch, capsys):
+def test_health_main_healthy_empty_stdout(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("HERMX_SCRIPTS_DIR", str(tmp_path))
     _install_urlopen(monkeypatch, _health_router())
     monkeypatch.setattr(health.g, "import_hermx_ops", lambda: hermx_ops)
     health.main()
     assert capsys.readouterr().out == ""
 
 
-def test_health_main_problem_prints_lines(monkeypatch, capsys):
+def test_health_main_problem_prints_lines(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("HERMX_SCRIPTS_DIR", str(tmp_path))
     _install_urlopen(monkeypatch, _health_router(receiver={"ok": False}))
     monkeypatch.setattr(health.g, "import_hermx_ops", lambda: hermx_ops)
     health.main()
     assert "receiver: down" in capsys.readouterr().out.splitlines()
+
+
+# --------------------------------------------------------------------------- #
+# Health watchdog: suppression window (no flood)                              #
+# --------------------------------------------------------------------------- #
+def test_health_kill_switch_suppressed_within_window(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMX_SCRIPTS_DIR", str(tmp_path))
+    _install_urlopen(monkeypatch, _health_router(
+        dashboard={"ok": True, "arm": {"armed": True, "kill_switch_engaged": True}}))
+
+    first = health.run(hermx_ops, NOW)
+    assert _health_fps(first) == ["health:kill_switch_engaged"]
+    assert "arm: kill-switch engaged" in capsys.readouterr().out.splitlines()
+
+    # Second tick inside the 900s window: silent (no flood).
+    assert health.run(hermx_ops, NOW + 100) == []
+    assert capsys.readouterr().out == ""
+
+    # After the window it re-fires (still-broken condition eventually re-pages).
+    third = health.run(hermx_ops, NOW + g.WINDOW["health"])
+    assert _health_fps(third) == ["health:kill_switch_engaged"]
+    assert "arm: kill-switch engaged" in capsys.readouterr().out.splitlines()
+
+
+def test_health_dashboard_unreachable_suppressed_within_window(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMX_SCRIPTS_DIR", str(tmp_path))
+    _install_urlopen(monkeypatch, _health_router(dashboard={"ok": False}))
+
+    assert _health_fps(health.run(hermx_ops, NOW)) == ["health:dashboard_unreachable"]
+    assert "dashboard: unreachable" in capsys.readouterr().out.splitlines()
+    assert health.run(hermx_ops, NOW + 100) == []
+    assert capsys.readouterr().out == ""
+
+
+def test_health_receiver_down_suppressed_within_window(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMX_SCRIPTS_DIR", str(tmp_path))
+    _install_urlopen(monkeypatch, _health_router(receiver={"ok": False}))
+
+    assert _health_fps(health.run(hermx_ops, NOW)) == ["health:receiver_down"]
+    assert "receiver: down" in capsys.readouterr().out.splitlines()
+    assert health.run(hermx_ops, NOW + 100) == []
+    assert capsys.readouterr().out == ""
+
+
+def test_health_disarmed_suppressed_within_window(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMX_SCRIPTS_DIR", str(tmp_path))
+    monkeypatch.setenv("HERMX_HEALTH_REQUIRE_ARMED", "true")
+    _install_urlopen(monkeypatch, _health_router(dashboard={"ok": True, "arm": {"armed": False}}))
+
+    assert _health_fps(health.run(hermx_ops, NOW)) == ["health:disarmed"]
+    assert "arm: disarmed" in capsys.readouterr().out.splitlines()
+    assert health.run(hermx_ops, NOW + 100) == []
+    assert capsys.readouterr().out == ""
+
+
+def test_health_multiple_problems_all_print_same_tick(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMX_SCRIPTS_DIR", str(tmp_path))
+    _install_urlopen(monkeypatch, _health_router(
+        dashboard={"ok": True, "arm": {"armed": True, "kill_switch_engaged": True}},
+        receiver={"ok": False}))
+
+    fresh = health.run(hermx_ops, NOW)
+    assert set(_health_fps(fresh)) == {"health:receiver_down", "health:kill_switch_engaged"}
+    out = capsys.readouterr().out.splitlines()
+    assert "receiver: down" in out and "arm: kill-switch engaged" in out
+
+
+def test_health_sidecar_persisted_on_wake(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMX_SCRIPTS_DIR", str(tmp_path))
+    _install_urlopen(monkeypatch, _health_router(receiver={"ok": False}))
+
+    health.run(hermx_ops, NOW)
+    sp = tmp_path / ".hermx-health.state"
+    assert sp.exists()
+    state = g.load_state(sp)
+    assert state["health:receiver_down"]["last_notified_epoch"] == NOW
+    assert state["health:receiver_down"]["last_severity"] == "critical"
+
+
+def test_health_no_sidecar_write_when_healthy(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMX_SCRIPTS_DIR", str(tmp_path))
+    _install_urlopen(monkeypatch, _health_router())
+
+    assert health.run(hermx_ops, NOW) == []
+    assert not (tmp_path / ".hermx-health.state").exists()
 
 
 # --------------------------------------------------------------------------- #

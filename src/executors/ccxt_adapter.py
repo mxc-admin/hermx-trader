@@ -42,10 +42,11 @@ def _decimal_floor(value: float | Decimal, step: float | Decimal) -> float:
 
 def _to_hyperliquid_cloid(client_order_id: str) -> str:
     """Map an arbitrary client order id to Hyperliquid's required cloid format:
-    a 32-byte (64 hex char) hex string prefixed with ``0x``. A raw UUID is
-    rejected, so hash to guarantee exactly 32 bytes regardless of input length."""
+    a 128-bit (16-byte / 32 hex char) hex string prefixed with ``0x``. A raw UUID is
+    the wrong shape, so hash and truncate to guarantee exactly 16 bytes regardless of
+    input length. (Hyperliquid's cloid is 128-bit; a 32-byte value is rejected.)"""
     stripped = str(client_order_id).replace("-", "")
-    return "0x" + hashlib.sha256(stripped.encode()).hexdigest()
+    return "0x" + hashlib.sha256(stripped.encode()).hexdigest()[:32]
 
 
 def _step_from_precision(precision_value) -> float | None:
@@ -359,8 +360,11 @@ class CcxtExecutor(BaseExecutor):
         is_hyperliquid = exchange_id == "hyperliquid"
         if client_order_id:
             if is_hyperliquid:
-                # Hyperliquid rejects OKX's clOrdId; it needs a 0x+hex cloid instead.
-                params["cloid"] = _to_hyperliquid_cloid(str(client_order_id))
+                # ccxt reads the client id from ``clientOrderId`` (not ``cloid``) and maps
+                # it to Hyperliquid's on-wire cloid; a raw id / OKX ``clOrdId`` is rejected.
+                # Passing ``cloid`` here is silently dropped, so the order would carry no
+                # client id and reconciliation-by-cloid could never match it.
+                params["clientOrderId"] = _to_hyperliquid_cloid(str(client_order_id))
             else:
                 params["clOrdId"] = str(client_order_id)
                 params["clientOrderId"] = str(client_order_id)
