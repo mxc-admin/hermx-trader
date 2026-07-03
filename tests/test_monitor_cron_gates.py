@@ -320,6 +320,29 @@ def test_health_receiver_down(monkeypatch):
 
 
 def test_health_kill_switch_engaged(monkeypatch):
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "true")
+    router = _health_router(dashboard={"ok": True, "arm": {"armed": True, "kill_switch_engaged": True}})
+    _install_urlopen(monkeypatch, router)
+    conds = health.check(hermx_ops)
+    assert "health:kill_switch_engaged" in _health_fps(conds)
+    (c,) = [c for c in conds if c["fingerprint"] == "health:kill_switch_engaged"]
+    assert c["severity"] == "warning" and c["title"] == "arm: kill-switch engaged"
+
+
+def test_health_kill_switch_ignored_when_not_live(monkeypatch):
+    # Demo/shadow host: HERMX_LIVE_TRADING unset. kill_switch_engaged=True is the
+    # normal fail-closed state, so it must NOT surface as a health problem.
+    monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
+    router = _health_router(dashboard={"ok": True, "arm": {"armed": True, "kill_switch_engaged": True}})
+    _install_urlopen(monkeypatch, router)
+    conds = health.check(hermx_ops)
+    assert "health:kill_switch_engaged" not in _health_fps(conds)
+    assert conds == []
+
+
+def test_health_kill_switch_alerted_when_live_expected(monkeypatch):
+    # Live host: HERMX_LIVE_TRADING truthy. A kill switch is a genuine problem.
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "true")
     router = _health_router(dashboard={"ok": True, "arm": {"armed": True, "kill_switch_engaged": True}})
     _install_urlopen(monkeypatch, router)
     conds = health.check(hermx_ops)
@@ -360,6 +383,7 @@ def test_health_main_problem_prints_lines(monkeypatch, capsys, tmp_path):
 # --------------------------------------------------------------------------- #
 def test_health_kill_switch_suppressed_within_window(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMX_SCRIPTS_DIR", str(tmp_path))
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "true")  # kill switch only a problem on live hosts
     _install_urlopen(monkeypatch, _health_router(
         dashboard={"ok": True, "arm": {"armed": True, "kill_switch_engaged": True}}))
 
@@ -410,6 +434,7 @@ def test_health_disarmed_suppressed_within_window(monkeypatch, tmp_path, capsys)
 
 def test_health_multiple_problems_all_print_same_tick(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMX_SCRIPTS_DIR", str(tmp_path))
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "true")  # kill switch only a problem on live hosts
     _install_urlopen(monkeypatch, _health_router(
         dashboard={"ok": True, "arm": {"armed": True, "kill_switch_engaged": True}},
         receiver={"ok": False}))

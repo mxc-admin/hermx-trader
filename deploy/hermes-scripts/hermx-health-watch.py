@@ -63,7 +63,10 @@ def check(ops):
     # Arm state (kill switch / optional disarmed) — only when the dashboard answered.
     if dashboard_ok:
         arm = health.get("arm") if isinstance(health.get("arm"), dict) else {}
-        if arm.get("kill_switch_engaged"):
+        # A kill switch is only a problem on hosts that expect live trading. On
+        # demo/shadow hosts ``kill_switch_engaged = not live_enabled`` is the normal,
+        # fail-closed state, so only alert when HERMX_LIVE_TRADING is truthy.
+        if arm.get("kill_switch_engaged") and _truthy("HERMX_LIVE_TRADING"):
             conds.append(_cond("health:kill_switch_engaged", "warning", "arm: kill-switch engaged"))
         if _truthy("HERMX_HEALTH_REQUIRE_ARMED") and not arm.get("armed"):
             conds.append(_cond("health:disarmed", "warning", "arm: disarmed"))
