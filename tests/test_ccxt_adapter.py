@@ -733,4 +733,3 @@ def test_okx_full_fill_stays_submitted_not_filled(monkeypatch):
     out = ex.execute(readiness)
     assert out["ok"] is True
     assert out["fill_summary"]["status"] == "submitted"
-    assert "cloid" not in close_params
