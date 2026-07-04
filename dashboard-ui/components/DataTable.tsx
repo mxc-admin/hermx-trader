@@ -8,6 +8,8 @@ interface Column<T> {
 interface DataTableProps<T> {
   columns: Column<T>[]
   rows: T[]
+  /** Accessible name for the table, exposed via aria-label. Required for a11y. */
+  label: string
   emptyMessage?: string
   maxHeight?: string
   className?: string
@@ -16,6 +18,7 @@ interface DataTableProps<T> {
 export function DataTable<T>({
   columns,
   rows,
+  label,
   emptyMessage = 'No data',
   maxHeight = '400px',
   className,
@@ -31,6 +34,7 @@ export function DataTable<T>({
       }}
     >
       <table
+        aria-label={label}
         style={{
           width: '100%',
           borderCollapse: 'collapse',
@@ -43,6 +47,7 @@ export function DataTable<T>({
             {columns.map((col) => (
               <th
                 key={col.key}
+                scope="col"
                 style={{
                   position: 'sticky',
                   top: 0,

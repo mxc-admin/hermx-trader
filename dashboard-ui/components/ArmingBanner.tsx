@@ -56,7 +56,7 @@ export function ArmingBanner() {
   }
 
   return (
-    <div style={style} role="status">
+    <div style={style} role="status" aria-live="polite">
       <Icon size={16} aria-hidden />
       <span>{message}</span>
     </div>

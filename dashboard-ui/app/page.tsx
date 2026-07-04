@@ -29,6 +29,7 @@ export default function Home() {
         )}
         {error && (
           <div className="rounded px-4 py-3 border font-mono text-sm"
+            role="status" aria-live="polite"
             style={{ background: 'rgba(232,93,108,0.08)', borderColor: 'var(--negative)', color: 'var(--negative)' }}>
             {error}
           </div>

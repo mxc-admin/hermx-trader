@@ -71,6 +71,7 @@ export function ReconcileAlerts() {
   return (
     <Section title="RECONCILE ALERTS" defaultOpen={false}>
       <DataTable<Row>
+        label="Reconcile alerts"
         columns={columns}
         rows={rows}
         emptyMessage="No reconcile alerts"

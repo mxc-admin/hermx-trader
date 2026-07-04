@@ -37,6 +37,8 @@ function ModePill({
 
   return (
     <div
+      role="group"
+      aria-label="Trading mode"
       style={{
         display: 'inline-flex',
         border: '1px solid var(--border-dim)',
@@ -54,6 +56,10 @@ function ModePill({
           <button
             key={m}
             title={isLocked ? 'Requires HERMX_LIVE_TRADING=true' : undefined}
+            aria-label={
+              isLocked ? 'Live mode — requires HERMX_LIVE_TRADING=true' : undefined
+            }
+            aria-pressed={isActive}
             disabled={isLocked || pending}
             onClick={() => !isLocked && onSelect(m)}
             style={{
@@ -72,7 +78,7 @@ function ModePill({
               transition: 'background 0.15s',
             }}
           >
-            {isLocked && <span style={{ fontSize: 12 }}>🔒</span>}
+            {isLocked && <span aria-hidden="true" style={{ fontSize: 12 }}>🔒</span>}
             {modeLabel[m]}
           </button>
         )
@@ -119,10 +125,9 @@ export function StrategyCard({ strategy, position, alertCount, liveEnabled, onMo
     [strategy.strategy_id, onModeChange],
   )
 
+  // Card shell uses the shared .panel class (background + border + radius).
+  // Only the dynamic left-border accent and layout metrics stay inline.
   const cardStyle: CSSProperties = {
-    background: 'var(--bg-panel)',
-    border: '1px solid var(--border-dim)',
-    borderRadius: 6,
     borderLeft: isLive ? `3px solid ${sideColor(side)}` : '1px solid var(--border-dim)',
     padding: 16,
     display: 'flex',
@@ -131,7 +136,7 @@ export function StrategyCard({ strategy, position, alertCount, liveEnabled, onMo
   }
 
   return (
-    <section style={cardStyle}>
+    <section className="panel" style={cardStyle}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>

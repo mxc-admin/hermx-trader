@@ -77,6 +77,7 @@ export function OperatorAlerts() {
   return (
     <Section title="OPERATOR ALERTS" defaultOpen={false}>
       <DataTable<Row>
+        label="Operator alerts"
         columns={columns}
         rows={rows}
         emptyMessage="No operator alerts"

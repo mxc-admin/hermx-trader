@@ -97,6 +97,7 @@ export function OpenOrdersTable() {
   return (
     <Section title="OPEN ORDERS" defaultOpen={false}>
       <DataTable<Row>
+        label="Open orders"
         columns={columns}
         rows={rows}
         emptyMessage="No open orders"

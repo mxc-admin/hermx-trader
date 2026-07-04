@@ -107,6 +107,7 @@ export function StrategyAlertLog() {
   return (
     <Section title="STRATEGY ALERTS" defaultOpen={true}>
       <DataTable<Row>
+        label="Strategy alerts"
         columns={columns}
         rows={rows}
         emptyMessage="No alerts received"

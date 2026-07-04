@@ -116,6 +116,7 @@ export function ExecutionLedger() {
   return (
     <Section title="EXECUTION LEDGER" defaultOpen={true}>
       <DataTable<Row>
+        label="Execution ledger"
         columns={columns}
         rows={rows}
         emptyMessage="No executions recorded"
