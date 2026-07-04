@@ -47,7 +47,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import yaml  # third-party (present via ccxt); used by the docker/compose check
+import yaml  # third-party (PyYAML, see requirements-security.txt); used by the docker/compose check
 
 # --------------------------------------------------------------------------- #
 # Severity + finding model

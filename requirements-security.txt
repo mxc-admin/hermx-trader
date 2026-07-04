@@ -1,12 +1,15 @@
-# Optional security-scanner extras for the HermX security audit.
+# Dependencies for the HermX security audit (one required, rest optional).
 #
 #   ./.venv/bin/pip install -r requirements-security.txt
 #
-# These are NOT runtime deps. scripts/security-audit.py runs on the standard
-# library alone and only *invokes* these tools when they are importable —
-# without them the corresponding checks report "skipped", never "fail". Install
-# them to upgrade the audit from heuristic-only to full SAST + CVE + entropy
-# secret scanning.
+# scripts/security-audit.py requires PyYAML (hard `import yaml` for the
+# docker/compose check); the scanner tools below are optional — the script only
+# *invokes* them when they are importable, and without them the corresponding
+# checks report "skipped", never "fail". Install them to upgrade the audit from
+# heuristic-only to full SAST + CVE + entropy secret scanning.
+
+# Required: docker-compose parsing in the audit script (`import yaml`).
+PyYAML>=6.0.0,<7
 
 # Python static security analysis (SAST). Enables the `static` check.
 bandit>=1.7.9,<2

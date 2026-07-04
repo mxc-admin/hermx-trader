@@ -70,7 +70,10 @@ def test_close_bypasses_kill_switch_when_live_trading_disabled(wr, monkeypatch):
     fake.execute.assert_called_once()
     assert out["ok"] is True
     assert out["mode"] == "submit_enabled"
-    assert out["_cl_ord_id"].startswith("operator_close_BTCUSDT_btcusdt_duo_base_dev_2h_")
+    # OKX-safe opaque id: opcls + truncated sha256 hex (alphanumeric, 32 chars).
+    assert out["_cl_ord_id"].startswith("opcls")
+    assert out["_cl_ord_id"].isalnum()
+    assert len(out["_cl_ord_id"]) <= 32
 
 
 # ---------------------------------------------------------------------------
@@ -202,3 +205,72 @@ def test_two_distinct_same_day_closes_both_submit(wr, monkeypatch):
     assert first["_cl_ord_id"] != second["_cl_ord_id"]
     # Both distinct closes reached the venue -- neither was dropped as a duplicate.
     assert fake.execute.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# 8. OKX-safe cl_ord_id format (opcls + sha256 hex) preserving exact idempotency.
+# ---------------------------------------------------------------------------
+
+def _freeze_clock(wr, monkeypatch, *whens):
+    """Monkeypatch wr.datetime so successive .now() calls return ``whens`` in order
+    (repeating the last one)."""
+    import datetime as _dt
+
+    seq = list(whens)
+
+    class _ClockDT(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return seq.pop(0) if len(seq) > 1 else seq[0]
+
+    monkeypatch.setattr(wr, "datetime", _ClockDT)
+
+
+def test_cl_ord_id_is_okx_safe_alphanumeric_max_32(wr):
+    """OKX clientOrderId spec: alphanumeric only, <=32 chars. The legacy readable id
+    (62 chars, 9 underscores) violated it and was passed raw to the venue."""
+    cl_ord_id = wr._operator_close_cl_ord_id("BTC_USDT", "btcusdt_duo_base_dev_2h")
+    assert cl_ord_id.startswith("opcls")
+    assert cl_ord_id.isalnum()
+    assert len(cl_ord_id) <= 32
+
+
+def test_cl_ord_id_same_second_same_inputs_identical(wr, monkeypatch):
+    """Idempotency domain unchanged: same symbol+strategy within the same UTC second
+    hashes to the IDENTICAL id, so a duplicate resubmit still trips the journal dedupe."""
+    import datetime as _dt
+
+    _freeze_clock(wr, monkeypatch, _dt.datetime(2026, 7, 4, 10, 0, 0, tzinfo=_dt.timezone.utc))
+    first = wr._operator_close_cl_ord_id("BTCUSDT", "strat_a")
+    second = wr._operator_close_cl_ord_id("BTCUSDT", "strat_a")
+    assert first == second
+
+
+def test_cl_ord_id_differs_across_symbol_strategy_and_second(wr, monkeypatch):
+    """No false collisions: a different symbol OR strategy at the same second, or the
+    same inputs one second later, each yield a distinct id."""
+    import datetime as _dt
+
+    t0 = _dt.datetime(2026, 7, 4, 10, 0, 0, tzinfo=_dt.timezone.utc)
+    _freeze_clock(wr, monkeypatch, t0)
+    base = wr._operator_close_cl_ord_id("BTCUSDT", "strat_a")
+    other_symbol = wr._operator_close_cl_ord_id("ETHUSDT", "strat_a")
+    other_strategy = wr._operator_close_cl_ord_id("BTCUSDT", "strat_b")
+    _freeze_clock(wr, monkeypatch, t0 + _dt.timedelta(seconds=1))
+    next_second = wr._operator_close_cl_ord_id("BTCUSDT", "strat_a")
+    assert len({base, other_symbol, other_strategy, next_second}) == 4
+
+
+def test_legacy_operator_close_ids_still_recognized_and_parsed(wr):
+    """Historical ledger rows keep working: legacy ``operator_close_...`` ids (and the
+    new ``opcls`` form) pass is_hermx_cl_ord_id, and the legacy parser still recovers
+    the sid from old ids while returning None for the new opaque hash."""
+    import pnl_ledger
+
+    legacy = "operator_close_BTC_USDT_my_strat_v2_20260703"
+    assert pnl_ledger.is_hermx_cl_ord_id(legacy) is True
+    assert pnl_ledger._parse_operator_close_strategy_id(legacy, "BTC-USDT") == "my_strat_v2"
+
+    new_id = wr._operator_close_cl_ord_id("BTCUSDT", "strat_a")
+    assert pnl_ledger.is_hermx_cl_ord_id(new_id) is True
+    assert pnl_ledger._parse_operator_close_strategy_id(new_id, "BTC-USDT") is None

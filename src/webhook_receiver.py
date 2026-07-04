@@ -1746,15 +1746,25 @@ def _execute_via_service(record: dict) -> dict:
 
 
 def _operator_close_cl_ord_id(symbol: str, strategy_id: str) -> str:
-    """Per-(symbol, strategy) close id at 1-second granularity. Idempotent within the
-    same UTC second: an accidental resubmit collides on the order-journal dedupe key
-    and is refused ``duplicate_cl_ord_id``, but two DISTINCT closes for the same
-    symbol/strategy later the same day no longer collide (a full-day id silently
-    dropped the second one). The trailing ``_{YYYYMMDD}_{HHMMSS}`` keeps the 8-digit
-    UTC-day token intact for the fallback attribution parser
-    (``pnl_ledger._parse_operator_close_strategy_id``)."""
+    """Per-(symbol, strategy) close id at 1-second granularity, OKX-safe.
+
+    ``opcls`` + truncated sha256 hex of ``{symbol}_{strategy_id}_{YYYYMMDD}_{HHMMSS}``
+    (same collision domain as the legacy readable id, same pattern as
+    ``signals.dedupe.stable_client_order_id``): alphanumeric-only and 32 chars, per
+    OKX's clientOrderId spec — the legacy underscore id was passed raw to the venue.
+    Idempotent within the same UTC second: an accidental resubmit hashes to the same
+    id, collides on the order-journal dedupe key and is refused
+    ``duplicate_cl_ord_id``; two DISTINCT closes for the same symbol/strategy later
+    the same day get different ids. The hash is not invertible, so attribution of
+    new closes relies entirely on the submit-time map (``pnl_strategy_map``, written
+    in ``ExecutionService.execute``); the legacy-id parser
+    (``pnl_ledger._parse_operator_close_strategy_id``) remains only for historical
+    ledger rows. Symbol/strategy/operator/reason stay human-readable in the
+    pipeline-event journal row (``journal_extra`` below)."""
     now = datetime.now(timezone.utc)
-    return f"operator_close_{symbol}_{strategy_id}_{now.strftime('%Y%m%d')}_{now.strftime('%H%M%S')}"
+    basis = f"{symbol}_{strategy_id}_{now.strftime('%Y%m%d')}_{now.strftime('%H%M%S')}"
+    digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()
+    return f"opcls{digest}"[:32]
 
 
 def build_operator_close_readiness(symbol: str, strategy: dict, cl_ord_id: str) -> dict:

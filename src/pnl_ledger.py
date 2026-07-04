@@ -166,7 +166,10 @@ def is_hermx_cl_ord_id(cl_ord_id: str | None, exchange_id: str | None = None) ->
     # OKX/Binance/Bybit: raw ``mxc`` prefix minted by the executor.
     if text.startswith("mxc"):
         return True
-    # Operator-initiated close.
+    # Operator-initiated close: ``opcls{sha256hex}`` (OKX-safe, current) or the
+    # legacy readable ``operator_close_...`` form still present in old ledger rows.
+    if text.startswith("opcls"):
+        return True
     if text.startswith("operator_close_"):
         return True
     # Hyperliquid rewrites the submitted clientOrderId into a numeric/hex cloid, so
@@ -198,7 +201,12 @@ def record_submit_strategy(
 def _parse_operator_close_strategy_id(
     cl_ord_id: str | None, inst_id: str | None = None
 ) -> str | None:
-    """Recover the strategy id from an ``operator_close_{symbol}_{sid}_{UTCday}`` id.
+    """Recover the strategy id from a LEGACY ``operator_close_{symbol}_{sid}_{UTCday}`` id.
+
+    Historical-rows-only fallback: current operator closes mint an opaque
+    ``opcls{sha256hex}`` id that encodes nothing recoverable — those return None
+    here and are attributed solely via the submit-time map (checked BEFORE this
+    parser by the caller).
 
     The UTC day is always exactly 8 digits (``YYYYMMDD``); everything between the
     ``operator_close_`` prefix and that trailing date is ``{symbol}_{sid}``. Both
@@ -571,10 +579,11 @@ def _build_entry(row: dict, exchange_id: str, mode: str, side: str, filled: floa
     # Strategy attribution (C1): exchange rows carry no strategy_id, so resolve it
     # from the submit-time cl_ord_id -> strategy_id map (written when both were
     # known). For Hyperliquid, cl_ord_id has already been resolved to the original
-    # mxc id above, so the map lookup is a direct hop. Operator-initiated closes
-    # encode the strategy in the cl_ord_id itself -> parse it as a fallback. When
-    # nothing resolves, strategy_id stays None (the row still persists; only its
-    # per-strategy attribution is best-effort).
+    # mxc id above, so the map lookup is a direct hop. LEGACY operator-initiated
+    # closes encoded the strategy in the cl_ord_id itself -> parse those as a
+    # fallback; current ``opcls`` hash ids carry nothing parseable and resolve via
+    # the map alone. When nothing resolves, strategy_id stays None (the row still
+    # persists; only its per-strategy attribution is best-effort).
     strategy_id = row.get("strategy_id")
     if strategy_id is None and cl_ord_id:
         from pnl_strategy_map import resolve_strategy as _resolve_strategy

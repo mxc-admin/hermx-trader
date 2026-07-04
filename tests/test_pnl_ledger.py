@@ -35,7 +35,13 @@ def test_is_hermx_cl_ord_id_mxc_prefix():
 
 
 def test_is_hermx_cl_ord_id_operator_close_prefix():
+    # Legacy readable form (historical ledger rows) stays recognized forever.
     assert pnl_ledger.is_hermx_cl_ord_id("operator_close_BTC-USDT-SWAP") is True
+
+
+def test_is_hermx_cl_ord_id_opcls_prefix():
+    # Current OKX-safe form: opcls + truncated sha256 hex.
+    assert pnl_ledger.is_hermx_cl_ord_id("opcls" + "a1b2c3d4e5f60718" * 2) is True
 
 
 def test_is_hermx_cl_ord_id_rejects_external():
