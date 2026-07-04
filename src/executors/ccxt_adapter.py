@@ -299,8 +299,8 @@ def check_balance_drift(executor, hermx_equity_usd: float, venue: str, mode: str
                 "drift_usd": drift,
                 "drift_pct": drift_pct,
             })
-        except Exception:  # an alert-transport failure must never break the check
-            pass
+        except Exception as e:  # an alert-transport failure must never break the check
+            logger.debug("drift-check alert transport failed: %s", e, exc_info=False)
     return {
         "venue_balance": venue_balance,
         "hermx_equity": equity,
@@ -527,8 +527,8 @@ class CcxtExecutor(BaseExecutor):
             try:
                 from pnl_cloid_map import record_cloid_mapping
                 record_cloid_mapping(str(client_order_id), str(returned_cloid), "hyperliquid")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("cloid map write failed: %s", e, exc_info=False)
 
     def _order_params(self, *, readiness: dict, reduce_only: bool, client_order_id: str | None, exchange_id: str) -> dict:
         params = {}

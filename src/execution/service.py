@@ -280,8 +280,8 @@ class ExecutionService:
                 for _leg in _legs:
                     if _leg:
                         _record_submit_strategy(_leg, _sid, _venue, _mode)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug("strategy map write failed: %s", e, exc_info=False)
 
         started = time.time()
         redact_secrets = self._h("redact_secrets")
