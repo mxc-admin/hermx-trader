@@ -75,6 +75,15 @@ from webhook.config import (  # noqa: E402  F401
     resolve_default_type,
     _env_bool,
 )
+# Phase 0: operator-alert emitters extracted to src/alerts.py. They read
+# root-bound constants (ALERTS_LEDGER, QUEUE_SATURATION_ALERT_DEPTH, ...) lazily
+# via `import webhook_receiver as _wr`, so those constants STAY defined here and
+# tests keep monkeypatching them on wr. Re-export the emitters for call sites.
+from alerts import (  # noqa: E402  F401
+    emit_operator_alert,
+    emit_auth_failure_alert,
+    maybe_emit_queue_saturation_alert,
+)
 
 
 def as_float(value):
@@ -2189,59 +2198,11 @@ def reconcile_order_with_backoff(
     return outcome
 
 
-def emit_operator_alert(kind: str, detail: "dict | None" = None, *, severity: str = "warning") -> dict:
-    """Concrete operator alert transport (Task 6): durable ledger + log + optional
-    webhook POST configured by HERMX_ALERT_WEBHOOK_URL."""
-    record = {
-        "ts": now_iso(),
-        "kind": "operator",
-        "alert": kind,
-        "severity": severity,
-        "detail": detail or {},
-    }
-    try:
-        append_jsonl(ALERTS_LEDGER, record)
-    except OSError as exc:
-        logging.error("failed to write operator alert %s: %s", kind, exc)
-
-    webhook_url = (os.environ.get("HERMX_ALERT_WEBHOOK_URL") or "").strip()
-    if webhook_url:
-        timeout_seconds = HERMX_ALERT_WEBHOOK_TIMEOUT_SECONDS
-        body = json.dumps(record, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        req = urllib_request.Request(
-            webhook_url,
-            data=body,
-            headers={"Content-Type": "application/json; charset=utf-8"},
-            method="POST",
-        )
-        try:
-            with urllib_request.urlopen(req, timeout=timeout_seconds):
-                pass
-        except Exception as exc:
-            logging.error("operator alert webhook failed kind=%s url=%s error=%s", kind, webhook_url, exc)
-
-    log_fn = logging.error if severity.lower() in {"error", "critical"} else logging.warning
-    log_fn("%s %s", kind, json.dumps(detail or {}, ensure_ascii=False))
-    return record
-
-
-def emit_auth_failure_alert(path: str, client_ip: "str | None") -> dict:
-    return emit_operator_alert(
-        ALERT_AUTH_FAILURE,
-        {"path": path, "client_ip": client_ip},
-        severity="error",
-    )
-
-
-def maybe_emit_queue_saturation_alert(queue_depth: int) -> bool:
-    if QUEUE_SATURATION_ALERT_DEPTH <= 0 or queue_depth < QUEUE_SATURATION_ALERT_DEPTH:
-        return False
-    emit_operator_alert(
-        ALERT_QUEUE_SATURATION,
-        {"queue_depth": queue_depth, "threshold": QUEUE_SATURATION_ALERT_DEPTH},
-        severity="error",
-    )
-    return True
+# emit_operator_alert / emit_auth_failure_alert / maybe_emit_queue_saturation_alert
+# were extracted to src/alerts.py (Phase 0) and are re-exported at the top of this
+# module. They read ALERTS_LEDGER / HERMX_ALERT_WEBHOOK_TIMEOUT_SECONDS /
+# ALERT_AUTH_FAILURE / ALERT_QUEUE_SATURATION / QUEUE_SATURATION_ALERT_DEPTH (still
+# defined here) lazily via `import webhook_receiver as _wr`.
 
 
 def emit_reconcile_alert(kind: str, detail: dict) -> dict:
