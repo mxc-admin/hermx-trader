@@ -84,16 +84,33 @@ from alerts import (  # noqa: E402  F401
     emit_auth_failure_alert,
     maybe_emit_queue_saturation_alert,
 )
-
-
-def as_float(value):
-    """Best-effort float coercion for generic intake parsing (None/'' -> None)."""
-    if value is None or value == "":
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+# Phase 1: signal dedupe + normalize/schema-validation extracted to
+# src/signals/{dedupe,normalize}.py. The root-bound / monkeypatchable module
+# state they read (_SIGNAL_DEDUPE_INDEX, _SIGNAL_DEDUPE_LOCK, SIGNALS_LEDGER,
+# HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS, STRATEGIES, STRATEGY_ENGINE,
+# ALERT_SCHEMA_PATH, _ALERT_SCHEMA_UNENFORCEABLE_ALERTED) STAYS defined here:
+# tests monkeypatch it on wr, and the per-test importlib.reload of this module
+# (tests/conftest.py `wr` fixture) must reset it -- state living in signals/
+# would survive the reload and leak across tests. The moved functions read it
+# lazily via `import webhook_receiver as _wr` (same pattern as src/alerts.py).
+# Re-export so wr.<fn> call sites and monkeypatch seams keep working.
+from signals.dedupe import (  # noqa: E402  F401
+    dedupe_key,
+    _signal_identity,
+    stable_client_order_id,
+    _dedupe_window_seconds,
+    _load_signal_dedupe_index,
+    check_and_mark_signal,
+)
+from signals.normalize import (  # noqa: E402  F401
+    as_float,
+    first,
+    normalize,
+    validate_strategy_alert,
+    _alert_schema_validator,
+    _alert_schema_enforcement_status,
+    validate_alert_schema,
+)
 
 PORT = int(os.environ.get("HERMX_RECEIVER_PORT") or os.environ.get("SHADOW_PORT", "8891"))
 # Address the HTTP server binds to. Default 127.0.0.1 keeps bare-host/systemd
@@ -717,122 +734,10 @@ def authenticate_webhook_request(handler: BaseHTTPRequestHandler, body: bytes) -
     )
 
 
-def dedupe_key(normalized: dict) -> str:
-    return "|".join(str(normalized.get(k, "")) for k in ("strategy_id", "symbol", "side", "timeframe", "tv_time"))
-
-
-def _signal_identity(normalized: dict) -> str:
-    return "|".join(
-        str(normalized.get(k, ""))
-        for k in ("strategy_id", "symbol", "side", "timeframe", "tv_time", "signal_id")
-    )
-
-
-def stable_client_order_id(identity: str, role: str = "base") -> str:
-    digest = hashlib.sha256(f"{identity}|{role}".encode("utf-8")).hexdigest()
-    return f"mxc{digest}"[:32]
-
-
-def _dedupe_window_seconds() -> float:
-    # BUSINESS idempotency window ONLY. Deliberately INDEPENDENT of the SECURITY replay
-    # window (HERMX_REPLAY_WINDOW_SECONDS), which is enforced separately in HMAC
-    # verification. Conflating them (the old max(..., replay)) let a long replay window
-    # silently widen idempotency retention -- two unrelated concerns. Neither widens the
-    # other now: freshness is the HMAC's job, idempotency is this ledger's job.
-    return max(1.0, HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS)
-
-
-def _load_signal_dedupe_index(now_seconds: float | None = None) -> None:
-    if _SIGNAL_DEDUPE_INDEX.get("loaded"):
-        return
-    now = time.time() if now_seconds is None else float(now_seconds)
-    cutoff = now - _dedupe_window_seconds()
-    signals: dict[str, dict] = {}
-    keys: dict[str, dict] = {}
-    for rec in read_jsonl_tolerant(SIGNALS_LEDGER):
-        if not isinstance(rec, dict):
-            continue
-        first_seen_at = str(rec.get("first_seen_at") or rec.get("ts") or "")
-        first_seen_epoch = rec.get("first_seen_epoch")
-        if not isinstance(first_seen_epoch, (int, float)):
-            first_seen_epoch = _epoch_from_iso(first_seen_at)
-        if first_seen_epoch is None or first_seen_epoch < cutoff:
-            continue
-        entry = {
-            "first_seen_at": first_seen_at,
-            "first_seen_epoch": float(first_seen_epoch),
-            "signal_id": str(rec.get("signal_id") or ""),
-            "dedupe_key": str(rec.get("dedupe_key") or ""),
-            "symbol": rec.get("symbol"),
-            "side": rec.get("side"),
-            "timeframe": rec.get("timeframe"),
-            "tv_time": rec.get("tv_time"),
-        }
-        if entry["signal_id"]:
-            signals[entry["signal_id"]] = entry
-        if entry["dedupe_key"]:
-            keys[entry["dedupe_key"]] = entry
-    _SIGNAL_DEDUPE_INDEX["signals"] = signals
-    _SIGNAL_DEDUPE_INDEX["keys"] = keys
-    _SIGNAL_DEDUPE_INDEX["loaded"] = True
-
-
-def check_and_mark_signal(normalized: dict, received_at: str) -> tuple[bool, dict]:
-    sid = str(normalized.get("signal_id") or "")
-    key = dedupe_key(normalized)
-    received_epoch = _epoch_from_iso(received_at) or time.time()
-    cutoff = received_epoch - _dedupe_window_seconds()
-    with _SIGNAL_DEDUPE_LOCK:
-        _load_signal_dedupe_index(now_seconds=received_epoch)
-        signals = _SIGNAL_DEDUPE_INDEX.setdefault("signals", {})
-        keys = _SIGNAL_DEDUPE_INDEX.setdefault("keys", {})
-        for bucket in (signals, keys):
-            stale_keys = [k for k, v in bucket.items() if float(v.get("first_seen_epoch") or 0.0) < cutoff]
-            for stale in stale_keys:
-                bucket.pop(stale, None)
-
-        existing = None
-        duplicate_by = None
-        if sid and sid in signals:
-            existing = signals[sid]
-            duplicate_by = "signal_id"
-        elif key in keys:
-            existing = keys[key]
-            duplicate_by = "symbol_side_timeframe_tv_time"
-
-        meta = {
-            "signal_id": sid,
-            "dedupe_key": key,
-            "duplicate_by": duplicate_by,
-            "first_seen_at": (existing or {}).get("first_seen_at"),
-            "window_seconds": _dedupe_window_seconds(),
-        }
-        if existing:
-            return True, meta
-
-        entry = {
-            "first_seen_at": received_at,
-            "first_seen_epoch": received_epoch,
-            "signal_id": sid,
-            "dedupe_key": key,
-            "symbol": normalized.get("symbol"),
-            "side": normalized.get("side"),
-            "timeframe": normalized.get("timeframe"),
-            "tv_time": normalized.get("tv_time"),
-        }
-        if sid:
-            signals[sid] = entry
-        keys[key] = entry
-        append_jsonl(
-            SIGNALS_LEDGER,
-            {
-                "ts": received_at,
-                "kind": "signal_dedupe",
-                **entry,
-            },
-        )
-        meta["first_seen_at"] = received_at
-        return False, meta
+# Signal dedupe / idempotency cluster (dedupe_key, _signal_identity,
+# stable_client_order_id, _dedupe_window_seconds, _load_signal_dedupe_index,
+# check_and_mark_signal) moved to src/signals/dedupe.py (Phase 1); re-exported
+# via the import shim at the top of this module.
 
 
 # --- Consolidated-ledger writers + size rotation ------------------------------
@@ -984,14 +889,6 @@ def startup_quarantine_partial_ledgers(paths: "list[Path] | tuple[Path, ...] | N
     return summary
 
 
-def first(payload: dict, *names: str, default=""):
-    for name in names:
-        value = payload.get(name)
-        if value is not None and str(value).strip() != "":
-            return value
-    return default
-
-
 def _has_time_field(payload: dict) -> bool:
     """Return True if the payload carries a TradingView bar time we can use
     for replay freshness and dedupe. Option A: we drop any intake row whose
@@ -1002,176 +899,18 @@ def _has_time_field(payload: dict) -> bool:
     )
 
 
-def normalize(payload: dict) -> dict:
-    strategy_id = str(first(payload, "strategy_id", "strategyId", default="")).strip()
-    strategy_name = str(first(payload, "strategy_name", "strategyName", default="")).strip()
-    indicator = str(first(payload, "indicator", "indicator_name", "indicatorName", default="")).strip()
-    symbol = str(first(payload, "symbol", "ticker", default="")).upper()
-    symbol = symbol.replace("OKX:", "").replace("/", "").replace("-", "")
-    # `action` is the primary intent field; `side` is derived for back-compat.
-    # Legacy alerts send only `side` (buy|sell); `action` adds `close`. When both
-    # are present the conflict gate in build_record catches opposing open sides.
-    raw_action = str(first(payload, "action", default="") or "").lower().strip()
-    raw_side = str(first(payload, "side", default="") or "").lower().strip()
-    _valid_open = {"buy", "sell"}
-    _valid_action = {"buy", "sell", "close"}
-    if raw_action in _valid_action:
-        action = raw_action
-    elif raw_side in _valid_open:
-        action = raw_side          # derive action from side for legacy alerts
-    else:
-        action = raw_action or raw_side   # preserve for error reporting
-    side = action if action in _valid_open else (raw_side if raw_side in _valid_open else "")
-    timeframe = canonical_timeframe(first(payload, "timeframe", "interval", default="30m"))
-    tv_time = str(first(payload, "tv_time", "time", "timestamp", "bar_time", "candle_time", default=now_iso()))
-    signal_id = str(first(payload, "signal_id", default=""))
-    if not signal_id:
-        # Hash on `action` (not `side`): buy/sell are unchanged (action==side), while
-        # a `close` bar gets a deterministic id instead of collapsing to an empty side.
-        raw = f"{strategy_id}|{symbol}|{action}|{timeframe}|{tv_time}"
-        signal_id = hashlib.sha256(raw.encode()).hexdigest()
-    normalized = {
-        "strategy_id": strategy_id,
-        "strategy_name": strategy_name,
-        "indicator": indicator,
-        "symbol": symbol,
-        "side": side,
-        "action": action,
-        "timeframe": timeframe,
-        "tv_signal_price": as_float(first(payload, "tv_signal_price", "tv_close", "signal_price", "price", "close", default=None)),
-        "chart_type": (lambda c: str(c).lower() if c else None)(first(payload, "chart_type", default=None)),
-        "okx_mark_price": as_float(first(payload, "okx_mark_price", "mark_price", default=None)),
-        "okx_last_price": as_float(first(payload, "okx_last_price", "last_price", default=None)),
-        "tv_time": tv_time,
-        "exchange": str(first(payload, "exchange", default="okx")).lower(),
-        "strategy": str(first(payload, "strategy", default="")),
-        "source": str(first(payload, "source", default="tradingview")),
-        "signal_id": signal_id,
-    }
-    # Optional observe-only debugging context. Only carried when it is a dict --
-    # never inject ``extras: None``, which would fail the schema's ``object`` type
-    # check (schema key ``extras`` is an object) and reject otherwise-valid alerts.
-    # A close carries no side; drop the empty value so it never trips the schema's
-    # side enum (buy|sell). `action` is the authoritative field for a close bar.
-    if not normalized.get("side"):
-        normalized.pop("side", None)
-    extras = payload.get("extras")
-    if isinstance(extras, dict):
-        normalized["extras"] = extras
-    return normalized
-
-
-def validate_strategy_alert(normalized: dict) -> tuple[bool, dict | None, str | None]:
-    strategy_id = str(normalized.get("strategy_id") or "").strip()
-    if not strategy_id:
-        if bool(STRATEGY_ENGINE.get("require_strategy_id", False)):
-            return False, None, "missing_strategy_id_required"
-        indicator = str(normalized.get("indicator") or "").lower()
-        strategy_name = str(normalized.get("strategy_name") or normalized.get("strategy") or "").lower()
-        if "duo-base" in indicator or "duo base" in indicator or "duo-base" in strategy_name or "duo base" in strategy_name:
-            return False, None, "missing_strategy_id"
-        return True, None, None
-    if not bool(STRATEGY_ENGINE.get("allow_strategy_alerts", True)):
-        return False, None, "strategy_alerts_disabled"
-    strategy = STRATEGIES.get(strategy_id)
-    if not strategy:
-        return False, None, "unknown_strategy_id"
-    if str(strategy.get("asset") or "").upper() != str(normalized.get("symbol") or "").upper():
-        return False, strategy, "strategy_symbol_mismatch"
-    if canonical_timeframe(strategy.get("timeframe")) != canonical_timeframe(normalized.get("timeframe")):
-        return False, strategy, "strategy_timeframe_mismatch"
-    # Every strategy file with a matching symbol+timeframe is active; the per-strategy
-    # execution_mode (demo/live) decides sandbox vs real venue, not whether it submits.
-    return True, strategy, None
-
-
-# --------------------------------------------------------------------------- #
-# Phase 6 / M2: explicit alert-schema validation at intake.                    #
-#                                                                              #
-# The schema is validated against the *normalized* alert (canonical snake_case #
-# keys, lowercased exchange/source, uppercased symbol) so a raw payload's      #
-# casing/aliasing (strategyId/ticker/action) never causes false rejections.    #
-# jsonschema is loaded lazily and cached; if it (or the schema file) is        #
-# unavailable we fail OPEN -- we never quarantine traffic we cannot evaluate.  #
-# Enforcement is gated by strategy_engine.enforce_alert_schema (default OFF).  #
-# --------------------------------------------------------------------------- #
-
-_ALERT_SCHEMA_VALIDATOR = None
-_ALERT_SCHEMA_LOAD_FAILED = False
-
-
-def _alert_schema_validator():
-    """Lazily build and cache the Draft 2020-12 validator for the alert schema.
-
-    Returns None (and disables enforcement) if jsonschema or the schema file is
-    unavailable -- import stays side-effect-free and enforcement fails open.
-    """
-    global _ALERT_SCHEMA_VALIDATOR, _ALERT_SCHEMA_LOAD_FAILED
-    if _ALERT_SCHEMA_VALIDATOR is not None:
-        return _ALERT_SCHEMA_VALIDATOR
-    if _ALERT_SCHEMA_LOAD_FAILED:
-        return None
-    try:
-        import jsonschema  # lazy: keep module import dependency-light
-
-        schema = json.loads(ALERT_SCHEMA_PATH.read_text(encoding="utf-8"))
-        _ALERT_SCHEMA_VALIDATOR = jsonschema.Draft202012Validator(schema)
-        return _ALERT_SCHEMA_VALIDATOR
-    except Exception as exc:  # fail open: cannot enforce what we cannot load
-        logging.warning("alert schema unavailable; schema enforcement disabled: %s", exc)
-        _ALERT_SCHEMA_LOAD_FAILED = True
-        return None
-
+# Normalize + strategy/schema validation cluster (as_float, first, normalize,
+# validate_strategy_alert, _alert_schema_validator, _alert_schema_enforcement_status,
+# validate_alert_schema and the _ALERT_SCHEMA_* validator cache) moved to
+# src/signals/normalize.py (Phase 1); re-exported via the import shim at the
+# top of this module. _has_time_field stays here (replay-owned).
 
 # Set once we have warned that enforcement is armed but unenforceable -- the alert is a
 # config-level condition, so a single operator alert per process suffices (no per-webhook
-# spam). Reset by tests via monkeypatch.
+# spam). Reset by tests via monkeypatch. Stays defined HERE (not signals/normalize.py)
+# so the per-test importlib.reload(wr) resets it; signals.normalize reads/writes it
+# lazily through _wr.
 _ALERT_SCHEMA_UNENFORCEABLE_ALERTED = False
-
-
-def _alert_schema_enforcement_status() -> tuple[bool, bool]:
-    """Return (armed, enforceable) for alert-schema enforcement.
-
-    ``armed``       = strategy_engine.enforce_alert_schema is true.
-    ``enforceable`` = an alert-schema validator is actually available.
-
-    Armed-but-not-enforceable is a fail-open-WHILE-ARMED safety hole: the operator
-    believes intake is guarded but validation silently passes everything. Emit a deduped
-    error-severity operator alert the first time we observe it."""
-    global _ALERT_SCHEMA_UNENFORCEABLE_ALERTED
-    armed = bool(STRATEGY_ENGINE.get("enforce_alert_schema", False))
-    enforceable = _alert_schema_validator() is not None
-    if armed and not enforceable and not _ALERT_SCHEMA_UNENFORCEABLE_ALERTED:
-        _ALERT_SCHEMA_UNENFORCEABLE_ALERTED = True
-        logging.error(
-            "enforce_alert_schema is ARMED but the alert-schema validator is UNAVAILABLE; "
-            "intake schema validation is failing OPEN."
-        )
-        emit_operator_alert(
-            "ALERT_SCHEMA_ENFORCEMENT_UNAVAILABLE",
-            {"detail": "enforce_alert_schema=true but the alert-schema validator is unavailable; "
-                       "alert validation is failing OPEN (every alert passes unchecked)."},
-            severity="error",
-        )
-    return armed, enforceable
-
-
-def validate_alert_schema(normalized: dict) -> tuple[bool, str | None]:
-    """Validate a normalized alert against the TradingView alert JSON schema.
-
-    Returns (True, None) when valid or when the schema/jsonschema is unavailable
-    (fail open). On failure returns (False, "<path>: <message>") for the first
-    error in deterministic path order.
-    """
-    validator = _alert_schema_validator()
-    if validator is None:
-        return True, None
-    errors = sorted(validator.iter_errors(normalized), key=lambda e: list(e.path))
-    if not errors:
-        return True, None
-    first = errors[0]
-    loc = "/".join(str(p) for p in first.path) or "(root)"
-    return False, f"{loc}: {first.message}"
 
 
 def default_control_state() -> dict:
