@@ -372,6 +372,27 @@ def test_startup_reconcile_open_orders(wr, monkeypatch):
     assert summary["position_mismatches"] == []
 
 
+def test_startup_reconcile_partial_fill_detail_carries_fill_facts(wr, monkeypatch):
+    # C2 part 1: the startup-reconcile terminal transition must persist the fill facts
+    # (acc_fill_sz / avg_px) in the journal detail, matching post-submit detail parity.
+    cl = "mxc-xrpusdt-buy-startuppartial1"
+    intent = {"symbol": "XRPUSDT", "side": "buy", "inst_id": "XRP-USDT-SWAP", "planned_notional_usd": 1500.0, "policy": "weighted_v1"}
+    wr.record_order_state(cl, wr.ORDER_STATE_PLANNED, intent=intent, prev_state=None)
+    wr.record_order_state(cl, wr.ORDER_STATE_SUBMITTED, intent=intent, prev_state=wr.ORDER_STATE_PLANNED)
+
+    # Canceled-after-partial-fill: terminal FILLED + partial=True with real fill facts.
+    stub = StubExecutor(order=norm_order("canceled", cl_ord_id=cl, acc=3.0, avg=0.42), positions=[])
+    summary = wr.reconcile_startup(executor=stub)
+
+    assert summary["open_orders"][0]["outcome"] == wr.ORDER_STATE_FILLED
+    assert summary["open_orders"][0]["wrote_transition"] is True
+    records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+    detail = records[-1]["detail"]
+    assert detail["startup_reconcile"] is True
+    assert detail["acc_fill_sz"] == 3.0
+    assert detail["avg_px"] == 0.42
+
+
 def test_startup_reconcile_clean_match_no_alert(wr, monkeypatch):
     # Flat exchange + no open orders => clean, no mismatch (:236).
     stub = StubExecutor(positions=[])

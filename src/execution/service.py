@@ -399,22 +399,30 @@ class ExecutionService:
         emit_reconcile_alert = self._h("emit_reconcile_alert")
         reconcile_alert_mismatch = self._h("reconcile_alert_mismatch")
 
-        # A1b -- silent under-execution alert. When EVERY order leg clamped to
-        # size 0 (sub-min notional), the strategy wanted a position but nothing was
-        # submitted. The service still records a clean terminal REJECTED (unchanged),
-        # but the zero_size is otherwise buried in the payload with no operator signal.
-        # Surface a WARNING + reconcile alert so the under-execution is noticed.
+        # A1b -- silent under-execution alert. When EVERY order leg skipped without
+        # submission -- clamped to size 0 (sub-min notional) or, in live mode, refused
+        # for insufficient free balance -- the strategy wanted a position but nothing
+        # was submitted. The service still records a clean terminal REJECTED
+        # (unchanged), but the skip is otherwise buried in the payload with no
+        # operator signal. Surface a WARNING + reconcile alert; the reason field
+        # distinguishes the two causes so the operator can tell them apart.
         executed_orders = ((adapter_result or {}).get("payload") or {}).get("executed_orders") or []
-        if mode == "submit_failed" and executed_orders and all(
-            (row or {}).get("reason") == "zero_size" for row in executed_orders
-        ):
+        skip_reasons = {(row or {}).get("reason") for row in executed_orders}
+        if mode == "submit_failed" and executed_orders and skip_reasons <= {
+            "zero_size", "below_instrument_min", "insufficient_balance"
+        }:
+            alert_reason = (
+                "insufficient_balance"
+                if "insufficient_balance" in skip_reasons
+                else "zero_size_below_min"
+            )
             logging.warning(
-                "under_execution zero_size cl_ord_id=%s symbol=%s legs=%d",
-                cl_ord_id, readiness.get("symbol"), len(executed_orders),
+                "under_execution %s cl_ord_id=%s symbol=%s legs=%d",
+                alert_reason, cl_ord_id, readiness.get("symbol"), len(executed_orders),
             )
             emit_reconcile_alert(
                 reconcile_alert_mismatch,
-                {"stage": "under_execution", "reason": "zero_size_below_min", "cl_ord_id": cl_ord_id},
+                {"stage": "under_execution", "reason": alert_reason, "cl_ord_id": cl_ord_id},
             )
 
         if reconcile_post_submit_enabled() and mode == "submit_partial":

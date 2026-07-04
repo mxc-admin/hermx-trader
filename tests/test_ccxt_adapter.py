@@ -956,3 +956,279 @@ def test_okx_full_fill_stays_submitted_not_filled(monkeypatch):
     out = ex.execute(readiness)
     assert out["ok"] is True
     assert out["fill_summary"]["status"] == "submitted"
+
+
+# ---------------------------------------------------------------------------
+# Item A: live-mode pre-trade balance check (open leg only, fail-open)
+# ---------------------------------------------------------------------------
+
+
+def _live_executor() -> CcxtExecutor:
+    cfg = {
+        "execution": {
+            "exchange": "ccxt",
+            "ccxt_exchange": "okx",
+            "simulated_trading": False,
+            "td_mode": "cross",
+        }
+    }
+    return CcxtExecutor(cfg, Path("."))
+
+
+class _FakeFlatClient(_FakeClient):
+    """Flat position so OPEN_LONG is the only expanded action."""
+
+    def __init__(self, free=None, balance_error=None):
+        super().__init__()
+        self._free = {} if free is None else dict(free)
+        self._balance_error = balance_error
+        self.balance_calls = 0
+
+    def fetch_positions(self, symbols=None):
+        return []
+
+    def fetch_balance(self):
+        self.balance_calls += 1
+        if self._balance_error is not None:
+            raise self._balance_error
+        if self._free is None:
+            return None
+        return {"total": dict(self._free), "free": dict(self._free)}
+
+
+class _FakeFlatNoneBalanceClient(_FakeFlatClient):
+    def fetch_balance(self):
+        self.balance_calls += 1
+        return None
+
+
+class _FakeBtcSettleFlatClient(_FakeFlatClient):
+    """Inverse-swap-style market settling in BTC, not USDT."""
+
+    def market(self, _symbol):
+        spec = dict(super().market(_symbol))
+        spec["settle"] = "BTC"
+        return spec
+
+
+def _open_long_readiness(planned_notional=1500.0, leverage=None) -> dict:
+    readiness = {
+        "signal_side": "buy",
+        "signal_price": 60000.0,
+        "inst_id": "BTC-USDT-SWAP",
+        "td_mode": "cross",
+        "execution_intent": {
+            "client_order_id": "cid-bal",
+            "target_direction": "long",
+            "planned_notional_usd": planned_notional,
+            "actions": ["CLOSE_OPPOSITE_IF_ANY", "OPEN_LONG"],
+        },
+    }
+    if leverage is not None:
+        readiness["leverage"] = leverage
+    return readiness
+
+
+def test_live_open_skipped_on_insufficient_free_balance(monkeypatch):
+    ex = _live_executor()
+    # leverage 2 -> required margin 1500/2 = 750 USDT; only 100 free.
+    fake = _FakeFlatClient(free={"USDT": 100.0})
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    out = ex.execute(_open_long_readiness(leverage=2))
+
+    assert fake.calls == []  # create_order never reached
+    legs = out["payload"]["executed_orders"]
+    assert legs == [
+        {
+            "action": "OPEN_LONG",
+            "submitted": False,
+            "status": "skipped",
+            "reason": "insufficient_balance",
+        }
+    ]
+    assert out["ok"] is False
+    assert out["mode"] == "submit_failed"
+
+
+def test_live_open_submits_when_leveraged_margin_covered(monkeypatch):
+    ex = _live_executor()
+    # 800 free >= 1500/2 = 750 required: leverage must divide the notional.
+    fake = _FakeFlatClient(free={"USDT": 800.0})
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    out = ex.execute(_open_long_readiness(leverage=2))
+
+    assert out["ok"] is True
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["side"] == "buy"
+
+
+def test_live_close_never_gated_by_zero_balance(monkeypatch):
+    # Never-block-a-close invariant: the reduce-only close leg must submit even
+    # with zero free balance in live mode.
+    ex = _live_executor()
+    fake = _FakeClient()  # reports a short position
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+    monkeypatch.setattr(fake, "fetch_balance", lambda: {"total": {"USDT": 0.0}, "free": {"USDT": 0.0}})
+
+    readiness = {
+        "close_only": True,
+        "inst_id": "BTC-USDT-SWAP",
+        "td_mode": "cross",
+        "execution_intent": {
+            "client_order_id": "cid-close-bal",
+            "actions": ["CLOSE_SHORT"],
+        },
+    }
+    out = ex.execute(readiness)
+
+    assert out["ok"] is True
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["params"].get("reduceOnly") is True
+
+
+def test_live_open_fail_open_on_balance_fetch_failure(monkeypatch):
+    # fetch raising -> submit proceeds
+    ex = _live_executor()
+    fake = _FakeFlatClient(balance_error=RuntimeError("venue down"))
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+    out = ex.execute(_open_long_readiness(leverage=2))
+    assert out["ok"] is True
+    assert len(fake.calls) == 1
+
+    # fetch returning None (no balance data) -> submit proceeds
+    ex2 = _live_executor()
+    fake2 = _FakeFlatNoneBalanceClient()
+    monkeypatch.setattr(ex2, "_client", lambda **_kw: fake2)
+    out2 = ex2.execute(_open_long_readiness(leverage=2))
+    assert out2["ok"] is True
+    assert len(fake2.calls) == 1
+
+
+def test_demo_mode_skips_balance_check_entirely(monkeypatch):
+    # simulated_trading=True: zero free balance AND the check must not even
+    # fetch the balance (demo sandbox balances are arbitrary).
+    ex = _executor()  # simulated_trading=True
+    fake = _FakeFlatClient(free={"USDT": 0.0})
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    out = ex.execute(_open_long_readiness(leverage=2))
+
+    assert out["ok"] is True
+    assert len(fake.calls) == 1
+    assert fake.balance_calls == 0
+
+
+def test_balance_check_uses_market_settle_currency_not_hardcoded_usdt(monkeypatch):
+    # Market settles in BTC: a huge USDT balance must NOT satisfy the check --
+    # the settle currency's free balance (tiny) is the one consulted.
+    ex = _live_executor()
+    fake = _FakeBtcSettleFlatClient(free={"USDT": 1_000_000_000.0, "BTC": 0.0001})
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    out = ex.execute(_open_long_readiness(leverage=2))
+
+    assert fake.calls == []
+    legs = out["payload"]["executed_orders"]
+    assert legs[0]["status"] == "skipped"
+    assert legs[0]["reason"] == "insufficient_balance"
+
+
+# ---------------------------------------------------------------------------
+# Item A 1.4 -- sub-minimum order disambiguation (below_instrument_min)
+# ---------------------------------------------------------------------------
+
+class _FakeMinLimitClient(_FakeFlatClient):
+    """Flat position; market with configurable amount/cost minimums."""
+
+    def __init__(self, min_amount=1, min_cost=None, precision_amount=1):
+        super().__init__(free={"USDT": 1_000_000.0})
+        self._limits = {"amount": {"min": min_amount}}
+        if min_cost is not None:
+            self._limits["cost"] = {"min": min_cost}
+        self._precision_amount = precision_amount
+
+    def market(self, _symbol):
+        spec = dict(super().market(_symbol))
+        spec["precision"] = {"amount": self._precision_amount}
+        spec["limits"] = self._limits
+        return spec
+
+
+def test_below_instrument_min_reason_distinct_from_zero_size(monkeypatch):
+    # contractSize 0.01 @ price 60000 -> 1 contract = $600 notional. A $300
+    # notional sizes to 0.5 contracts (step 0.1) -- nonzero, but below the
+    # venue's limits.amount.min of 1 -> the skip must say below_instrument_min,
+    # NOT the generic zero_size.
+    ex = _executor()  # simulated -> balance check skipped
+    fake = _FakeMinLimitClient(min_amount=1)
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    out = ex.execute(_open_long_readiness(planned_notional=300.0))
+
+    assert fake.calls == []
+    legs = out["payload"]["executed_orders"]
+    assert legs == [
+        {
+            "action": "OPEN_LONG",
+            "submitted": False,
+            "status": "skipped",
+            "reason": "below_instrument_min",
+        }
+    ]
+    assert out["ok"] is False
+    assert out["mode"] == "submit_failed"
+
+
+def test_min_cost_limit_floors_to_zero_with_reason(monkeypatch):
+    # $800 notional sizes to 1.3 contracts -- above limits.amount.min (0.1) --
+    # but the notional itself is below limits.cost.min ($1000), so the venue
+    # would reject it. Skip with below_instrument_min, not zero_size.
+    ex = _executor()
+    fake = _FakeMinLimitClient(min_amount=0.1, min_cost=1000.0)
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    out = ex.execute(_open_long_readiness(planned_notional=800.0))
+
+    assert fake.calls == []
+    legs = out["payload"]["executed_orders"]
+    assert legs == [
+        {
+            "action": "OPEN_LONG",
+            "submitted": False,
+            "status": "skipped",
+            "reason": "below_instrument_min",
+        }
+    ]
+    assert out["mode"] == "submit_failed"
+
+
+def test_zero_notional_and_no_price_keep_plain_zero_size(monkeypatch):
+    # Regression pin: a genuinely zero notional still skips with the plain
+    # zero_size reason -- 1.4 refines only the sub-minimum sub-case.
+    ex = _executor()
+    fake = _FakeMinLimitClient(min_amount=1)
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    out = ex.execute(_open_long_readiness(planned_notional=0.0))
+
+    assert fake.calls == []
+    legs = out["payload"]["executed_orders"]
+    assert legs == [
+        {
+            "action": "OPEN_LONG",
+            "submitted": False,
+            "status": "skipped",
+            "reason": "zero_size",
+        }
+    ]
+    assert out["mode"] == "submit_failed"
+
+    # No reference price -> also plain zero_size (helper-level pin).
+    spec = ex._market_spec(fake, "BTC/USDT:USDT")
+    amount, reason = ex._amount_from_readiness(
+        {"execution_intent": {"planned_notional_usd": 100.0}}, spec, None
+    )
+    assert amount == 0.0
+    assert reason == "zero_size"

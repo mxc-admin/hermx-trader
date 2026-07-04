@@ -45,25 +45,47 @@ def _strategy_config_for_readiness(readiness: "dict | None") -> dict:
     return _wr.STRATEGIES.get(sid) or {}
 
 
+def strategy_override(strategy_id: "str | None") -> dict:
+    """The live control-state.json override record for one strategy (written by
+    set_strategy_override / the dashboard mode pill); {} when none. Read per call
+    so an operator mode change applies without a restart."""
+    ov = (load_control_state().get("strategy_overrides") or {}).get(str(strategy_id or ""))
+    return ov if isinstance(ov, dict) else {}
+
+
+def effective_execution_mode(strategy: "dict | None", strategy_id: "str | None" = None,
+                             override: "dict | None" = None) -> str:
+    """The strategy's operative execution_mode ("demo"/"live"): the file value
+    (absent -> demo) unless the control-state override sets one. THE single
+    resolution point -- build_strategy_execution_readiness and the reconcile
+    enumerator active_venue_modes() (B1) both resolve through here so the signal
+    path and the drift-check domain cannot drift apart. ``override`` lets a
+    caller that already read the override record pass it in and skip a second
+    control-state read."""
+    mode = str((strategy or {}).get("execution_mode") or "demo").lower()
+    ov = override if override is not None else strategy_override(
+        strategy_id or (strategy or {}).get("strategy_id"))
+    if isinstance(ov, dict) and ov.get("execution_mode"):
+        mode = str(ov["execution_mode"]).lower()
+    return mode
+
+
 def build_strategy_execution_readiness(record: dict) -> dict:
     normalized = record.get("normalized") or {}
     strategy = record.get("strategy_config") or {}
+    # Runtime override from control-state.json (set_strategy_override / dashboard UI).
+    # Checked live per-signal so no restart is needed when the operator changes mode.
+    # An override carries BOTH execution_mode and submit_orders (see _STRATEGY_MODE_FLAGS).
+    _cs_ov = strategy_override(record.get("strategy_id") or (strategy or {}).get("strategy_id"))
     # execution_mode is operative: ``sandbox`` is True for demo and False ONLY for live.
     # The resolved ``simulated_trading`` (= sandbox) and the ``execution_mode`` flow into
     # readiness so the ExecutionService gate can require HERMX_LIVE_TRADING for live
     # submissions and the adapter sandboxes accordingly.
-    execution_mode = str((strategy or {}).get("execution_mode") or "demo").lower()
+    execution_mode = effective_execution_mode(strategy, override=_cs_ov)
     # submit_orders gates actual submission. Absent in the file -> default True (the
     # historical "submit" posture); Pause sets it False (validate+ledger, no order).
     submit_orders = bool((strategy or {}).get("submit_orders", True))
-    # Runtime override from control-state.json (set_strategy_override / dashboard UI).
-    # Checked live per-signal so no restart is needed when the operator changes mode.
-    # An override carries BOTH execution_mode and submit_orders (see _STRATEGY_MODE_FLAGS).
-    _cs_overrides = (load_control_state().get("strategy_overrides") or {})
-    _cs_ov = _cs_overrides.get(record.get("strategy_id") or (strategy or {}).get("strategy_id") or "")
-    if isinstance(_cs_ov, dict) and _cs_ov.get("execution_mode"):
-        execution_mode = str(_cs_ov["execution_mode"]).lower()
-    if isinstance(_cs_ov, dict) and "submit_orders" in _cs_ov:
+    if "submit_orders" in _cs_ov:
         submit_orders = bool(_cs_ov["submit_orders"])
     sandbox = (execution_mode != "live")  # demo -> True; live -> False
     # submit_orders is the submission gate: Pause -> False (no orders to either venue);

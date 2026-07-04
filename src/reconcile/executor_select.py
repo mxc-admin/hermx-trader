@@ -18,7 +18,35 @@ from __future__ import annotations
 
 import logging
 
+from strategy.readiness import effective_execution_mode
+from strategy.records import strategy_instrument
 from webhook.config import EXEC_BACKEND, EXECUTION_DEFAULTS
+
+
+def active_venue_modes() -> "set[tuple[str, bool]]":
+    """B1 enumerator (NAUTILUS_GAP_REMEDIATION_PLAN.md §0.6 item 4.2): every
+    (venue, simulated_trading) pair the LOADED strategy configs can trade on --
+    the "should be checked" domain for drift monitors, derived from strategy
+    files rather than open orders so an idle account is still covered.
+
+    Tuples use exactly _executor_for_order's cache-key shape: (lowercased venue
+    string, simulated bool) where demo -> True, live -> False. The venue comes
+    from strategy_instrument() (fail closed: a strategy without a resolvable
+    instrument block is skipped); the mode is the effective execution_mode
+    INCLUDING the live control-state override, resolved through
+    strategy.readiness.effective_execution_mode so this domain can never drift
+    from the signal path's own resolution. STRATEGIES is root-bound /
+    reload-reset module state, so it is read lazily via ``import
+    webhook_receiver as _wr`` (see module docstring)."""
+    import webhook_receiver as _wr
+    pairs: "set[tuple[str, bool]]" = set()
+    for sid, strategy in (getattr(_wr, "STRATEGIES", None) or {}).items():
+        venue = str((strategy_instrument(strategy) or {}).get("exchange") or "").strip().lower()
+        if not venue:
+            continue
+        mode = effective_execution_mode(strategy, sid)
+        pairs.add((venue, mode != "live"))
+    return pairs
 
 
 def _effective_execution_config(order_intent: "dict | None" = None) -> dict:

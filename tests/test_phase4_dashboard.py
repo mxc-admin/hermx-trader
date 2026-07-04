@@ -630,3 +630,62 @@ def test_dashboard_index_served_with_token_when_authed(tmp_path, monkeypatch):
         assert b'<meta name="hermx-token" content="dash-token">' in body
     finally:
         _stop(server, thread)
+
+
+# ---------------------------------------------------------------------------
+# C1 (NAUTILUS_GAP_REMEDIATION_PLAN §0.6 step 2) — enrich_close_rows_with_okx_history
+# must prefer the adapter-normalized `realized_pnl` over the raw OKX `pnl` key,
+# so Hyperliquid/Binance-style history rows (no raw `pnl`) enrich correctly.
+# ---------------------------------------------------------------------------
+
+def _c1_close_record():
+    return {
+        "okx_action": "CLOSE_LONG",
+        "inst_id": "BTC-USDT-SWAP",
+        "received_at": "2026-07-04T12:00:00.000000+00:00",
+    }
+
+
+def _c1_history_row(**pnl_fields):
+    # 2026-07-04T12:00:30Z — 30s after received_at, inside the 120s match window.
+    row = {
+        "instId": "BTC-USDT-SWAP",
+        "side": "sell",
+        "reduceOnly": True,
+        "uTime": str(int(datetime(2026, 7, 4, 12, 0, 30, tzinfo=timezone.utc).timestamp() * 1000)),
+        "avgPx": "100.0",
+        "accFillSz": "1",
+        "ordId": "ord-c1",
+        "state": "filled",
+    }
+    row.update(pnl_fields)
+    return row
+
+
+def test_enrich_close_rows_prefers_normalized_realized_pnl():
+    # HL-shaped: the adapter normalizes info["closedPnl"] into realized_pnl and
+    # the raw OKX `pnl` key is absent. Derive the value through the real
+    # normalizer rather than hand-injecting it.
+    from executors.ccxt_adapter import _normalized_realized_pnl
+
+    normalized = _normalized_realized_pnl({}, {"closedPnl": "12.5"}, "hyperliquid")
+    assert normalized == 12.5  # sanity: production normalizer produced the value
+
+    record = _c1_close_record()
+    hist = _c1_history_row(realized_pnl=normalized)
+    assert "pnl" not in hist
+
+    out = dashboard_mod.enrich_close_rows_with_okx_history([record], [hist])
+    assert out[0]["history_enriched"] is True
+    assert out[0]["realized_pnl"] == 12.5
+
+
+def test_enrich_close_rows_falls_back_to_raw_okx_pnl():
+    # OKX-shaped legacy row: raw `pnl` present, no normalized realized_pnl key.
+    record = _c1_close_record()
+    hist = _c1_history_row(pnl="-3.4")
+    assert "realized_pnl" not in hist
+
+    out = dashboard_mod.enrich_close_rows_with_okx_history([record], [hist])
+    assert out[0]["history_enriched"] is True
+    assert out[0]["realized_pnl"] == -3.4

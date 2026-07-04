@@ -465,6 +465,93 @@ def aggregate_strategy_pnl(
     }
 
 
+def _live_upl_usd(venue: str, mode: str) -> float | None:
+    """Best-effort account-level unrealized P&L for one (venue, mode), or None.
+
+    Builds the receiver's read-only reconciliation executor through the ``_wr``
+    seam (the same (venue, simulated_trading) intent resolution as the #20a
+    reconcile path) and sums ``upl`` across the account's positions. ANY
+    failure — no factory, venue error, missing seam — returns None so the
+    caller degrades to the closed-only estimate. Never raises.
+    """
+    try:
+        import webhook_receiver as _wr
+        executor = _wr._reconciliation_executor(
+            {"venue": venue, "simulated_trading": mode != "live"}
+        )
+        if executor is None:
+            return None
+        vals = [
+            _as_float(row.get("upl"))
+            for row in (executor.get_positions() or [])
+            if isinstance(row, dict)
+        ]
+        return sum(v for v in vals if v is not None)
+    except Exception as exc:
+        logger.warning("live UPL read failed for %s/%s: %s", venue, mode, exc)
+        return None
+
+
+def _account_equity_estimate(venue: str, mode: str) -> float | None:
+    """B1 equity assembler (NAUTILUS_GAP_REMEDIATION_PLAN.md §0.6 item 4.3):
+    HermX's synthetic account equity for one (venue, mode) pair — the
+    ``expected_equity`` input ``check_balance_drift`` compares the real venue
+    balance against.
+
+    Sums, over every loaded strategy belonging to the pair, the seed
+    ``budget_usd`` plus that strategy's closed-net realized P&L from this ledger
+    (full history, no accounting window — the venue balance reflects all
+    history, not the display window; external ``strategy_id=None`` closes are
+    likewise out of scope, matching per-strategy attribution). Live UPL is
+    best-effort on top: any unavailability degrades to the closed-only figure
+    with the omission logged — never raises, never blocks.
+
+    Strategy membership resolves EXACTLY like ``active_venue_modes()`` (the B1
+    enumerator): venue from ``strategy_instrument()["exchange"]`` (lowercased;
+    unresolvable -> skipped, fail closed) and mode through
+    ``strategy.readiness.effective_execution_mode`` (control-state override
+    included), collapsed to the same live-vs-not bool — so this figure and the
+    enumerated drift-check domain can never disagree. Returns None only when NO
+    loaded strategy matches the pair (nothing to estimate). Imports are lazy:
+    strategy.readiness imports this module, and STRATEGIES is root-bound /
+    reload-reset receiver state (read via ``import webhook_receiver as _wr``).
+    """
+    from strategy.readiness import effective_execution_mode
+    from strategy.records import strategy_budget_usd, strategy_instrument
+    import webhook_receiver as _wr
+
+    venue_key = str(venue or "").strip().lower()
+    live_wanted = str(mode or "").strip().lower() == "live"
+    matching: dict = {}
+    for sid, strategy in (getattr(_wr, "STRATEGIES", None) or {}).items():
+        s_venue = str((strategy_instrument(strategy) or {}).get("exchange") or "").strip().lower()
+        if not s_venue or s_venue != venue_key:
+            continue
+        if (effective_execution_mode(strategy, sid) == "live") != live_wanted:
+            continue
+        matching[str(sid)] = strategy
+    if not matching:
+        return None
+    ledger_mode = "live" if live_wanted else "demo"  # ledger mode column is demo|live
+    budgets = sum(strategy_budget_usd(s) for s in matching.values())
+    closed_net = sum(
+        (row.get("net_realized_pnl") or 0.0)
+        for row in read_closed_trades()
+        if row.get("strategy_id") in matching
+        and row.get("mode") == ledger_mode
+        and str(row.get("exchange") or "").strip().lower() == venue_key
+    )
+    equity = float(budgets) + float(closed_net)
+    upl = _live_upl_usd(venue_key, ledger_mode)
+    if upl is None:
+        logger.info(
+            "equity estimate %s/%s: live UPL unavailable; closed-only figure %.8g",
+            venue_key, ledger_mode, equity,
+        )
+        return equity
+    return equity + float(upl)
+
+
 def _load_existing_keys(path: Path) -> set:
     """Load the composite keys already persisted, for dedupe on append."""
     if not path.exists():

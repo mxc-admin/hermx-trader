@@ -447,12 +447,14 @@ class CcxtExecutor(BaseExecutor):
         contract_size = _to_float((market or {}).get("contractSize"), 1.0) or 1.0
         precision_step = _step_from_precision(((market or {}).get("precision") or {}).get("amount"))
         min_amount = _to_float((((market or {}).get("limits") or {}).get("amount") or {}).get("min"), 0.0) or 0.0
+        min_cost = _to_float((((market or {}).get("limits") or {}).get("cost") or {}).get("min"), 0.0) or 0.0
         step = precision_step or min_amount or 1.0
         return {
             "market": market,
             "contract_size": max(contract_size, 1e-12),
             "step": max(float(step), 1e-12),
             "min_amount": max(float(min_amount), 0.0),
+            "min_cost": max(float(min_cost), 0.0),
             "is_contract": bool((market or {}).get("contract")),
         }
 
@@ -615,33 +617,84 @@ class CcxtExecutor(BaseExecutor):
                 return val
         return None
 
-    def _contracts_for_notional(self, notional_usd: float, price: float, market_spec: dict) -> float:
+    def _contracts_for_notional(self, notional_usd: float, price: float, market_spec: dict) -> tuple[float, str]:
+        """Returns ``(qty, skip_reason)``. skip_reason is "" when qty > 0;
+        "below_instrument_min" when the size was zeroed by the venue's
+        limits.amount.min / limits.cost.min; plain "zero_size" otherwise
+        (no price, zero notional, step-floored with no venue minimum)."""
         contract_size = float(market_spec.get("contract_size") or 1.0)
         step = float(market_spec.get("step") or 1.0)
         min_amount = float(market_spec.get("min_amount") or 0.0)
+        min_cost = float(market_spec.get("min_cost") or 0.0)
         if price <= 0 or contract_size <= 0:
-            return 0.0
-        raw = float(notional_usd or 0.0) / (float(price) * contract_size)
+            return 0.0, "zero_size"
+        notional = float(notional_usd or 0.0)
+        if notional <= 0:
+            return 0.0, "zero_size"
+        if min_cost > 0 and notional < min_cost:
+            return 0.0, "below_instrument_min"
+        raw = notional / (float(price) * contract_size)
         qty = _decimal_floor(max(0.0, raw), step)
         if min_amount > 0 and qty < min_amount:
-            return 0.0
-        return qty
+            return 0.0, "below_instrument_min"
+        if qty <= 0:
+            return 0.0, "zero_size"
+        return qty, ""
 
-    def _amount_from_readiness(self, readiness: dict, market_spec: dict, reference_price: float | None) -> float:
+    def _amount_from_readiness(self, readiness: dict, market_spec: dict, reference_price: float | None) -> tuple[float, str]:
         explicit_amount = _to_float((readiness or {}).get("amount"), None)
         if explicit_amount is not None and explicit_amount > 0:
             step = float(market_spec.get("step") or 1.0)
             min_amount = float(market_spec.get("min_amount") or 0.0)
             qty = _decimal_floor(explicit_amount, step)
             if min_amount > 0 and qty < min_amount:
-                return 0.0
-            return qty
+                return 0.0, "below_instrument_min"
+            if qty <= 0:
+                return 0.0, "zero_size"
+            return qty, ""
 
         intent = (readiness or {}).get("execution_intent") or {}
         planned_notional = _to_float(intent.get("planned_notional_usd"), 0.0) or 0.0
         if planned_notional <= 0 or not reference_price or reference_price <= 0:
-            return 0.0
+            return 0.0, "zero_size"
         return self._contracts_for_notional(planned_notional, reference_price, market_spec)
+
+    def _sufficient_free_balance(self, client, market_spec, notional, leverage) -> bool:
+        """Item A pre-trade balance check: is the settle-currency free balance enough
+        to margin an open of ``notional`` at ``leverage``?
+
+        OPEN leg only — the reduce-only close branch is NEVER gated by this
+        (never-block-a-close invariant). Live mode only: demo/sandbox balances are
+        arbitrary, so the check is skipped entirely under ``simulated_trading``.
+        FAIL OPEN: a failed/absent/unparseable balance read must never block a
+        submit — the venue stays the authority on margin rejection.
+        """
+        if bool(self.execution_cfg.get("simulated_trading", True)):
+            return True
+        try:
+            lev = _to_float(leverage, None)
+            if lev is None or lev <= 0:
+                lev = 1.0
+            required = (_to_float(notional, 0.0) or 0.0) / lev
+            if required <= 0:
+                return True
+            settle = str(((market_spec or {}).get("market") or {}).get("settle") or "USDT")
+            bal = client.fetch_balance()
+            if not isinstance(bal, dict):
+                return True  # fail-open: venue returned no balance data
+            free = _to_float((bal.get("free") or {}).get(settle), None)
+            if free is None:
+                return True  # fail-open: settle currency absent from the response
+            if free < required:
+                logger.warning(
+                    "insufficient_balance: free %s %.8f < required margin %.8f (notional=%.2f leverage=%.2f)",
+                    settle, free, required, _to_float(notional, 0.0) or 0.0, lev,
+                )
+                return False
+            return True
+        except Exception as exc:
+            logger.warning("balance check failed (fail-open): %s", redact_secrets(str(exc)))
+            return True
 
     def _state_from_ccxt(self, order: dict) -> str:
         status = str((order or {}).get("status") or "").lower()
@@ -738,7 +791,7 @@ class CcxtExecutor(BaseExecutor):
 
             market_spec = self._market_spec(client, symbol)
             reference_price = self._reference_price(client, readiness)
-            open_amount = self._amount_from_readiness(readiness, market_spec, reference_price)
+            open_amount, open_skip_reason = self._amount_from_readiness(readiness, market_spec, reference_price)
             position = self._position_snapshot(client, symbol)
             current_side = str(position.get("side") or "flat")
             current_contracts = float(position.get("contracts") or 0.0)
@@ -848,7 +901,28 @@ class CcxtExecutor(BaseExecutor):
                             "action": action,
                             "submitted": False,
                             "status": "skipped",
-                            "reason": "zero_size",
+                            # below_instrument_min when the size was zeroed by the
+                            # venue's amount/cost minimum; plain zero_size otherwise.
+                            "reason": open_skip_reason or "zero_size",
+                        })
+                        continue
+
+                    # Item A: live-mode pre-trade balance check. OPEN leg only — the
+                    # close branch above is never gated (never-block-a-close). Fail-open
+                    # inside the helper; a positive "insufficient" reuses the standard
+                    # skipped-leg contract so all-legs-skip maps to submit_failed →
+                    # REJECTED, never an unmapped UNKNOWN mode.
+                    if not self._sufficient_free_balance(
+                        client,
+                        market_spec,
+                        _to_float(intent.get("planned_notional_usd"), 0.0) or 0.0,
+                        (readiness or {}).get("leverage"),
+                    ):
+                        executed_orders.append({
+                            "action": action,
+                            "submitted": False,
+                            "status": "skipped",
+                            "reason": "insufficient_balance",
                         })
                         continue
 

@@ -30,11 +30,13 @@ import pytest
 
 import pnl_ledger
 import webhook_receiver as wr_mod
+from control_state import set_strategy_override
 from executors.ccxt_adapter import (
     CcxtExecutor,
     check_balance_drift,
     detect_position_drift,
 )
+from reconcile.executor_select import active_venue_modes
 
 
 # ===========================================================================
@@ -315,6 +317,130 @@ def test_balance_drift_threshold_env_override(monkeypatch):
     assert out["alerted"] is True
     assert out["drift_pct"] == pytest.approx(3.0)
     assert len(emitted) == 1
+
+
+# ===========================================================================
+# B1 — active (venue, mode) enumerator (drift-check domain, step 4.2)
+# ===========================================================================
+
+def _venue_strategy(sid, exchange, mode="demo"):
+    """Minimal v2 strategy record: venue via the instrument block, static mode."""
+    return {
+        "strategy_id": sid,
+        "execution_mode": mode,
+        "instrument": {"exchange": exchange, "inst_id": "BTC-USDT-SWAP", "type": "swap"},
+    }
+
+
+def test_active_venue_modes_dedupes_same_pair(wr, monkeypatch):
+    monkeypatch.setattr(wr, "STRATEGIES", {
+        "s1": _venue_strategy("s1", "okx"),
+        "s2": _venue_strategy("s2", "okx"),          # same (venue, mode) as s1
+        "s3": _venue_strategy("s3", "bybit", mode="live"),
+        "s4": {"strategy_id": "s4", "execution_mode": "demo"},  # no instrument -> skipped
+    })
+    # (venue, simulated_trading) tuples, the _executor_for_order cache-key shape:
+    # demo -> True, live -> False. Two okx-demo strategies collapse to one pair.
+    assert active_venue_modes() == {("okx", True), ("bybit", False)}
+
+
+def test_active_venue_modes_reflects_control_state_override(wr, monkeypatch):
+    monkeypatch.setattr(wr, "STRATEGIES", {"s1": _venue_strategy("s1", "okx", mode="demo")})
+    assert active_venue_modes() == {("okx", True)}  # strategy-file value: demo
+    # Operator flips the mode pill to live -> the enumerated domain follows the
+    # control-state override, NOT the file's static execution_mode, no restart.
+    assert set_strategy_override("s1", "live") is True
+    assert active_venue_modes() == {("okx", False)}
+
+
+def test_active_venue_modes_empty_strategies(wr, monkeypatch):
+    monkeypatch.setattr(wr, "STRATEGIES", {})
+    assert active_venue_modes() == set()
+
+
+# ===========================================================================
+# B1 — per-(venue, mode) equity assembler (step 4.3)
+# ===========================================================================
+
+def _budget_strategy(sid, exchange, mode="demo", budget=0.0):
+    """_venue_strategy + a flat budget_usd (strategy_budget_usd's fallback path)."""
+    return {**_venue_strategy(sid, exchange, mode=mode), "budget_usd": budget}
+
+
+def _closed_row(sid, *, ord_id, exchange="okx", mode="demo", net=0.0):
+    """Minimal ledger row carrying an explicit net (no back-fill needed on read)."""
+    return {
+        "exchange": exchange,
+        "inst_id": "BTC-USDT-SWAP",
+        "ord_id": ord_id,
+        "mode": mode,
+        "strategy_id": sid,
+        "net_realized_pnl": net,
+        "closed_at_ms": 1,
+    }
+
+
+def test_account_equity_estimate_sums_budgets_and_closed_net(wr, ledger_dir, monkeypatch):
+    """budgets + closed-net for the matching (venue, mode) only; other venues,
+    other modes, and their ledger rows are all excluded from the figure."""
+    monkeypatch.setattr(wr, "STRATEGIES", {
+        "s1": _budget_strategy("s1", "okx", budget=100.0),
+        "s2": _budget_strategy("s2", "okx", budget=50.0),
+        "s3": _budget_strategy("s3", "bybit", budget=999.0),             # other venue
+        "s4": _budget_strategy("s4", "okx", mode="live", budget=777.0),  # other mode
+    })
+    monkeypatch.setattr(wr, "_reconciliation_executor", lambda intent=None: None)  # no UPL
+    pnl_ledger.append_closed_trades([
+        _closed_row("s1", ord_id="o1", net=25.0),
+        _closed_row("s2", ord_id="o2", net=-5.0),
+        _closed_row("s1", ord_id="o3", mode="live", net=999.0),          # other mode
+        _closed_row("s3", ord_id="o4", exchange="bybit", net=999.0),     # other venue
+    ])
+    # 100 + 50 budgets, +25 -5 closed net; UPL unavailable -> closed-only figure.
+    assert pnl_ledger._account_equity_estimate("okx", "demo") == pytest.approx(170.0)
+
+
+def test_account_equity_estimate_none_when_no_matching_strategies(wr, ledger_dir, monkeypatch):
+    monkeypatch.setattr(wr, "STRATEGIES", {"s1": _budget_strategy("s1", "okx", budget=100.0)})
+    monkeypatch.setattr(wr, "_reconciliation_executor", lambda intent=None: None)
+    assert pnl_ledger._account_equity_estimate("bybit", "live") is None
+
+
+def test_account_equity_estimate_upl_failure_falls_back_closed_only(
+    wr, ledger_dir, monkeypatch, caplog
+):
+    """ANY UPL-fetch failure degrades to budgets + closed-net with the omission
+    logged — never raises, never blocks (B1 fail-open posture)."""
+    monkeypatch.setattr(wr, "STRATEGIES", {"s1": _budget_strategy("s1", "okx", budget=100.0)})
+
+    def _boom(intent=None):
+        raise RuntimeError("venue unreachable")
+
+    monkeypatch.setattr(wr, "_reconciliation_executor", _boom)
+    pnl_ledger.append_closed_trades([_closed_row("s1", ord_id="o1", net=10.0)])
+    with caplog.at_level(logging.INFO, logger="pnl_ledger"):
+        out = pnl_ledger._account_equity_estimate("okx", "demo")
+    assert out == pytest.approx(110.0)
+    assert any("upl" in rec.getMessage().lower() for rec in caplog.records)
+
+
+def test_account_equity_estimate_includes_live_upl_when_available(wr, ledger_dir, monkeypatch):
+    """When the read-only executor seam yields positions, their summed ``upl`` is
+    added on top of budgets + closed-net; a None upl row is ignored, and the seam
+    is queried with the pair's own (venue, simulated_trading) intent."""
+    monkeypatch.setattr(
+        wr, "STRATEGIES", {"s1": _budget_strategy("s1", "okx", mode="live", budget=100.0)}
+    )
+    captured = {}
+
+    def _factory(intent=None):
+        captured["intent"] = intent
+        return _FakePosExecutor([{"upl": 7.5}, {"upl": -2.5}, {"upl": None}])
+
+    monkeypatch.setattr(wr, "_reconciliation_executor", _factory)
+    pnl_ledger.append_closed_trades([_closed_row("s1", ord_id="o1", mode="live", net=20.0)])
+    assert pnl_ledger._account_equity_estimate("okx", "live") == pytest.approx(125.0)
+    assert captured["intent"] == {"venue": "okx", "simulated_trading": False}
 
 
 # ===========================================================================

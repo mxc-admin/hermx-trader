@@ -257,7 +257,10 @@ def reconcile_startup(executor=None) -> dict:
                 try:
                     record_order_state(
                         cl, recon_state, intent=intent,
-                        detail={"startup_reconcile": True, "reason": outcome["reason"], "source": outcome["source"]},
+                        detail={
+                            "startup_reconcile": True, "reason": outcome["reason"], "source": outcome["source"],
+                            "acc_fill_sz": outcome["acc_fill_sz"], "avg_px": outcome["avg_px"],
+                        },
                         prev_state=cur_state,
                     )
                     wrote = True

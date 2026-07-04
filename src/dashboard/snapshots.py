@@ -685,7 +685,7 @@ def enrich_close_rows_with_okx_history(records, history_rows):
                 "notional": _dash.order_history_notional(hist, row.get("ct_val")),
                 "okx_price": avg_px,
                 "fee": _dash.as_float(hist.get("fee")),
-                "realized_pnl": _dash.as_float(hist.get("pnl")),
+                "realized_pnl": _dash.as_float(_dash.first_present(hist.get("realized_pnl"), hist.get("pnl"))),
                 "order_id": hist.get("ordId") or row.get("order_id"),
                 "client_order_id": hist.get("clOrdId") or row.get("client_order_id"),
                 "order_status": hist.get("state") or row.get("order_status"),

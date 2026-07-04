@@ -251,6 +251,77 @@ def test_zero_size_order_emits_warning_log(wr, monkeypatch, caplog):
     assert any("under_execution" in r.getMessage() for r in caplog.records)
 
 
+def test_zero_size_alert_payload_reason_unchanged(wr, monkeypatch):
+    # Pins the ORIGINAL alert payload shape: zero_size legs must still emit
+    # stage=under_execution / reason=zero_size_below_min, byte-identical to before
+    # the insufficient_balance extension.
+    monkeypatch.setattr(svc, "HERMX_MAX_NOTIONAL_USD_ENV", float("inf"))
+    cl = "phaseastablezerosizepayload00001"
+    rec = _armed_record(cl)
+
+    emitted = []
+    monkeypatch.setattr(wr, "emit_reconcile_alert", lambda k, d: emitted.append((k, d)))
+    fake = mock.Mock()
+    fake.execute = mock.Mock(return_value=_zero_size_result(cl))
+    with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):
+        wr.execute_if_enabled(rec)
+
+    assert emitted == [
+        (wr.RECONCILE_ALERT_MISMATCH,
+         {"stage": "under_execution", "reason": "zero_size_below_min", "cl_ord_id": cl}),
+    ]
+
+
+def test_insufficient_balance_skip_emits_distinct_alert(wr, monkeypatch, caplog):
+    # A1b extension (NAUTILUS_GAP_REMEDIATION_PLAN §0.6 Item A 1.3): the live-mode
+    # insufficient_balance skip is under-execution too, and its alert must be
+    # distinguishable from zero_size for the operator.
+    monkeypatch.setattr(svc, "HERMX_MAX_NOTIONAL_USD_ENV", float("inf"))
+    cl = "phaseastableinsuffbalance000001"
+    rec = _armed_record(cl)
+
+    emitted = []
+    monkeypatch.setattr(wr, "emit_reconcile_alert", lambda k, d: emitted.append((k, d)))
+    fake = mock.Mock()
+    fake.execute = mock.Mock(return_value=_zero_size_result(cl, reason="insufficient_balance"))
+    with caplog.at_level(logging.WARNING):
+        with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):
+            out = wr.execute_if_enabled(rec)
+
+    # Clean terminal REJECTED (unchanged) but the under-execution is surfaced.
+    assert out["mode"] == "submit_failed"
+    assert any("under_execution" in r.getMessage() for r in caplog.records)
+    assert emitted == [
+        (wr.RECONCILE_ALERT_MISMATCH,
+         {"stage": "under_execution", "reason": "insufficient_balance", "cl_ord_id": cl}),
+    ]
+
+
+def test_below_instrument_min_skip_still_fires_a1b_alert(wr, monkeypatch, caplog):
+    # A1b extension (NAUTILUS_GAP_REMEDIATION_PLAN §0.6 Item A 1.4): the adapter
+    # now skips sub-minimum orders with reason=below_instrument_min instead of
+    # zero_size. The under-execution alert must keep firing for it (it is still
+    # a sub-min under-execution, so the alert reason stays zero_size_below_min).
+    monkeypatch.setattr(svc, "HERMX_MAX_NOTIONAL_USD_ENV", float("inf"))
+    cl = "phaseastablebelowinstmin00000001"
+    rec = _armed_record(cl)
+
+    emitted = []
+    monkeypatch.setattr(wr, "emit_reconcile_alert", lambda k, d: emitted.append((k, d)))
+    fake = mock.Mock()
+    fake.execute = mock.Mock(return_value=_zero_size_result(cl, reason="below_instrument_min"))
+    with caplog.at_level(logging.WARNING):
+        with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):
+            out = wr.execute_if_enabled(rec)
+
+    assert out["mode"] == "submit_failed"
+    assert any("under_execution" in r.getMessage() for r in caplog.records)
+    assert emitted == [
+        (wr.RECONCILE_ALERT_MISMATCH,
+         {"stage": "under_execution", "reason": "zero_size_below_min", "cl_ord_id": cl}),
+    ]
+
+
 def test_no_alert_on_normal_reject(wr, monkeypatch, caplog):
     monkeypatch.setattr(svc, "HERMX_MAX_NOTIONAL_USD_ENV", float("inf"))
     cl = "phaseastablenormalreject00000001"

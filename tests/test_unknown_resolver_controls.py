@@ -135,6 +135,42 @@ def test_resolver_submitted_to_unknown_keeps_order_open(wr, monkeypatch):
     assert len(open_orders) == 1 and open_orders[0]["state"] == wr.ORDER_STATE_UNKNOWN
 
 
+def test_resolver_terminal_detail_carries_partial_fill_facts(wr):
+    # C2 part 2: a venue canceled-after-partial-fill resolves terminal FILLED and the
+    # journal detail persists the reconcile outcome's acc_fill_sz/avg_px (fill facts
+    # must survive into the journal, not just the transient outcome dict).
+    cl = "mxc-xrpusdt-buy-partial-detail"
+    _seed_submitted(wr, cl)
+    summary = wr.resolve_unknown_orders_once(
+        executor=ObserveOnlyStub(order=_norm_order("canceled", cl_ord_id=cl, acc=2.0, avg=0.512))
+    )
+    assert (summary["checked"], summary["resolved"]) == (1, 1)
+    records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+    last = [r for r in records if r["cl_ord_id"] == cl][-1]
+    assert last["state"] == wr.ORDER_STATE_FILLED
+    assert last["detail"]["reason"] == "canceled_after_partial_fill"
+    assert last["detail"]["acc_fill_sz"] == 2.0
+    assert last["detail"]["avg_px"] == 0.512
+
+
+def test_resolver_unknown_detail_carries_partial_fill_facts(wr, monkeypatch):
+    # C2 part 2, second write site: the SUBMITTED->UNKNOWN journal record also carries
+    # acc_fill_sz/avg_px from the reconcile outcome (a live partially-filled order that
+    # exhausts the backoff budget must not lose its observed fill facts).
+    cl = "mxc-xrpusdt-buy-partial-unknown"
+    _seed_submitted(wr, cl)
+    _no_wait_backoff(wr, monkeypatch)
+    summary = wr.resolve_unknown_orders_once(
+        executor=StubExecutor(order=_norm_order("live", cl_ord_id=cl, acc=2.0, avg=0.512))
+    )
+    assert summary["pending"] == 1
+    records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+    last = [r for r in records if r["cl_ord_id"] == cl][-1]
+    assert last["state"] == wr.ORDER_STATE_UNKNOWN
+    assert last["detail"]["acc_fill_sz"] == 2.0
+    assert last["detail"]["avg_px"] == 0.512
+
+
 def test_unknown_resolver_loop_ticks_and_stops_on_event(wr, monkeypatch):
     # The daemon loop ticks resolve_unknown_orders_once() and exits cleanly once the
     # stop event is set -- the periodic path is bounded and itself never trades. The

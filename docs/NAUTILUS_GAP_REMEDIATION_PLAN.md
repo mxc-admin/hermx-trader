@@ -19,6 +19,283 @@ as written.** Several "minimal fixes" were premised on code that does not exist.
 
 ---
 
+## 0. Post-Refactor Revalidation (2026-07-04)
+
+> Addendum — **supersedes stale file:line specifics in §§1-3 below; the verdicts
+> themselves all survive.** The in-flight refactor flagged in the header has landed
+> and went further than anticipated: `src/webhook_receiver.py` (now ~2,100 lines,
+> largely a re-export/composition shim) was split into
+> `src/reconcile/{orders,unknown_resolver,executor_select,alerts,drift}.py`,
+> `src/orders/journal.py`, `src/control_state.py`, `src/webhook/`, `src/signals/`,
+> `src/strategy/`, `src/advisor.py`, `src/alerts.py`; dashboard snapshot/enrich
+> helpers moved to `src/dashboard/snapshots.py`. Every symbol referenced by the
+> accepted and rejected items was re-located **by name** in the current tree.
+> Nothing was accidentally fixed by the refactor; one deliberate behavior change
+> was found (`map_order_outcome` — §0.4.2).
+
+### 0.1 Fresh test baseline
+
+- **Full suite: 810 passed / 28 skipped / 0 failed** (2m45s, `.venv/bin/python -m pytest -q tests/`).
+- The 7 suites cited in the header: **225 passed / 0 failed** (was 203 at
+  `be3c0c66` — +22 tests, no regressions).
+- New-module coverage is green inside the full run (`test_order_journal_checkpoint`,
+  `test_receiver_reconcile_venue`, `test_reconciliation_observe_only`,
+  `test_unknown_resolver_controls`, `test_replay_startup`, `test_operator_close`).
+- Working-tree note: an uncommitted `pytest.ini` diff adds a `slow` marker
+  (`tests/test_docker_state.py` / `test_phase3_worker_pool.py` also touched) —
+  unrelated to this plan; baseline was taken with it in place.
+
+### 0.2 Accepted items — per-item revalidation
+
+**Item A (balance check + sub-min outcome) — STILL VALID. Targets unchanged; one new wiring constraint; one uncertainty closed.**
+- Finding fully intact: **zero** balance references on the submit path
+  (`src/execution/service.py`, adapter execute path, `webhook_receiver.py`,
+  `src/webhook/*`); `check_balance_drift`/`get_balance_summary` remain observe-only
+  and uncalled. Sub-min still collapses into `zero_size`
+  (`_contracts_for_notional` `ccxt_adapter.py:618-628`, floor at `:626-627`;
+  `_amount_from_readiness` `:630-644`). `limits.cost.min` (min-notional) still
+  unconsulted — `_market_spec` (`:431-457`) reads only `limits.amount.min` (`:449`).
+- Current anchors: open-leg `create_order` still `ccxt_adapter.py:863`; skipped-leg
+  contract `{submitted: False, status: "skipped", reason: ...}` (zero-size open
+  `:847-852`); all-legs-skip → `mode="submit_failed"` (`:943-945`) → journal
+  REJECTED (`service.py:343-352`, `SUBMITTED→REJECTED` prev_state `:382`) — the
+  outcome-mapping constraint holds. A1b block moved to **`service.py:402-418`**;
+  its pins are still `tests/test_phase_a_robustness.py:238,254`.
+- **New design constraint:** `service.py` now reaches `emit_reconcile_alert` via
+  the hooks dict (`self._h("emit_reconcile_alert")`, `:415`; registered at
+  `webhook_receiver.py:1119`); the implementation moved to
+  `src/reconcile/alerts.py:30`. Item A's alert extension stays inside the existing
+  hook call — do NOT import `reconcile.alerts` directly from `service.py`.
+- **Uncertainty closed:** `_market_spec` retains the raw market dict
+  (`"market": market`, `ccxt_adapter.py:452`), so
+  `market_spec["market"].get("settle")` works exactly as designed.
+- Files: unchanged — `src/executors/ccxt_adapter.py`, `src/execution/service.py`, 2 test files.
+
+**Item B1 (balance-drift wiring) — STILL VALID. Targets moved; the refactor built half the seam.**
+- `check_balance_drift` still `ccxt_adapter.py:256-310`, still a hard no-op unless
+  `mode=="live"` (`:267`), still **zero production callers** (repo grep across
+  `src/`, `scripts/`, `deploy/`, cron installers: definition +
+  `test_phase_b_robustness.py` only). Inert-monitor finding intact.
+- Resolver moved: `unknown_resolver_loop` → **`src/reconcile/unknown_resolver.py:317`**;
+  cadence const `UNKNOWN_RESOLVER_INTERVAL_SECONDS` stays `webhook_receiver.py:433`
+  (=30.0), read lazily as a `_wr.` attribute (so env/monkeypatch overrides land).
+- **Seam half-built by the refactor:** `src/reconcile/executor_select.py:81-87`
+  (`_executor_for_order`) already caches executors keyed by exactly the
+  `(venue, simulated_trading)` tuple the plan wants. What is still missing is the
+  **domain**: it enumerates from open-order journal intents (empty with zero open
+  orders), not from active strategy configs. The raw materials exist un-assembled:
+  `strategy_instrument()` (`src/strategy/records.py:32`, exchange default at
+  `:47`) + per-strategy `execution_mode` with control-state override
+  (`src/strategy/readiness.py:55,62-65`). The enumerator's natural home is now
+  **`src/reconcile/executor_select.py`**, NOT `webhook_receiver.py` as §2 said.
+- Equity-assembler gap unchanged: `aggregate_strategy_pnl` (`pnl_ledger.py:423`)
+  is per-strategy with caller-supplied `budget_usd`/`open_upl_usd`; sole
+  production caller `dashboard.py:932-934`. No per-(venue,mode) equity exists.
+- Files (B1): `src/reconcile/executor_select.py` (enumerator),
+  `src/reconcile/unknown_resolver.py` (throttled call), `src/pnl_ledger.py`
+  (equity helper), 1 test file. That is 3 source files — at the dev-rules limit;
+  the §2 cron-gate alternative call-site remains valid and would drop
+  `unknown_resolver.py` from the set.
+
+**Item B2 (position drift) — STILL VALID as posed; the design decision is still unmade.**
+- `journal_positions` still has **no producer** anywhere (whole-repo grep:
+  parameter name + docstrings only). `reconcile_position_drift` moved to
+  `src/reconcile/drift.py:18` (delegates to `detect_position_drift`,
+  `ccxt_adapter.py:210`), still zero callers. Option 1 vs Option 2 decision
+  unchanged. Option 1 got marginally cheaper: `_strategy_venue`/`_venue_symbols`
+  (`src/dashboard/snapshots.py:175,191`) are now reference implementations for
+  "which inst_ids do active strategies claim".
+
+**Item C1 (dashboard realized-pnl read) — STILL VALID. Target moved; fix unchanged; one supporting nuance.**
+- `enrich_close_rows_with_okx_history` → **`src/dashboard/snapshots.py:641`**
+  (was `dashboard.py:1299`); the offending read is now **`snapshots.py:688`**:
+  `"realized_pnl": _dash.as_float(hist.get("pnl"))` — raw OKX field, normalized
+  `realized_pnl` ignored. `_normalized_realized_pnl` unchanged
+  (`ccxt_adapter.py:43-63`) and adapter history rows DO carry `realized_pnl`
+  (`ccxt_adapter.py:1058`), so the one-line preference fix stands.
+- Nuance strengthening the fix: the refactor added a skip-guard at
+  `snapshots.py:650` (`row.get("realized_pnl") is not None → continue`) — the
+  code already expects the normalized key on these rows.
+- Files: **`src/dashboard/snapshots.py`** (was `dashboard.py`), 1 test file.
+
+**Item C2 (partial-fill journal detail parity) — STILL VALID. Both targets moved into `src/reconcile/` and the fix got cheaper.**
+- Parity reference intact: post-submit path persists `acc_fill_sz`/`avg_px` in
+  `detail["reconcile"]` (`service.py:449-459`).
+- Startup reconcile detail dict — **`src/reconcile/orders.py:260`** — still only
+  `{startup_reconcile, reason, source}`. Resolver terminal detail dicts —
+  **`src/reconcile/unknown_resolver.py:260-266` and `:288-294`** — still only
+  `{unknown_resolver, reason, source, attempts, elapsed_s}`.
+- Cheaper now: `reconcile_order_once` (`reconcile/orders.py:150-160`) already
+  returns `acc_fill_sz`/`avg_px` in the `outcome` dict in scope at every one of
+  those call sites — the fix is adding two keys from a local variable, zero plumbing.
+- Files: `src/reconcile/orders.py`, `src/reconcile/unknown_resolver.py`
+  (no longer touches `webhook_receiver.py`), 2 test files.
+
+### 0.3 Rejected items — re-confirmations (one line each)
+
+- **Gap 3 (derived realized-PnL): rejection HOLDS.** `pnl_source` zero hits; the
+  running-position dict is still `{inst_id: signed qty}` with no entry price
+  (`pnl_ledger.py:645`); None-pnl rows still aggregate as $0 while counted
+  (`:447`, `:462` — aggregation now reads the durable ledger via
+  `read_closed_trades`, same behavior).
+- **Gap 4 (100-row ageout recovery): rejection HOLDS.** `get_order_history_archive`
+  still the same `fetch_closed_orders` endpoint with a bigger limit, no
+  `since`/pagination (`ccxt_adapter.py:1072-1076`); `fetch_my_trades` zero hits;
+  detector now `snapshots.py:316` with `limit=100` at `:341,:535`;
+  `reconcile_from_order_history` still called ONLY from dashboard snapshot code
+  (`snapshots.py:372-374`, `:546-549`) — the dashboard-only-reconciler
+  architectural question stands, unresolved.
+- **Gap 5 (PARTIALLY_FILLED state): rejection HOLDS and is STRONGER.**
+  `_ORDER_STATE_TRANSITIONS` (now `src/orders/journal.py:79-86`) still the 9-edge
+  set with no new state; `map_order_outcome` (now `src/reconcile/orders.py:52`)
+  still maps `partially_filled → (FILLED, partial=True)`; market-only confirmed
+  (`ccxt_adapter.py:752`, zero `timeInForce` hits); see §0.4.2 for the mapping
+  change that further reduces the value of a new state.
+- **FillReport seam: rejection HOLDS.** Zero
+  dataclass/TypedDict/NamedTuple in `pnl_ledger.py`/`executors/`; the reduceOnly
+  string-quirk still exists 3× — `ccxt_adapter.py:73`, `pnl_ledger.py:666`, and
+  `snapshots.py:663` (via `bool_text`, `:628`) — the third copy moved from
+  `dashboard.py` to `snapshots.py`.
+
+### 0.4 New findings from the refactor itself (money-path relevant)
+
+1. **`RECONCILE_STARTUP_COMPLETE`/`RECONCILE_STARTUP_AT` cross-module mutation is
+   SAFE as built.** Defined `webhook_receiver.py:447-448`; mutated by
+   `reconcile_startup` via attribute assignment on the imported module object
+   (`_wr.RECONCILE_STARTUP_COMPLETE = True`, `reconcile/orders.py:277-278`); read
+   as bare module globals in `log_execution_arm_state` (`webhook_receiver.py:2006`)
+   and as `wr.` attributes in tests. Crucially they are **never value-re-exported**
+   (excluded from the shim block `webhook_receiver.py:246-266` and
+   `reconcile/__init__.py`), so there is exactly one binding and no stale-copy
+   risk. **Guard to preserve:** never add these two names to any
+   `from ... import` re-export — that would silently freeze them.
+2. **`map_order_outcome` changed semantics since this plan was written**
+   (money-safety, Nautilus-aligned report-driven reconcile):
+   `not_found → UNKNOWN` (was REJECTED), and `canceled` with a missing/malformed
+   `acc_fill_sz → UNKNOWN` (was REJECTED via coerced 0). This supersedes §1
+   Gap 5(a)'s description of the mapping. It does not affect any accepted item's
+   design (Item A's skip path maps through `submit_failed`, not through
+   reconcile), and it strengthens the Gap-5 rejection.
+3. **No shim behavior regressions found.** `emit_reconcile_alert` has a single
+   implementation (`reconcile/alerts.py:30`); all former callers route to it
+   (several via the `_wr.` seam, preserving test monkeypatchability); the service
+   reaches it via an injected hook.
+
+### 0.5 Key changes to implement
+
+- **A:** add a live-mode-only, open-leg-only free-balance check in the CCXT
+  adapter that skips the open leg with reason `insufficient_balance` when the free
+  settlement-currency balance cannot cover notional/leverage, failing open on
+  fetch errors; extend the service's existing zero-size alert block to alert
+  distinctly on it; in a separate commit, give "below instrument minimum" its own
+  reason and start consulting the venue's min-notional (`limits.cost.min`) limit.
+- **B1:** enumerate active (venue, mode) pairs from loaded strategy files,
+  assemble a per-pair synthetic equity figure (budgets + closed net P&L, live UPL
+  best-effort), and call the existing balance-drift check from the resolver loop
+  every Nth tick, throttled and fail-open.
+- **B2:** make the Option 1 vs Option 2 decision first; recommended Option 1 =
+  alert on venue positions that no active strategy claims (no believed-position
+  bookkeeping needed). If unfunded, annotate or delete the dead drift functions.
+- **C1:** in the dashboard close-row enricher, prefer the adapter-normalized
+  `realized_pnl` field over the raw OKX `pnl` field.
+- **C2:** add `acc_fill_sz`/`avg_px` (already present in the in-scope reconcile
+  outcome) to the journal detail dicts at the startup-reconcile and the two
+  resolver terminal-write sites.
+
+### 0.6 Ordered execution plan (implementation-ready, NOT implemented)
+
+Priority order = validated value; C1/C2 are near-zero-risk quick wins that may be
+shipped first if a release is imminent. Each item stays an independent ≤3-source-file
+task, tests-first, extending (never rewriting) pinned tests.
+
+1. **Item A — pre-trade balance check** (2 commits)
+   1. Tests first: extend `tests/test_ccxt_adapter.py` +
+      `tests/test_phase_a_robustness.py` with the six tests from §2 Item A step 1
+      (open-leg skip on insufficient free balance in live mode; close leg /
+      `close_only` submits with zero balance; fetch-`None` fail-open;
+      `simulated_trading=True` skips the check; non-USDT settle currency fetched;
+      service emits distinct-stage alert when all legs skip for that reason).
+   2. Adapter: add `_sufficient_free_balance(client, market_spec, notional, leverage)`
+      to `src/executors/ccxt_adapter.py`; call it in the OPEN branch of
+      `CcxtExecutor.execute` immediately before the open-leg `create_order`
+      (currently `:863`); settle currency via
+      `market_spec["market"].get("settle") or "USDT"` (retained dict verified,
+      `:452`); skip result uses the existing
+      `{submitted: False, status: "skipped", reason: "insufficient_balance"}`
+      leg contract so all-legs-skip flows through `mode="submit_failed"` →
+      `SUBMITTED→REJECTED` (`service.py:343-352,:382`).
+   3. Service: extend the A1b block (`service.py:402-418`) to alert on
+      `reason in {"zero_size", "insufficient_balance"}` with distinct stages, via
+      the existing `self._h("emit_reconcile_alert")` hook — no new hook, no new
+      import. Keep the pinned `zero_size` behavior
+      (`test_phase_a_robustness.py:238,254`) untouched.
+   4. Separate commit — sub-min disambiguation: thread `below_instrument_min`
+      through `_contracts_for_notional`/`_amount_from_readiness`
+      (`ccxt_adapter.py:618-644`) for the `min_amount` floor case; consult
+      `limits.cost.min` in `_market_spec` (`:449` area). Regression tests:
+      `test_below_instrument_min_reason_distinct_from_zero_size`,
+      `test_min_cost_limit_floors_to_zero_with_reason`.
+2. **Item C1 — normalized realized-pnl in enriched close rows** (one-liner)
+   1. Test first: HL-shaped history row (`closedPnl` → normalized `realized_pnl`)
+      enriches with the value; OKX row without `realized_pnl` still falls back to
+      `pnl` (extend the dashboard snapshot tests, e.g.
+      `tests/test_phase4_dashboard.py`).
+   2. Fix: `src/dashboard/snapshots.py:688` — prefer `hist.get("realized_pnl")`,
+      fall back to `hist.get("pnl")`.
+3. **Item C2 — partial-fill journal detail parity** (two files, additive keys)
+   1. Tests first: startup reconcile of a venue-`partially_filled` order →
+      journal detail carries `acc_fill_sz`/`avg_px` (extend
+      `tests/test_reconciliation_observe_only.py`); resolver resolves a
+      venue-`partially_filled` order → same (extend
+      `tests/test_unknown_resolver_controls.py`).
+   2. Fix: add `"acc_fill_sz": outcome["acc_fill_sz"], "avg_px": outcome["avg_px"]`
+      to the detail dicts at `src/reconcile/orders.py:260` and
+      `src/reconcile/unknown_resolver.py:260-266` + `:288-294`.
+4. **Item B1 — balance-drift wiring** (after A; 3 source files, at the limit)
+   1. Tests first (new `tests/test_drift_wiring.py`): throttle (called once per N
+      ticks per (venue, mode)); demo no-op stays pinned by
+      `test_phase_b_robustness.py:195` (do not touch); equity assembler returns
+      budgets + closed-net per (venue, mode); resolver tick never blocked by a
+      drift-check exception (fail-open).
+   2. Enumerator: `active_venue_modes()` in `src/reconcile/executor_select.py`,
+      derived from loaded strategy files via `strategy_instrument()`
+      (`strategy/records.py:32`) + per-strategy `execution_mode` including the
+      control-state override (`strategy/readiness.py:62-65`).
+   3. Equity helper: `_account_equity_estimate(venue, mode)` in
+      `src/pnl_ledger.py` — sum per-strategy `budget_usd` + closed-net for that
+      (exchange, mode); live UPL best-effort, fail-open to closed-only equity
+      with the omission logged.
+   4. Wire: call `check_balance_drift` from the tick body in
+      `src/reconcile/unknown_resolver.py` (loop at `:317`) every Nth tick
+      (`HERMX_DRIFT_CHECK_EVERY_N_TICKS`, default 10 ≈ 5 min at the 30 s tick),
+      fail-open. *Alternative preserving zero receiver changes: a Hermes cron
+      gate script per the `hermx_gate_lib` pattern — drops
+      `unknown_resolver.py` from the file set.*
+5. **Item B2 — position drift** (blocked on the Option 1 vs 2 decision; do not
+   start before it is made)
+   1. If Option 1: implement unclaimed-venue-position detection in
+      `src/reconcile/drift.py`, reusing B1's `active_venue_modes()` and the
+      claimed-inst_id derivation modeled on `_venue_symbols`
+      (`dashboard/snapshots.py:191`). Tests: fake venue reports a position on an
+      unclaimed inst_id → `RECONCILE_MISMATCH` with `stage="position_drift"`;
+      claimed position → no alert.
+   2. If neither option is funded: annotate `reconcile_position_drift` +
+      `detect_position_drift` as intentionally unscheduled, or delete them —
+      leaving them silently inert stays forbidden.
+
+### 0.7 Revalidation confidence
+
+**0.9.** Every accepted and rejected item was re-verified by symbol against the
+current tree by three independent code sweeps, against a fully green 810-test
+baseline; the two riskiest unknowns from §4 were closed (all
+`webhook_receiver.py` symbols re-located; `market["settle"]` availability
+confirmed). Residual uncertainty: (i) B1's equity-precision decision (live UPL
+in-scope or closed-only) and B2's Option 1/2 decision remain operator calls, as
+in §4; (ii) exact test-file placement for C1's regression test (the enrich path
+has no dedicated test module today).
+
+---
+
 ## 1. Validation log
 
 Confidence scale: (a) citation accuracy, (b) gap still open, (c) fix genuinely

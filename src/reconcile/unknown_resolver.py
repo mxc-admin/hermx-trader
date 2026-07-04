@@ -18,6 +18,7 @@ reconcile.executor_select.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
 
@@ -34,7 +35,7 @@ from orders.journal import (
     load_open_orders,
     record_order_state,
 )
-from reconcile.executor_select import _executor_for_order
+from reconcile.executor_select import _executor_for_order, active_venue_modes
 from reconcile.orders import reconcile_order_once, _order_is_present
 from reconcile.alerts import (
     emit_reconcile_alert,
@@ -43,6 +44,61 @@ from reconcile.alerts import (
     RECONCILE_ALERT_PLANNED_ABANDONED,
     RECONCILE_ALERT_PLANNED_ON_VENUE,
 )
+
+
+def _env_int(name: str, default: int) -> int:
+    # Same fail-open parse posture as webhook.config._env_float: blank or
+    # unparseable env values fall back to the default, never raise at import.
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+# B1 balance-drift sweep cadence (NAUTILUS_GAP_REMEDIATION_PLAN.md §0.6 item 4.4):
+# run every Nth resolver tick -- default 10 ~= 5 min at the 30 s tick. <= 0 disables
+# the sweep (the resolver itself keeps running). Module global (not wr-resident like
+# the other resolver constants) so tests monkeypatch it here without a wr reload.
+HERMX_DRIFT_CHECK_EVERY_N_TICKS = _env_int("HERMX_DRIFT_CHECK_EVERY_N_TICKS", 10)
+
+
+def _run_balance_drift_checks() -> None:
+    """B1 balance-drift sweep: for every live (venue, mode) the loaded strategies
+    can trade on, compare the venue's real balance against HermX's synthetic
+    equity estimate. OBSERVE-ONLY and fail-open at every layer: any per-pair
+    failure is logged and the sweep moves on -- it must never block, delay, or
+    crash the resolver's real order-reconciliation work.
+
+    Simulated pairs are skipped up front: check_balance_drift is a hard no-op
+    for any mode != "live" (sandbox balances are fake; pinned by
+    test_phase_b_robustness), so computing equity or building an authenticated
+    executor for them would be pure waste. check_balance_drift and
+    _account_equity_estimate are dereferenced through their home modules at
+    call time (lazy, cycle-safe, monkeypatch-observable -- see module
+    docstring); the executor comes from the existing _reconciliation_executor
+    seam via a synthetic (venue, simulated_trading) intent, exactly the config
+    shape persisted on order journals (#20a)."""
+    import webhook_receiver as _wr
+    import pnl_ledger as _pnl
+    from executors import ccxt_adapter as _ccxt
+
+    for venue, simulated in sorted(active_venue_modes()):
+        if simulated:
+            continue  # live-only monitor: demo/pause sandbox balance is meaningless
+        mode = "live"
+        try:
+            equity = _pnl._account_equity_estimate(venue, mode)
+            if equity is None:
+                continue  # no loaded strategy on this pair -> nothing to estimate
+            executor = _wr._reconciliation_executor({"venue": venue, "simulated_trading": simulated})
+            if executor is None:
+                continue  # factory/config unavailable -> degrade silently
+            _ccxt.check_balance_drift(executor, equity, venue, mode)
+        except Exception as exc:
+            logging.warning("balance drift check failed venue=%s mode=%s: %s", venue, mode, exc)
 
 
 def _order_age_seconds(order_record: dict, now_ts: "str | None" = None) -> "float | None":
@@ -263,6 +319,10 @@ def resolve_unknown_orders_once(executor=None, *, now_ts: "str | None" = None, m
                         "source": outcome.get("source"),
                         "attempts": outcome.get("attempts"),
                         "elapsed_s": outcome.get("elapsed_s"),
+                        # .get(): a monkeypatched/synthetic outcome may omit fill info;
+                        # None means "unknown", never coerce to a fabricated 0.0.
+                        "acc_fill_sz": outcome.get("acc_fill_sz"),
+                        "avg_px": outcome.get("avg_px"),
                     },
                     prev_state=cur_state,
                 )
@@ -291,6 +351,10 @@ def resolve_unknown_orders_once(executor=None, *, now_ts: "str | None" = None, m
                         "source": outcome.get("source"),
                         "attempts": outcome.get("attempts"),
                         "elapsed_s": outcome.get("elapsed_s"),
+                        # .get(): a monkeypatched/synthetic outcome may omit fill info;
+                        # None means "unknown", never coerce to a fabricated 0.0.
+                        "acc_fill_sz": outcome.get("acc_fill_sz"),
+                        "avg_px": outcome.get("avg_px"),
                     },
                     prev_state=cur_state,
                 )
@@ -321,10 +385,12 @@ def unknown_resolver_loop(stop_event: "threading.Event | None" = None, sleep=tim
     if _wr.UNKNOWN_RESOLVER_INTERVAL_SECONDS <= 0:
         return
     interval = max(1.0, _wr.UNKNOWN_RESOLVER_INTERVAL_SECONDS)
+    tick = 0
     while True:
         if stop_event is not None and stop_event.is_set():
             return
         _wr._set_resolver_heartbeat()
+        tick += 1
         try:
             summary = _wr.resolve_unknown_orders_once()
             if summary["checked"] or summary["expired"] or summary["errors"]:
@@ -339,6 +405,18 @@ def unknown_resolver_loop(stop_event: "threading.Event | None" = None, sleep=tim
                 )
         except Exception as exc:  # pragma: no cover - defensive
             emit_operator_alert("UNKNOWN_RESOLVER_ERROR", {"error": str(exc)}, severity="error")
+
+        # B1 balance-drift sweep: every Nth tick, AFTER the tick's real
+        # reconciliation work so a slow/broken sweep can only ever trail it.
+        # Bare-name globals (cadence + sweep fn) are re-read each tick so tests
+        # monkeypatch them on this module. Outer try/except keeps even an
+        # active_venue_modes() failure from killing the resolver thread.
+        every_n = HERMX_DRIFT_CHECK_EVERY_N_TICKS
+        if every_n > 0 and tick % every_n == 0:
+            try:
+                _run_balance_drift_checks()
+            except Exception as exc:  # pragma: no cover - defensive
+                logging.warning("balance drift sweep failed: %s", exc)
 
         if stop_event is not None:
             if stop_event.wait(interval):
