@@ -1,0 +1,146 @@
+"""Strategy execution readiness (Phase 3 extraction, REFACTOR_PLAN.md).
+
+Houses the readiness cluster that used to live in webhook_receiver.py:
+``_strategy_config_for_readiness`` (the A1 pre-trade ceiling's strategy-config
+lookup, passed as the ``strategy_config_lookup`` callback into the
+ExecutionService gate) and ``build_strategy_execution_readiness`` (the
+per-signal execution plan).
+
+Root-bound / reload-reset module state STAYS defined in webhook_receiver.py
+(``STRATEGIES`` -- bound at import time from load_strategy_files(), rebound by
+the per-test ``importlib.reload(webhook_receiver)`` in conftest's ``wr``
+fixture, and mutated in place by test_phase_a_robustness via
+``monkeypatch.setitem(wr.STRATEGIES, ...)``). ``_strategy_config_for_readiness``
+therefore reads it lazily via ``import webhook_receiver as _wr`` -- the same
+pattern as src/alerts.py (Phase 0), src/signals/ (Phase 1) and
+src/control_state.py (Phase 2). webhook_receiver re-exports both names so
+``wr.<fn>`` call sites and monkeypatch seams keep working.
+
+The leaf-pure / extracted collaborators are imported directly from their
+homes: money decimals (webhook.money), execution defaults (webhook.config),
+control-state reads (control_state -- itself lazily root-bound), signal
+identity + clOrdId derivation (signals.dedupe) and the strategy-record reads
+(strategy.records, moved in this same phase).
+"""
+from __future__ import annotations
+
+from control_state import load_control_state
+from signals.dedupe import _signal_identity, stable_client_order_id
+from strategy.records import strategy_budget_usd, strategy_instrument
+from webhook.config import EXEC_BACKEND, EXECUTION_DEFAULTS, resolve_default_type
+from webhook.money import dec_notional
+
+
+def _strategy_config_for_readiness(readiness: "dict | None") -> dict:
+    """Resolve the strategy config (with its capital block) for a readiness record so
+    the A1 pre-trade notional ceiling can read ``capital.max_notional_usd``. Reads the
+    module-bound STRATEGIES by the readiness ``strategy_id``; empty dict when unknown."""
+    import webhook_receiver as _wr
+    sid = str((readiness or {}).get("strategy_id") or "").strip()
+    if not sid:
+        return {}
+    return _wr.STRATEGIES.get(sid) or {}
+
+
+def build_strategy_execution_readiness(record: dict) -> dict:
+    normalized = record.get("normalized") or {}
+    strategy = record.get("strategy_config") or {}
+    # execution_mode is operative: ``sandbox`` is True for demo and False ONLY for live.
+    # The resolved ``simulated_trading`` (= sandbox) and the ``execution_mode`` flow into
+    # readiness so the ExecutionService gate can require HERMX_LIVE_TRADING for live
+    # submissions and the adapter sandboxes accordingly.
+    execution_mode = str((strategy or {}).get("execution_mode") or "demo").lower()
+    # submit_orders gates actual submission. Absent in the file -> default True (the
+    # historical "submit" posture); Pause sets it False (validate+ledger, no order).
+    submit_orders = bool((strategy or {}).get("submit_orders", True))
+    # Runtime override from control-state.json (set_strategy_override / dashboard UI).
+    # Checked live per-signal so no restart is needed when the operator changes mode.
+    # An override carries BOTH execution_mode and submit_orders (see _STRATEGY_MODE_FLAGS).
+    _cs_overrides = (load_control_state().get("strategy_overrides") or {})
+    _cs_ov = _cs_overrides.get(record.get("strategy_id") or (strategy or {}).get("strategy_id") or "")
+    if isinstance(_cs_ov, dict) and _cs_ov.get("execution_mode"):
+        execution_mode = str(_cs_ov["execution_mode"]).lower()
+    if isinstance(_cs_ov, dict) and "submit_orders" in _cs_ov:
+        submit_orders = bool(_cs_ov["submit_orders"])
+    sandbox = (execution_mode != "live")  # demo -> True; live -> False
+    # submit_orders is the submission gate: Pause -> False (no orders to either venue);
+    # Demo/Live -> True. execution_mode then decides sandbox vs real account.
+    live_execution_enabled = bool(submit_orders)
+    live_allowed = live_execution_enabled
+    direction = "long" if normalized.get("side") == "buy" else "short"
+    signal_identity = _signal_identity(normalized)
+    # Reversal signals submit two legs (close the opposite position, then open the new
+    # one). Each leg needs its OWN clOrdId or the venue rejects the second as a duplicate.
+    # ``client_order_id`` stays the OPEN-leg id (the leg that defines the final position
+    # and the journal dedupe key); the close-leg id is carried alongside it.
+    client_order_id_close = stable_client_order_id(signal_identity, role="close")
+    client_order_id_open = stable_client_order_id(signal_identity, role="open")
+    client_order_id = client_order_id_open
+    base_notional = strategy_budget_usd(strategy) * float(strategy.get("leverage") or 1.0)
+    planned_notional = float(dec_notional(base_notional))
+    # Exchange-agnostic instruction contract (Phase 6 / M3, ARCHITECTURE.md). ``td_mode``
+    # below is the OKX translation of this same value, so derive both from one expression.
+    margin_mode = strategy.get("margin_mode", "isolated")
+    instrument = strategy_instrument(strategy)
+    # Derive ccxt_default_type from strategy instrument.type (e.g., swap, spot, future)
+    instrument_type = resolve_default_type(instrument)
+    plan = {
+        "mode": "strategy_file_live_order_enabled" if live_allowed else "strategy_file_trial_no_order",
+        "live_execution_enabled": live_allowed,
+        "execution_mode": execution_mode,
+        "simulated_trading": sandbox,
+        "execution_policy": f"strategy_file:{normalized.get('strategy_id')}",
+        "execution_policy_label": strategy.get("name") or normalized.get("strategy_id"),
+        "exchange": EXEC_BACKEND,
+        "ccxt_default_type": instrument_type,
+        "route": EXECUTION_DEFAULTS["route"],
+        "account": EXECUTION_DEFAULTS["account"],
+        "symbol": normalized.get("symbol"),
+        "inst_id": instrument.get("inst_id"),
+        "expected_leverage": strategy.get("leverage"),
+        "td_mode": margin_mode,
+        # --- Exchange-agnostic instruction contract (Phase 6 / M3) ---
+        # THE wire contract going forward (ARCHITECTURE.md). The inst_id / td_mode
+        # keys above stay present but are now adapter-derived translations of these:
+        # the CCXT adapter maps inst_id<->symbol and tdMode<-margin_mode. Every value
+        # here is byte-identical to its OKX-named twin / execution_intent field, so orders
+        # and downstream readers are unchanged.
+        "instrument": instrument,
+        "strategy_id": strategy.get("strategy_id") or normalized.get("strategy_id"),
+        "asset": strategy.get("asset") or normalized.get("symbol"),
+        "target_side": direction,
+        "target_notional_usd": planned_notional,
+        "margin_mode": margin_mode,
+        "leverage": strategy.get("leverage"),
+        "timeframe": normalized.get("timeframe"),
+        "tv_time": normalized.get("tv_time"),
+        "signal_side": normalized.get("side"),
+        "signal_price": normalized.get("tv_signal_price"),
+        "execution_intent": {
+            "policy": f"strategy_file:{normalized.get('strategy_id')}",
+            "decision": "TRADE",
+            "risk_weight": 1.0,
+            "target_direction": direction,
+            "actions": ["CLOSE_OPPOSITE_IF_ANY", f"OPEN_{direction.upper()}"],
+            "base_notional_usd": strategy_budget_usd(strategy),
+            "planned_notional_usd": planned_notional,
+            "client_order_id": client_order_id,
+            "client_order_id_open": client_order_id_open,
+            "client_order_id_close": client_order_id_close,
+        },
+        "okx_fill": {
+            "status": "not_sent_strategy_trial" if not live_allowed else "ready_to_send_when_strategy_promoted",
+            "order_id": None,
+            "client_order_id": client_order_id,
+            "avg_fill_price": None,
+            "filled_size": None,
+            "fee_usd": None,
+            "slippage_pct": None,
+            "position_after_order": None,
+        },
+        "block_reason": None if live_allowed else "Duo Base Dev strategy trial is not approved for OKX submission",
+    }
+    # The separate execution-plan.jsonl ledger was removed entirely (constant + sweep
+    # entry): nothing consumed it. The authoritative submission outcome is recorded to
+    # pipeline.jsonl (stage="execution"), which the dashboard reads.
+    return plan
