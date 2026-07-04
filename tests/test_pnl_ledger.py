@@ -99,6 +99,46 @@ def test_read_closed_trades_strategy_filter(ledger_dir):
     assert [r["ord_id"] for r in rows] == ["2"]
 
 
+# --- read-side dedupe -------------------------------------------------------
+
+def test_read_closed_trades_deduplicates_on_read(ledger_dir):
+    # Two rows with the same (exchange, inst_id, ord_id, mode) key but different
+    # payloads -> collapsed to one on read, last occurrence wins.
+    a = {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "d1",
+         "mode": "demo", "net_realized_pnl": 5.0, "closed_at_ms": 100}
+    b = dict(a, net_realized_pnl=9.0)  # same key, later payload
+    ledger_dir.write_text(
+        json.dumps(a) + "\n" + json.dumps(b) + "\n", encoding="utf-8"
+    )
+    rows = pnl_ledger.read_closed_trades()
+    assert len(rows) == 1
+    assert rows[0]["net_realized_pnl"] == 9.0  # last-wins
+
+
+def test_read_closed_trades_keeps_different_keys(ledger_dir):
+    a = {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "k1",
+         "mode": "demo", "closed_at_ms": 100}
+    b = {"exchange": "okx", "inst_id": "ETH-USDT-SWAP", "ord_id": "k2",
+         "mode": "demo", "closed_at_ms": 200}
+    ledger_dir.write_text(
+        json.dumps(a) + "\n" + json.dumps(b) + "\n", encoding="utf-8"
+    )
+    rows = pnl_ledger.read_closed_trades()
+    assert sorted(r["ord_id"] for r in rows) == ["k1", "k2"]
+
+
+def test_read_dedup_does_not_mutate_file(ledger_dir):
+    # Deduping is read-only: the underlying file still holds both rows afterward.
+    dup = {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "m1",
+           "mode": "demo", "net_realized_pnl": 3.0, "closed_at_ms": 100}
+    raw = json.dumps(dup) + "\n" + json.dumps(dup) + "\n"
+    ledger_dir.write_text(raw, encoding="utf-8")
+    assert len(pnl_ledger.read_closed_trades()) == 1
+    # File is untouched by the read.
+    assert ledger_dir.read_text(encoding="utf-8") == raw
+    assert ledger_dir.read_text(encoding="utf-8").count("\n") == 2
+
+
 # --- accounting window (Phase 3) --------------------------------------------
 
 def _write_window_rows(ledger_dir):

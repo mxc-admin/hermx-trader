@@ -261,11 +261,18 @@ def read_closed_trades(
     # Read-side dedupe by composite key (last occurrence wins). Backstop against
     # any duplicate that reached disk — legacy data or a pre-fix TOCTOU race. The
     # append path's flock now prevents *new* dupes; this collapses old ones so a
-    # single logical close is never double-counted on read (Test H3).
+    # single logical close is never double-counted on read (Test H3). A row whose
+    # composite key is fully degenerate ((None, None, None, None)) is malformed, not
+    # a real duplicate — keep every such row rather than collapsing them into one.
     deduped: dict = {}
+    malformed: list = []
     for row in rows:
-        deduped[_composite_key(row)] = row
-    return list(deduped.values())
+        key = _composite_key(row)
+        if all(part is None for part in key):
+            malformed.append(row)
+            continue
+        deduped[key] = row
+    return list(deduped.values()) + malformed
 
 
 def max_recorded_closed_at(exchange: str, mode: str) -> int | None:
