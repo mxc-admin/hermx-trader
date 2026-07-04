@@ -493,3 +493,51 @@ def test_schema_v3_reader_reads_v1_v2_v3_mixed_ledger(ledger_dir):
     assert by_id["v2"]["recorded_at_ms"] is None
     assert by_id["v3"]["recorded_at_ms"] == 123456789
     assert by_id["v1"]["net_realized_pnl"] == 4.9
+
+
+# --- P1-2 reconcile_health_stats --------------------------------------------
+
+def test_reconcile_health_stats_with_recorded_at(ledger_dir):
+    ledger_dir.write_text(
+        "\n".join([
+            json.dumps({"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "a",
+                        "mode": "demo", "closed_at_ms": 100, "recorded_at_ms": 1000,
+                        "schema_version": 3}),
+            json.dumps({"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "b",
+                        "mode": "demo", "closed_at_ms": 200, "recorded_at_ms": 3000,
+                        "schema_version": 3}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    stats = pnl_ledger.reconcile_health_stats()
+    assert stats["max_recorded_at_ms"] == 3000
+    assert isinstance(stats["reconcile_lag_ms"], int)
+    assert stats["reconcile_lag_ms"] > 0
+    assert stats["recorded_at_rows_pct"] == 1.0
+
+
+def test_reconcile_health_stats_empty_ledger(ledger_dir):
+    stats = pnl_ledger.reconcile_health_stats()
+    assert stats["max_recorded_at_ms"] is None
+    assert stats["reconcile_lag_ms"] is None
+    assert stats["recorded_at_rows_pct"] is None
+
+
+def test_reconcile_health_stats_mixed_v2_v3(ledger_dir):
+    ledger_dir.write_text(
+        "\n".join([
+            # v2 row: no recorded_at_ms
+            json.dumps({"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "v2",
+                        "mode": "demo", "closed_at_ms": 100, "net_realized_pnl": 1.0,
+                        "schema_version": 2}),
+            # v3 row: recorded_at_ms present
+            json.dumps({"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "v3",
+                        "mode": "demo", "closed_at_ms": 200, "recorded_at_ms": 5000,
+                        "schema_version": 3}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    stats = pnl_ledger.reconcile_health_stats()
+    assert stats["max_recorded_at_ms"] == 5000
+    assert stats["recorded_at_rows_pct"] == 0.5
+    assert stats["recorded_at_rows_pct"] < 1.0

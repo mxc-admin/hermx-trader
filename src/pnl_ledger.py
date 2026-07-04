@@ -208,6 +208,44 @@ def max_recorded_closed_at(exchange: str, mode: str) -> int | None:
     return best
 
 
+def reconcile_health_stats() -> dict:
+    """Read-only reconcile-health view for the ``/api`` payload and the lag gate.
+
+    * ``max_recorded_at_ms`` — newest local observation time (``recorded_at_ms``,
+      schema v3+) across the ledger, or ``None`` when no row carries one.
+    * ``reconcile_lag_ms`` — ``now_ms - max_recorded_at_ms``, or ``None`` when the
+      max is unknown.
+    * ``recorded_at_rows_pct`` — fraction of rows carrying ``recorded_at_ms``
+      (0.0-1.0), or ``None`` on an empty ledger.
+    """
+    rows = read_closed_trades()
+    if not rows:
+        return {
+            "max_recorded_at_ms": None,
+            "reconcile_lag_ms": None,
+            "recorded_at_rows_pct": None,
+        }
+    recorded_count = 0
+    best = None
+    for row in rows:
+        ts = row.get("recorded_at_ms")
+        if ts is None:
+            continue
+        recorded_count += 1
+        try:
+            ts = int(ts)
+        except (TypeError, ValueError):
+            continue
+        if best is None or ts > best:
+            best = ts
+    now_ms = int(time.time() * 1000)
+    return {
+        "max_recorded_at_ms": best,
+        "reconcile_lag_ms": (now_ms - best) if best is not None else None,
+        "recorded_at_rows_pct": recorded_count / len(rows),
+    }
+
+
 def net_realized_for_strategy(
     strategy_id: str,
     mode: str | None = None,

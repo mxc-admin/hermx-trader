@@ -1740,6 +1740,15 @@ def api_payload():
     # Phase 4: top-level portfolio roll-up across every strategy's durable P&L.
     portfolio = portfolio_contract([s.get("strategy_pnl") for s in annotated_strategies])
 
+    # P1-2: read-only reconcile-health (max recorded_at_ms, lag, v3-coverage pct).
+    # Never fail the /api response on a ledger read error.
+    try:
+        from pnl_ledger import reconcile_health_stats
+
+        reconcile_health = reconcile_health_stats()
+    except Exception:
+        reconcile_health = None
+
     return {
         "generated_at": model["generated_at"],
         "source_counts": {k: loaded[k] for k in ("historical_count", "backfill_count", "live_count")},
@@ -1759,6 +1768,7 @@ def api_payload():
             "ok": _hermes_enabled,
         },
         "ledger_health": model.get("ledger_health") or {},
+        "reconcile_health": reconcile_health,
         "freshness": model.get("freshness") or {},
         # Read-only order/reconcile/operator observability (each with its read stats).
         "open_orders": {"rows": open_orders, "stats": oo_stats},

@@ -30,7 +30,7 @@ WORKDIR="$REPO_ROOT"
 DELIVER="telegram"
 
 READONLY_SKILLS=(hermx-status hermx-positions hermx-trace signal-memory)
-BRIDGE_SCRIPTS=(hermx_gate_lib.py hermx-reconcile-gate.py hermx-health-watch.py hermx-intake-gate.py hermx-ledger-reconcile.py)
+BRIDGE_SCRIPTS=(hermx_gate_lib.py hermx-reconcile-gate.py hermx-health-watch.py hermx-intake-gate.py hermx-ledger-reconcile.py hermx-reconcile-lag-gate.py)
 
 DRY_RUN="${HERMX_CRON_DRY_RUN:-0}"
 DO_SMOKE="${HERMX_CRON_SMOKE:-1}"
@@ -163,6 +163,15 @@ ensure_job "hermx-ledger-reconcile" \
    --script hermx-ledger-reconcile.py \
    --workdir \"$WORKDIR\" --deliver $DELIVER"
 
+# Reconcile-lag observability gate (P1-2). Non-LLM (--no-agent): reads the ledger's
+# newest recorded_at_ms (schema v3) and wakes the operator when now - max(recorded_at_ms)
+# exceeds HERMX_MAX_RECONCILE_LAG_MS (default 20m > this 15m cadence). Fail-open on a
+# missing ledger / unreachable dashboard, like hermx-ledger-reconcile.
+ensure_job "hermx-reconcile-lag" \
+  "\"every 15m\" --no-agent \
+   --script hermx-reconcile-lag-gate.py \
+   --workdir \"$WORKDIR\" --deliver $DELIVER"
+
 ensure_job "hermx-signal-late" \
   "\"every 30m\" \"$SIGNAL_LATE_PROMPT\" \
    --script hermx-intake-gate.py \
@@ -177,7 +186,7 @@ run "hermes -z \"ping\" --skills hermx-status >/dev/null && echo '  hermx-status
 
 if [ "$DO_SMOKE" = "1" ]; then
   say "Firing each job once ('hermes cron run'); inspect ~/.hermes/cron/output/<job_id>/"
-  for name in hermx-weekly hermx-reconcile hermx-daily hermx-health-check hermx-signal-late hermx-ledger-reconcile; do
+  for name in hermx-weekly hermx-reconcile hermx-daily hermx-health-check hermx-signal-late hermx-ledger-reconcile hermx-reconcile-lag; do
     run "hermes cron run \"$name\"" || warn "  'cron run $name' failed — inspect manually"
   done
 else
