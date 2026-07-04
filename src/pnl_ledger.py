@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 import threading
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Repo root == parent of this file's directory (src/). Mirrors dashboard.REPO_ROOT.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +46,11 @@ ORDER_PNL_IS_NET = {
     "bybit": False,
     # Add others as validated empirically
 }
+
+# Snap-to-zero tolerance for the per-poll signed-qty accumulator: successive
+# float add/subtract can leave e.g. 1e-13 residue instead of exactly 0.0, which
+# would spuriously satisfy ``prev != 0.0`` and mis-detect the next fill as a close.
+QTY_EPS = 1e-9
 
 
 def _compute_net_realized(
@@ -376,13 +384,26 @@ def reconcile_from_order_history(
             or _as_float(row.get("filled")) or 0.0
         prev = positions.get(inst_id, 0.0)
         signed = filled if side == "buy" else -filled
-        positions[inst_id] = prev + signed
+        new_pos = prev + signed
+        if abs(new_pos) < QTY_EPS:
+            new_pos = 0.0
+        positions[inst_id] = new_pos
+        if prev != 0.0 and ((prev > 0.0 and new_pos < 0.0) or (prev < 0.0 and new_pos > 0.0)):
+            logger.warning(
+                "reconcile_position_sign_flip inst_id=%s prev=%.8g new=%.8g side=%s filled=%.8g",
+                inst_id, prev, positions[inst_id], side, filled,
+            )
 
         reduce_only = row.get("reduceOnly")
         if isinstance(reduce_only, str):
             reduce_only = reduce_only.strip().lower() == "true"
         opposite_side = (prev > 0 and side == "sell") or (prev < 0 and side == "buy")
         is_close = bool(reduce_only) or (prev != 0.0 and opposite_side)
+        if is_close and prev != 0.0 and not opposite_side:
+            logger.warning(
+                "reconcile_sign_guard_mismatch inst_id=%s prev=%.8g side=%s",
+                inst_id, prev, side,
+            )
         if not is_close:
             continue
 

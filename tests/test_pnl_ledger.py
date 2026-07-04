@@ -331,3 +331,78 @@ def test_reconcile_attributes_hyperliquid_numeric_cloid(ledger_dir):
     assert [r["ord_id"] for r in ledger] == ["hlClose"]
     # The original mxc id is preserved via the submit-time map.
     assert ledger[0]["cl_ord_id"] == "mxc-hl-close"
+
+
+# --- P0-2 signed_qty accumulator hardening ----------------------------------
+
+def test_float_residue_does_not_create_phantom_close(ledger_dir):
+    # 0.1 + 0.2 - 0.3 leaves a 5.55e-17 float residue instead of exactly 0.0.
+    # Without snap-to-zero that residue makes the following short-open (opposite
+    # side of the +residue) mis-detect as a close; snap-to-zero suppresses it so
+    # only the genuine close (c1) is ledgered.
+    rows = [
+        {"instId": "BTC-USDT", "ordId": "b1", "clOrdId": "mxc1", "side": "buy",
+         "accFillSz": 0.1, "avgPx": "50000", "uTime": 100},
+        {"instId": "BTC-USDT", "ordId": "b2", "clOrdId": "mxc2", "side": "buy",
+         "accFillSz": 0.2, "avgPx": "50000", "uTime": 200},
+        {"instId": "BTC-USDT", "ordId": "c1", "clOrdId": "mxc3", "side": "sell",
+         "accFillSz": 0.3, "avgPx": "51000", "pnl": "10.0", "uTime": 300},
+        {"instId": "BTC-USDT", "ordId": "s1", "clOrdId": "mxc4", "side": "sell",
+         "accFillSz": 0.5, "avgPx": "52000", "uTime": 400},
+    ]
+    written = pnl_ledger.reconcile_from_order_history(rows, "okx", "demo")
+    assert written == 1
+    assert [r["ord_id"] for r in pnl_ledger.read_closed_trades()] == ["c1"]
+
+
+def test_snap_to_zero_after_equal_and_opposite_fills(ledger_dir):
+    # 0.3 + 0.3 - 0.6 = 5.55e-17 residue; equal-and-opposite fills must leave the
+    # running position snapped to 0.0 so the next same-direction open is not a
+    # phantom close. Observed through reconcile output (positions is function-local).
+    rows = [
+        {"instId": "BTC-USDT-SWAP", "ordId": "o1", "clOrdId": "mxc1", "side": "buy",
+         "accFillSz": 0.3, "avgPx": "50000", "uTime": 100},
+        {"instId": "BTC-USDT-SWAP", "ordId": "o2", "clOrdId": "mxc2", "side": "buy",
+         "accFillSz": 0.3, "avgPx": "50000", "uTime": 200},
+        {"instId": "BTC-USDT-SWAP", "ordId": "c1", "clOrdId": "mxc3", "side": "sell",
+         "accFillSz": 0.6, "avgPx": "51000", "pnl": "5.0", "uTime": 300},
+        {"instId": "BTC-USDT-SWAP", "ordId": "reopen", "clOrdId": "mxc4", "side": "buy",
+         "accFillSz": 1.0, "avgPx": "52000", "uTime": 400},
+    ]
+    written = pnl_ledger.reconcile_from_order_history(rows, "okx", "demo")
+    assert written == 1
+    assert [r["ord_id"] for r in pnl_ledger.read_closed_trades()] == ["c1"]
+
+
+def test_sign_flip_warning_is_logged(ledger_dir, caplog):
+    # prev = +0.5, a single sell of 1.0 overshoots zero to -0.5. The flip is logged
+    # (informational) and the close IS detected (prev > 0, sell = opposite side).
+    rows = [
+        {"instId": "BTC-USDT-SWAP", "ordId": "open1", "clOrdId": "mxcOpen",
+         "side": "buy", "accFillSz": 0.5, "avgPx": "50000", "uTime": 100},
+        {"instId": "BTC-USDT-SWAP", "ordId": "flip1", "clOrdId": "mxcFlip",
+         "side": "sell", "accFillSz": 1.0, "avgPx": "51000", "pnl": "7.0",
+         "uTime": 200},
+    ]
+    with caplog.at_level("WARNING", logger="pnl_ledger"):
+        written = pnl_ledger.reconcile_from_order_history(rows, "okx", "demo")
+    assert written == 1
+    assert any("reconcile_position_sign_flip" in r.message for r in caplog.records)
+
+
+def test_sign_guard_mismatch_logs_and_continues(ledger_dir, caplog):
+    # reduceOnly=True on a same-direction (buy-on-long) fill forces is_close while
+    # the side is wrong for a close -> the guard logs and the row is still processed.
+    rows = [
+        {"instId": "BTC-USDT-SWAP", "ordId": "open1", "clOrdId": "mxcOpen",
+         "side": "buy", "accFillSz": 1.0, "reduceOnly": False,
+         "avgPx": "50000", "uTime": 100},
+        {"instId": "BTC-USDT-SWAP", "ordId": "bad1", "clOrdId": "mxcBad",
+         "side": "buy", "accFillSz": 0.5, "reduceOnly": True,
+         "avgPx": "51000", "pnl": "1.0", "uTime": 200},
+    ]
+    with caplog.at_level("WARNING", logger="pnl_ledger"):
+        written = pnl_ledger.reconcile_from_order_history(rows, "okx", "demo")
+    assert any("reconcile_sign_guard_mismatch" in r.message for r in caplog.records)
+    assert written == 1
+    assert [r["ord_id"] for r in pnl_ledger.read_closed_trades()] == ["bad1"]
