@@ -84,8 +84,9 @@ def stuck_order_conditions(ops):
             "fingerprint": f"reconcile:stuck_order:{cl}",
             "severity": "warning",
             "category": "reconcile",
-            "title": f"stuck order {cl}",
-            "detail": {"cl_ord_id": cl, "symbol": row.get("symbol"), "state": "UNKNOWN"},
+            "title": f"stuck order {cl} -- run /hx-troubleshoot",
+            "detail": {"cl_ord_id": cl, "symbol": row.get("symbol"), "state": "UNKNOWN",
+                       "hint": "investigate via /hx-troubleshoot"},
         })
     return conds
 

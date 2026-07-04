@@ -637,6 +637,48 @@ def post_close(receiver_base, secret, symbol, strategy_id, operator, reason):
     return out
 
 
+def get_order_troubleshoot_report(receiver_base, secret):
+    """GET /api/admin/order-troubleshoot on the receiver → list of issue rows, or the
+    UNKNOWN sentinel on a failed/unreachable read (never fabricate "no issues" from a
+    failed read). Each row: {"cl_ord_id", "issue_type", "evidence", "actions"}."""
+    body, err = _get_json(receiver_base, "/api/admin/order-troubleshoot", secret=secret)
+    if err is not None or not isinstance(body, dict) or not body.get("ok"):
+        return UNKNOWN
+    return body.get("results") or []
+
+
+def post_apply_order_action(receiver_base, secret, cl_ord_id, action_id, operator, reason):
+    """POST /api/admin/order-journal/apply-action on the receiver → normalized result.
+
+    The server independently RE-DERIVES eligibility from the journal's own history --
+    this call only SELECTS among what the server currently, freshly computes as
+    eligible; it can never force an arbitrary state. Result:
+        {"outcome": "healed"|"refused"|UNKNOWN, "reason", "from_state", "to_state",
+         "cl_ord_id", "http", "raw"}
+    - transport/parse failure or 5xx → UNKNOWN (the write may or may not have landed).
+    - 200 outcome:healed → healed. 200 outcome:refused, or 400/401 → refused.
+    """
+    payload = {"cl_ord_id": cl_ord_id, "action_id": action_id, "operator": operator, "reason": reason}
+    body, err = _post_json(receiver_base, "/api/admin/order-journal/apply-action", payload, secret=secret)
+    out = {"outcome": UNKNOWN, "reason": None, "from_state": None, "to_state": None,
+           "cl_ord_id": cl_ord_id, "http": err, "raw": body}
+    breason = body.get("reason") if isinstance(body, dict) else None
+    # Transport/parse failure or 5xx → the write may or may not have landed.
+    if (err is not None and not err.startswith("http_")) or (err or "").startswith("http_5"):
+        out["reason"] = breason or err or "no_response"
+        return out
+    if err is None and isinstance(body, dict) and body.get("ok") and body.get("outcome") == "healed":
+        out["outcome"] = "healed"
+        out["from_state"] = body.get("from_state")
+        out["to_state"] = body.get("to_state")
+        out["reason"] = "healed"
+        return out
+    # Any other 200 (outcome:refused) or 400/401 → definitively not applied.
+    out["outcome"] = "refused"
+    out["reason"] = breason or err or "refused"
+    return out
+
+
 def read_position_for_symbol(state, symbol):
     """Resolve one symbol's position from a ``read_state()`` result → status dict.
 

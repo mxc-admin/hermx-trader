@@ -489,3 +489,25 @@ def latest_order_record(cl_ord_id: str | None) -> dict | None:
         return None
     with _wr._ORDER_JOURNAL_LOCK:
         return _order_index()["latest"].get(cl)
+
+
+def order_history_for(cl_ord_id: "str | None") -> dict:
+    """Full seq-ordered journal history for one cl_ord_id (all sealed segments still on
+    disk + the live tail), read under the journal lock so it cannot race a concurrent
+    checkpoint+rotation. Returns {"records": [...], "history_complete": bool}.
+
+    history_complete is True iff the earliest returned record has prev_state is None --
+    i.e. it is provably the order's actual first-ever write (per _ORDER_STATE_TRANSITIONS,
+    only a true first write has prev_state=None) -- self-contained, no dependency on the
+    checkpoint's separately-tracked origin map (which is not guaranteed durable across
+    many rotations for a very long-lived order, since _order_checkpoint_and_rotate folds
+    purely from currently-on-disk segments each time, not from the prior checkpoint)."""
+    import webhook_receiver as _wr
+    cl = str(cl_ord_id or "").strip()
+    if not cl:
+        return {"records": [], "history_complete": False}
+    with _wr._ORDER_JOURNAL_LOCK:
+        records = [r for r in _read_all_order_records() if r.get("cl_ord_id") == cl]
+    records.sort(key=lambda r: r.get("seq") if isinstance(r.get("seq"), int) else -1)
+    history_complete = bool(records) and records[0].get("prev_state") is None
+    return {"records": records, "history_complete": history_complete}
