@@ -349,6 +349,64 @@ def test_order_history_reconcile_uses_strategy_venue_and_mode(dash, monkeypatch)
     assert recorded == [("kucoin", "live")]
 
 
+def _ageout_setup(dash_mod, monkeypatch, n_rows, oldest_ms, high_water_ms):
+    """Seed the ledger high-water for kucoin/live, stub the executor to return
+    ``n_rows`` history rows whose oldest uTime is ``oldest_ms``, and capture any
+    reconcile alert. Returns the captured-alert list."""
+    import pnl_ledger  # noqa: WPS433
+    import webhook_receiver  # noqa: WPS433
+
+    pnl_ledger.append_closed_trades([
+        {"exchange": "kucoin", "inst_id": "BTC/USDT:USDT", "ord_id": "hw",
+         "mode": "live", "closed_at_ms": high_water_ms},
+    ])
+
+    rows = [{"instId": "BTC/USDT:USDT", "uTime": oldest_ms + i} for i in range(n_rows)]
+
+    class _HistExecutor:
+        def get_order_history_raw(self, inst_ids, limit=100):
+            return rows
+
+    monkeypatch.setattr(dash_mod, "_strategy_executor", lambda sc, mode: (_HistExecutor(), None))
+    dash_mod._OKX_ORDER_HISTORY_CACHE.clear()
+
+    captured: list[tuple] = []
+    monkeypatch.setattr(
+        webhook_receiver, "emit_reconcile_alert",
+        lambda kind, detail: captured.append((kind, detail)) or {},
+    )
+    return captured
+
+
+def test_ageout_detector_fires_on_saturated_window_past_high_water(dash, monkeypatch):
+    dash_mod, _core, _root = dash
+    captured = _ageout_setup(dash_mod, monkeypatch, n_rows=100, oldest_ms=5000, high_water_ms=1000)
+    dash_mod.strategy_order_history_snapshot({"instrument": {"exchange": "kucoin"}}, "live")
+    assert len(captured) == 1
+    _kind, detail = captured[0]
+    assert detail["stage"] == "history_window_ageout"
+    assert detail["venue"] == "kucoin"
+    assert detail["mode"] == "live"
+    assert detail["oldest_ms"] == 5000
+    assert detail["high_water_ms"] == 1000
+    assert detail["gap_ms"] == 4000
+
+
+def test_no_ageout_when_window_unsaturated(dash, monkeypatch):
+    dash_mod, _core, _root = dash
+    captured = _ageout_setup(dash_mod, monkeypatch, n_rows=99, oldest_ms=5000, high_water_ms=1000)
+    dash_mod.strategy_order_history_snapshot({"instrument": {"exchange": "kucoin"}}, "live")
+    assert captured == []
+
+
+def test_no_ageout_when_oldest_row_overlaps_ledger(dash, monkeypatch):
+    dash_mod, _core, _root = dash
+    # Saturated but oldest row (500) predates the high-water (1000) -> no gap.
+    captured = _ageout_setup(dash_mod, monkeypatch, n_rows=100, oldest_ms=500, high_water_ms=1000)
+    dash_mod.strategy_order_history_snapshot({"instrument": {"exchange": "kucoin"}}, "live")
+    assert captured == []
+
+
 def test_snapshot_for_env_prefers_venue_mode_then_falls_back(dash):
     dash_mod, _core, _root = dash
     by_env = {"okx:demo": {"tag": "okx-demo"}, "kucoin:live": {"tag": "kc-live"}}

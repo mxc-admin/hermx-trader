@@ -928,6 +928,33 @@ def strategy_order_history_snapshot(strategy_config, mode):
     try:
         inst_ids = [strategy_inst_id(config, sym) for sym in _venue_symbols(venue)]
         rows = executor.get_order_history_raw(inst_ids, limit=100)
+        # P0-1: age-out detector. A saturated (100-row) window whose oldest row
+        # post-dates our newest recorded close means a close may have aged out of
+        # the readable window before any reconcile folded it into the ledger.
+        # Detection-only; wrapped so it can never fail the read-only snapshot.
+        try:
+            from pnl_ledger import _row_ts, max_recorded_closed_at
+
+            saturated = len(rows or []) >= 100
+            if saturated and rows:
+                oldest_ms = min(_row_ts(r) for r in rows)
+                high_water = max_recorded_closed_at(venue, mode_key)
+                if high_water is not None and oldest_ms > high_water:
+                    from webhook_receiver import (
+                        RECONCILE_ALERT_MISMATCH,
+                        emit_reconcile_alert,
+                    )
+
+                    emit_reconcile_alert(RECONCILE_ALERT_MISMATCH, {
+                        "stage": "history_window_ageout",
+                        "venue": venue,
+                        "mode": mode_key,
+                        "oldest_ms": oldest_ms,
+                        "high_water_ms": high_water,
+                        "gap_ms": oldest_ms - high_water,
+                    })
+        except Exception:
+            pass
         # Fold HermX close rows into the durable ledger with THIS strategy's venue+mode.
         # Wrapped so a reconcile failure can never fail the (read-only) snapshot.
         try:

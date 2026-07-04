@@ -184,6 +184,24 @@ def read_closed_trades(
     return rows
 
 
+def max_recorded_closed_at(exchange: str, mode: str) -> int | None:
+    """Return the maximum closed_at_ms already ledgered for (exchange, mode), or None."""
+    rows = read_closed_trades()
+    best = None
+    for row in rows:
+        if row.get("exchange") != exchange or row.get("mode") != mode:
+            continue
+        ts = row.get("closed_at_ms")
+        if ts is not None:
+            try:
+                ts = int(ts)
+            except (TypeError, ValueError):
+                continue
+            if best is None or ts > best:
+                best = ts
+    return best
+
+
 def net_realized_for_strategy(
     strategy_id: str,
     mode: str | None = None,

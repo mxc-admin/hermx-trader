@@ -406,3 +406,32 @@ def test_sign_guard_mismatch_logs_and_continues(ledger_dir, caplog):
     assert any("reconcile_sign_guard_mismatch" in r.message for r in caplog.records)
     assert written == 1
     assert [r["ord_id"] for r in pnl_ledger.read_closed_trades()] == ["bad1"]
+
+
+# --- P0-1 max_recorded_closed_at (age-out high-water helper) -----------------
+
+def test_max_recorded_closed_at_returns_max(ledger_dir):
+    pnl_ledger.append_closed_trades([
+        {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "a",
+         "mode": "demo", "closed_at_ms": 1000},
+        {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "b",
+         "mode": "demo", "closed_at_ms": 3000},
+        {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "c",
+         "mode": "demo", "closed_at_ms": 2000},
+    ])
+    assert pnl_ledger.max_recorded_closed_at("okx", "demo") == 3000
+
+
+def test_max_recorded_closed_at_filters_by_env(ledger_dir):
+    pnl_ledger.append_closed_trades([
+        {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "a",
+         "mode": "demo", "closed_at_ms": 1000},
+        {"exchange": "bybit", "inst_id": "BTC-USDT-SWAP", "ord_id": "b",
+         "mode": "live", "closed_at_ms": 9000},
+    ])
+    assert pnl_ledger.max_recorded_closed_at("okx", "demo") == 1000
+    assert pnl_ledger.max_recorded_closed_at("bybit", "live") == 9000
+
+
+def test_max_recorded_closed_at_none_when_empty(ledger_dir):
+    assert pnl_ledger.max_recorded_closed_at("okx", "demo") is None
