@@ -466,6 +466,8 @@ def _row_ts(row: dict) -> int:
 
 def _build_entry(row: dict, exchange_id: str, mode: str, side: str, filled: float) -> dict:
     """Project an exchange order-history row onto the durable ledger schema."""
+    inst_id = row.get("instId") or row.get("inst_id")
+    ord_id = row.get("ordId") or row.get("id")
     # Prefer the adapter-normalized realized P&L; fall back to the OKX-native pnl.
     pnl_gross = _as_float(row.get("realized_pnl"))
     if pnl_gross is None:
@@ -473,12 +475,27 @@ def _build_entry(row: dict, exchange_id: str, mode: str, side: str, filled: floa
     if pnl_gross is None:
         # The venue exposed no realized P&L for this close (e.g. bybit in order
         # history). Persist the row with gross=None (an honest "unknown", distinct
-        # from a real 0.0) but leave a trace so the gap is auditable, not silent.
-        logger.debug(
-            "realized pnl unavailable (gross=None) for venue %s ordId %s — recording None",
-            exchange_id, row.get("ordId") or row.get("id"),
+        # from a real 0.0) but warn: a genuine close with no PnL signal must not be
+        # indistinguishable from a real break-even zero.
+        logger.warning(
+            "pnl_gross_is_none inst_id=%s ord_id=%s filled=%.8g — writing zero pnl, verify venue",
+            inst_id, ord_id, filled,
         )
     fee_cost = _as_float(row.get("fee"))
+    fee_currency = row.get("feeCcy")
+    # A fee paid in a currency other than the instrument's quote (e.g. BNB, base
+    # asset) is not USD and must not be summed into closed_fees_usd as if it were.
+    # We can't FX-convert here, so warn for operator awareness and still persist the
+    # row — the mismatched fee is simply excluded from the USD total downstream.
+    if fee_cost and fee_currency and inst_id:
+        _parts = str(inst_id).split("-")
+        quote = _parts[1].upper() if len(_parts) > 1 else None
+        if quote and str(fee_currency).upper() != quote:
+            logger.warning(
+                "fee_currency_mismatch inst_id=%s fee_currency=%s quote=%s fee_cost=%.8g"
+                " — fee excluded from USD total",
+                inst_id, fee_currency, quote, fee_cost,
+            )
     cl_ord_id = row.get("clOrdId") or row.get("clientOrderId")
     # Hyperliquid returns a numeric/hex cloid in place of the submitted mxc id; if
     # we recorded the mapping at submit time, store the original mxc id (Phase 7b).
@@ -501,14 +518,12 @@ def _build_entry(row: dict, exchange_id: str, mode: str, side: str, filled: floa
         from pnl_strategy_map import resolve_strategy as _resolve_strategy
         strategy_id = _resolve_strategy(cl_ord_id)
     if strategy_id is None and cl_ord_id and str(cl_ord_id).startswith("operator_close_"):
-        strategy_id = _parse_operator_close_strategy_id(
-            cl_ord_id, row.get("instId") or row.get("inst_id")
-        )
+        strategy_id = _parse_operator_close_strategy_id(cl_ord_id, inst_id)
     return {
         "schema_version": SCHEMA_VERSION,
         "exchange": exchange_id,
-        "inst_id": row.get("instId") or row.get("inst_id"),
-        "ord_id": row.get("ordId") or row.get("id"),
+        "inst_id": inst_id,
+        "ord_id": ord_id,
         "mode": mode,
         # Strategy attribution resolved above from the submit-time cl_ord_id map
         # (C1), or parsed from an operator_close cl_ord_id. None when not derivable.
@@ -518,7 +533,7 @@ def _build_entry(row: dict, exchange_id: str, mode: str, side: str, filled: floa
         "avg_px": _as_float(row.get("avgPx")),
         "pnl_gross": pnl_gross,
         "fee_cost": fee_cost,
-        "fee_currency": row.get("feeCcy"),
+        "fee_currency": fee_currency,
         # Phase 2: fee-correct net, computed from gross+fee per venue semantics.
         # Gross stays the displayed value for now (Decision ②: verify net later).
         "net_realized_pnl": _compute_net_realized(pnl_gross, fee_cost, exchange_id),

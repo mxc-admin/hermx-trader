@@ -373,6 +373,31 @@ def test_reconcile_attributes_hyperliquid_numeric_cloid(ledger_dir):
     assert ledger[0]["cl_ord_id"] == "mxc-hl-close"
 
 
+# --- fee-currency + None-pnl logging ----------------------------------------
+
+def test_fee_currency_mismatch_logs_warning(ledger_dir, caplog):
+    # Fee paid in BNB on a USDT-quoted instrument: warn and still persist the row.
+    row = {"instId": "BTC-USDT-SWAP", "ordId": "feeMismatch", "clOrdId": "mxcFee",
+           "side": "sell", "accFillSz": 1.0, "reduceOnly": True, "avgPx": "51000",
+           "pnl": "10.0", "fee": "-0.02", "feeCcy": "BNB", "uTime": 200}
+    with caplog.at_level("WARNING", logger="pnl_ledger"):
+        written = pnl_ledger.reconcile_from_order_history([row], "okx", "demo")
+    assert written == 1
+    assert any("fee_currency_mismatch" in r.getMessage() for r in caplog.records)
+
+
+def test_none_pnl_logs_warning(ledger_dir, caplog):
+    # A HermX close with no realized-pnl field: warn (pnl_gross_is_none) and persist.
+    row = {"instId": "BTC-USDT-SWAP", "ordId": "nonePnl", "clOrdId": "mxcNone",
+           "side": "sell", "accFillSz": 1.0, "reduceOnly": True, "avgPx": "51000",
+           "uTime": 200}
+    with caplog.at_level("WARNING", logger="pnl_ledger"):
+        written = pnl_ledger.reconcile_from_order_history([row], "okx", "demo")
+    assert written == 1
+    assert any("pnl_gross_is_none" in r.getMessage() for r in caplog.records)
+    assert pnl_ledger.read_closed_trades()[0]["pnl_gross"] is None
+
+
 # --- P0-2 signed_qty accumulator hardening ----------------------------------
 
 def test_float_residue_does_not_create_phantom_close(ledger_dir):
