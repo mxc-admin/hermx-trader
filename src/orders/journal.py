@@ -389,6 +389,23 @@ def record_order_state(
         # Ensure the index is built BEFORE appending so the build reads the pre-append
         # live tail; the new record is then folded in explicitly (no double count).
         index = _order_index()
+        # Re-validate against the journal's AUTHORITATIVE latest state under the lock:
+        # the caller's prev_state may be stale (e.g. the unknown-resolver snapshotted
+        # SUBMITTED, then the submit path journaled a terminal REJECTED during the
+        # resolver's reconcile backoff). A terminal state must never be clobbered.
+        latest = index["latest"].get(cl_ord_id)
+        actual_state = latest.get("state") if latest is not None else None
+        if actual_state is not None and not order_state_can_transition(actual_state, new_state):
+            logging.error(
+                "STALE order-state write rejected for %s: caller claimed prev_state=%s "
+                "but journal state is %s (-> %s)",
+                cl_ord_id, prev_state, actual_state, new_state,
+            )
+            raise ValueError(
+                f"stale order-state write for {cl_ord_id}: caller claimed "
+                f"prev_state={prev_state} but journal state is {actual_state}; "
+                f"{actual_state} -> {new_state} is illegal"
+            )
         record = {
             "schema_version": ORDER_JOURNAL_SCHEMA_VERSION,
             "seq": _order_journal_next_seq(),

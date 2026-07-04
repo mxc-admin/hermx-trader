@@ -463,3 +463,59 @@ def test_adapter_exception_with_reconcile_enabled_does_not_raise_unbound(wr, mon
     records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
     states = [r["state"] for r in records if r["cl_ord_id"] == cl]
     assert states == [wr.ORDER_STATE_PLANNED, wr.ORDER_STATE_SUBMITTED, wr.ORDER_STATE_UNKNOWN]
+
+
+# ---------------------------------------------------------------------------
+# Stale-write guard: record_order_state must validate against the journal's
+# ACTUAL latest state (under the lock), not just the caller's prev_state claim.
+# ---------------------------------------------------------------------------
+
+def _seed_rejected(wr, cl: str) -> None:
+    intent = {"symbol": "XRPUSDT", "side": "buy", "inst_id": "XRP-USDT-SWAP", "planned_notional_usd": 1500.0, "policy": "weighted_v1"}
+    wr.record_order_state(cl, wr.ORDER_STATE_PLANNED, intent=intent, prev_state=None)
+    wr.record_order_state(cl, wr.ORDER_STATE_SUBMITTED, intent=intent, prev_state=wr.ORDER_STATE_PLANNED)
+    wr.record_order_state(cl, wr.ORDER_STATE_REJECTED, intent=intent, prev_state=wr.ORDER_STATE_SUBMITTED)
+
+
+def test_stale_prev_state_cannot_clobber_terminal(wr):
+    # The resolver race: caller snapshotted SUBMITTED before a concurrent writer
+    # landed terminal REJECTED. The stale UNKNOWN write must raise and append nothing.
+    cl = "mxc-xrpusdt-buy-staleclobber"
+    _seed_rejected(wr, cl)
+    with pytest.raises(ValueError, match="stale"):
+        wr.record_order_state(cl, wr.ORDER_STATE_UNKNOWN, prev_state=wr.ORDER_STATE_SUBMITTED)
+    assert wr.latest_order_record(cl)["state"] == wr.ORDER_STATE_REJECTED
+    records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+    states = [r["state"] for r in records if r["cl_ord_id"] == cl]
+    assert states == [wr.ORDER_STATE_PLANNED, wr.ORDER_STATE_SUBMITTED, wr.ORDER_STATE_REJECTED]
+
+
+def test_legitimate_transitions_still_pass_stale_guard(wr):
+    # Happy path unchanged: correct prev_state at every step journals normally.
+    cl = "mxc-xrpusdt-buy-staleok"
+    _seed_rejected(wr, cl)
+    assert wr.latest_order_record(cl)["state"] == wr.ORDER_STATE_REJECTED
+
+
+def test_resolver_lost_race_leaves_terminal_state_intact(wr, monkeypatch):
+    # End-to-end race replay: the resolver snapshots cur_state=SUBMITTED, then the
+    # submit path journals REJECTED during the reconcile backoff window, then the
+    # resolver's not-found outcome tries SUBMITTED -> UNKNOWN. The in-lock guard must
+    # reject the stale write; the resolver swallows it into summary["errors"].
+    cl = "mxc-xrpusdt-buy-resolverrace"
+    intent = {"symbol": "XRPUSDT", "side": "buy", "inst_id": "XRP-USDT-SWAP", "planned_notional_usd": 1500.0, "policy": "weighted_v1"}
+    wr.record_order_state(cl, wr.ORDER_STATE_PLANNED, intent=intent, prev_state=None)
+    wr.record_order_state(cl, wr.ORDER_STATE_SUBMITTED, intent=intent, prev_state=wr.ORDER_STATE_PLANNED)
+
+    def racing_reconcile(executor, lookup, **kw):
+        # Simulate the concurrent submit-path terminal write landing mid-backoff.
+        wr.record_order_state(cl, wr.ORDER_STATE_REJECTED, intent=intent, prev_state=wr.ORDER_STATE_SUBMITTED)
+        return {"state": wr.ORDER_STATE_UNKNOWN, "reason": "not_found", "source": "stub", "attempts": 1, "elapsed_s": 0.0}
+
+    monkeypatch.setattr(wr, "reconcile_order_with_backoff", racing_reconcile)
+    summary = wr.resolve_unknown_orders_once(executor=mock.Mock())
+    assert wr.latest_order_record(cl)["state"] == wr.ORDER_STATE_REJECTED
+    assert any(cl in err for err in summary["errors"])
+    records = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+    states = [r["state"] for r in records if r["cl_ord_id"] == cl]
+    assert states == [wr.ORDER_STATE_PLANNED, wr.ORDER_STATE_SUBMITTED, wr.ORDER_STATE_REJECTED]

@@ -357,6 +357,10 @@ class ExecutionService:
                     detail=outcome_detail,
                     prev_state=order_state_submitted,
                 )
+            except ValueError as exc:
+                # Lost race: a concurrent writer already journaled a state that makes
+                # this transition illegal. The journal is authoritative -- log and move on.
+                logging.warning("record_order_state lost race for cl_ord_id=%s: %s", cl_ord_id, exc)
             except OSError as exc:
                 fail_closed_state_write(
                     "order-journal-outcome",
@@ -431,6 +435,10 @@ class ExecutionService:
                             detail={"reconcile": result["reconcile"], "stdout_outcome": outcome_state},
                             prev_state=order_state_submitted,
                         )
+                    except ValueError as exc:
+                        # Lost race: a concurrent writer already journaled a state that
+                        # makes this transition illegal. Benign -- log and move on.
+                        logging.warning("record_order_state lost race for cl_ord_id=%s: %s", cl_ord_id, exc)
                     except OSError as exc:
                         fail_closed_state_write(
                             "order-journal-reconcile",
