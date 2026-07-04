@@ -19,7 +19,7 @@
 - **What:** Build a messenger-gateway skill for Telegram interaction.
 - **Tested:** Official Hermes docs + ARCHITECTURE.md §7.5 cross-check.
 - **Verdict:** REJECTED
-- **Reason:** Telegram is Hermes' native gateway (`hermes gateway`), not a skill. A skill duplicates built-in functionality. HERMX_AGENT_SYSTEM_DESIGN §4.2/§5.e is a doc error.
+- **Reason:** Telegram is Hermes' native gateway (`hermes gateway`), not a skill. A skill duplicates built-in functionality. docs/HERMES_AGENT_DESIGN.md originally listed it as a skill — since corrected (§5.2 callout / §6.e).
 - **Date:** June 2026
 
 ### Helper scripts directory in skills/hermx-control/scripts/

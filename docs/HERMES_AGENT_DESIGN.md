@@ -572,8 +572,9 @@ HermX HTTP API on loopback. Never touches an exchange; never invents a size.
 > the strategy file (`capital.budget_usd * leverage`). Adding one is a boundary violation.
 
 **Fail behavior.** A 4xx/5xx or stale/degraded `executor` ⇒ report **UNKNOWN**, never
-"flat / no positions." Close/flatten is **not supported** via this API; the agent must
-say so rather than improvise a close via `/webhook`.
+"flat / no positions." Close/flatten is **not supported** via this skill's endpoints;
+the agent must route the operator to the dedicated `/hx-close` skill (reduce-only
+`POST /api/close`, §6.g) rather than improvise a close via `/webhook`.
 
 **Example.**
 
@@ -714,7 +715,7 @@ operator comms degrade but **execution is unaffected**.
 
 ---
 
-### 6.f `signal-memory` **[PLANNED]**
+### 6.f `signal-memory` **[BUILT]**
 
 **Purpose.** Maintain and serve a rolling log of the last N signals and their outcomes
 so the agent has continuity across signals (avoid doubling up, notice contradictions).
@@ -735,8 +736,9 @@ so the agent has continuity across signals (avoid doubling up, notice contradict
 }
 ```
 
-**Source.** Reads `logs/executions.jsonl` + `logs/advisor-decisions.jsonl` through a
-small read-only endpoint (not raw filesystem access — keeps the agent's surface to HTTP).
+**Source.** The dashboard's `GET /api/signals?n=N[&symbol=…]` read endpoint (shipped;
+authenticated via `X-Dashboard-Token`), which serves recent signal/decision history —
+not raw filesystem access, keeping the agent's surface to HTTP.
 
 **Fail behavior.** Empty/stale ⇒ `status: unknown` with whatever partial history exists;
 the agent flags reduced context.
@@ -746,6 +748,33 @@ the agent flags reduced context.
 > **Agent (before evaluating a new SOL buy):** signal-memory.recent(symbol=SOLUSDT)
 > → "Already long SOL from 14:00, advisor proceeded at 72. New buy would double up —
 > flag to operator rather than auto-stack." 
+
+---
+
+### 6.g The `/hx-*` slash-command family **[BUILT]**
+
+**Purpose.** Give the operator small, single-purpose commands (catalog: §5.2.1) instead
+of routing every request through the monolithic `hermx-control`. Each command is its
+own `skills/hermx-*/SKILL.md` satisfying the §5.3 contract; shared behavior lives in
+`skills/hermx-ops/lib/hermx_ops.py` (stdlib-only helpers) and
+`skills/hermx-ops/references/api-contract.md` (the canonical endpoint/auth/response
+contract every command encodes).
+
+**Contract highlights (inherited from `hermx-control`):**
+
+- Loopback HTTP only; no exchange credentials, no shell/raw-filesystem order path.
+- **UNKNOWN-never-flat:** every degraded or failed read is an explicit UNKNOWN
+  sentinel; only a healthy, non-degraded read may report FLAT. Mutating commands
+  *refuse* to act on UNKNOWN — `/hx-close` will not close a position it cannot confirm.
+- No command ever sends a size. `/hx-close` triggers a server-side reduce-only close;
+  `/hx-strategy-mode` writes a mode override through the dashboard; neither can route
+  via `/webhook` (the only order-creation path).
+- Mutations are preview-then-confirm: dry-run first, explicit "yes" required, with the
+  strongest prompt reserved for `live` transitions.
+
+**Fail behavior.** Same as every skill: a 4xx/5xx, stale executor, or corrupt state
+file ⇒ `status: unknown` and refusal to mutate. The write endpoints (`/api/close`,
+`/api/control/strategy/{id}`) are token-authenticated and fail closed without a match.
 
 ---
 
@@ -764,6 +793,11 @@ the agent flags reduced context.
 | `/killswitch` | report kill-switch state (read-only) | `GET /health` |
 | `/cancel <id>` | request cancel of a pending order (confirmation flow) | see §7.4 |
 | `/hx-help` | command list | — |
+
+> The `/hx-*` commands already exist today as Hermes slash-command skills (§6.g) run in
+> a local Hermes session. What is [PLANNED] here is the *Telegram delivery channel* for
+> the same intents; `/pnl`, `/last`, `/killswitch`, and `/cancel` are gateway-level
+> designs that map onto the same loopback reads.
 
 **Natural-language queries.** The agent also answers free text ("are we good?", "did
 the SOL alert go through?", "how much are we down today?") by mapping intent to the
@@ -829,7 +863,9 @@ lever that returns to the prior phase's behavior with no code change.
 ### Phase 1 — Deterministic execution; agent = advisory annotator **[CURRENT]**
 
 - **Built:** Full deterministic pipeline (§4.4). Advisor seam exists, `HERMX_ADVISOR_ENABLED`
-  default OFF. `hermx-control` skill ships. Agent can read and relay, cannot decide.
+  default OFF. `hermx-control`, the `/hx-*` slash-command family (§6.g), and
+  `signal-memory` ship. Agent can read, relay, and carry out confirmed operator
+  commands — it cannot decide trades.
 - **Entry gate:** none — this is the baseline.
 - **Rollback:** N/A (this is the floor).
 
@@ -845,8 +881,8 @@ lever that returns to the prior phase's behavior with no code change.
 
 ### Phase 3 — Conviction score gates execution **[MID]**
 
-- **Built:** `kronos-validate`, `dashboard-risk`, `tradingview-chart`, `signal-memory`
-  shipped. The agent aggregates inputs into a **0–100 conviction score** (decision
+- **Built:** `kronos-validate`, `dashboard-risk`, `tradingview-chart` shipped
+  (`signal-memory` already is). The agent aggregates inputs into a **0–100 conviction score** (decision
   matrix §4.5). A configurable threshold (`HERMX_ADVISOR_MIN_SCORE`) gates execution:
   below threshold ⇒ skip/escalate.
 - **Entry gate:** the four intelligence skills each have measured availability and a
@@ -955,7 +991,7 @@ services:
 
 ### 9.4 Copy-and-deploy (step by step)
 
-This is the deploy flow (see INSTALL.md §9.4, `deploy/install-services.sh`, and
+This is the deploy flow (see INSTALL.md, `deploy/install-services.sh`, and
 `docker-compose.yml`), condensed:
 
 1. Provision an Ubuntu 22.04 VPS.
@@ -1019,7 +1055,7 @@ The system never *guesses* a fill; it records `UNKNOWN` and reconciles.
 | **Webhook auth** | `X-Webhook-Secret` (shared secret) mandatory; optional HMAC (`HERMX_REQUIRE_HMAC`) adds `X-Webhook-Timestamp` + `X-Webhook-Signature` (SHA256) with a replay window (`HERMX_REPLAY_WINDOW_SECONDS`, 300s). Body capped at `HERMX_MAX_BODY_BYTES`. Per-IP rate limit. |
 | **Dashboard auth** | Optional token (`HERMX_DASH_AUTH` + `HERMX_SECRET`) via `X-Dashboard-Token`; typically off on a same-host loopback deploy since it isn't publicly reachable. |
 | **Messaging auth** | Telegram bot token / WhatsApp business credentials, plus a **sender allowlist** so only the operator's accounts are accepted (§7.5). |
-| **Agent confinement** | The agent reaches the system **only** via loopback HTTP. It cannot read `.env`, hold exchange credentials, or call CCXT/shell/filesystem for order purposes. Its sole write is `POST /webhook`. |
+| **Agent confinement** | The agent reaches the system **only** via loopback HTTP. It cannot read `.env`, hold exchange credentials, or call CCXT/shell/filesystem for order purposes. Its sole order-creating write is `POST /webhook`; its only other writes are the token-authenticated, sizeless `POST /api/close` (reduce-only) and `POST /api/control/strategy/{id}` (§6.g). |
 | **Safety location** | Money-safety gates are **Python code** in `ExecutionService.execute()`, *not* skill/agent text. The skill prose is guidance only and is explicitly stated to be non-authoritative. An adversarial or buggy LLM cannot widen its authority because the authority isn't in the prose. |
 | **Secrets at rest** | `.env` is mode 600, owner-only; never committed; never exposed to the agent. |
 
@@ -1085,8 +1121,13 @@ Ordered by **what unlocks the most value next**, with the build/plan boundary ex
 - CCXT executor (OKX/KuCoin/Bybit/Hyperliquid; OKX perpetual swap specifics).
 - Unknown-order resolver loop; reconciliation with backoff.
 - Dashboard (`/api`, `/health`, `/`).
-- `hermx-control` skill; deploy flow in INSTALL.md §9.4 (`deploy/install-services.sh`,
-  `docker-compose.yml`); systemd units in `deploy/`.
+- `hermx-control` skill; deploy flow in INSTALL.md (this doc's §9.4;
+  `deploy/install-services.sh`, `docker-compose.yml`); systemd units in `deploy/`.
+- The `/hx-*` slash-command skill family (`skills/hermx-*/SKILL.md`, §6.g) with the
+  shared `skills/hermx-ops/lib/hermx_ops.py` helper + `references/api-contract.md`;
+  receiver `POST /api/close` (reduce-only) and dashboard
+  `POST /api/control/strategy/{id}` write endpoints.
+- `signal-memory` skill + the dashboard `GET /api/signals` read endpoint.
 - Pre-execution **advisor seam** (`run_execution_advisor`, `execute_okx_with_advisor`),
   default OFF, fail-open, with `tests/test_phase8_advisor.py` green.
 
@@ -1094,7 +1135,7 @@ Ordered by **what unlocks the most value next**, with the build/plan boundary ex
 
 | Step | Deliverable | Depends on | Unlocks | Status |
 |------|-------------|------------|---------|--------|
-| **1** | `signal-memory` read endpoint + skill | executions/advisor ledgers (exist) | agent continuity; ML corpus surfaced | [PLANNED] |
+| **1** | `signal-memory` read endpoint + skill | executions/advisor ledgers (exist) | agent continuity; ML corpus surfaced | **[BUILT]** |
 | **2** | `hermes gateway` (Telegram first; native, not a skill) | `hermx-control` (exists) | conversational ops — the headline UX win | [PLANNED] |
 | **3** | Confirmation flow (§7.4) | step 2 | safe human-instructed relay over chat | [PLANNED] |
 | **4** | Advisor burn-in: log & review verdicts | advisor seam (exists) | verdicts validated before relying on the veto | config-only |
