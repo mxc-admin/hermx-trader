@@ -211,6 +211,15 @@ from orders.journal import (  # noqa: E402  F401
     _cl_ord_id_from_readiness,
     load_open_orders,
     latest_order_record,
+    order_history_for,
+)
+# Read-only order-journal troubleshooting (src/orders/troubleshoot.py). Classifies open
+# UNKNOWN orders against known corruption/ambiguity patterns; served read-only via
+# GET /api/admin/order-troubleshoot and applied (server-revalidated, never trusting a
+# caller-supplied target state) via POST /api/admin/order-journal/apply-action below.
+from orders.troubleshoot import (  # noqa: E402  F401
+    run_classifiers,
+    troubleshoot_all_open_orders,
 )
 # Phase 6: pre-execution advisor (advisory / risk gating) extracted to
 # src/advisor.py. The config-bound / reload-reset module state it reads STAYS
@@ -225,6 +234,36 @@ from orders.journal import (  # noqa: E402  F401
 # Re-export so wr.<fn> call sites (build_record's execute_with_advisor call)
 # and monkeypatch seams keep working. execute_if_enabled /
 # _execute_authoritative (execution-service glue) deliberately stay here.
+# Phase 5: the reconcile cluster was extracted to src/reconcile/. RECONCILE_STARTUP_
+# COMPLETE/_AT, ROOT, ExecutorFactory, ALERTS_LEDGER, UNKNOWN_RESOLVER_*,
+# PLANNED_ORDER_TIMEOUT_SECONDS, _RESOLVER_HEARTBEAT/_set_resolver_heartbeat, and
+# unknown_resolver_enabled() STAY here (tests monkeypatch them on wr; per-test
+# importlib.reload would not reset state living in a separate module). The new
+# reconcile/* modules read/mutate that state lazily via `import webhook_receiver as
+# _wr`, matching the Phase 0-4 pattern -- including _reconciliation_executor and
+# reconcile_order_with_backoff/resolve_unknown_orders_once, which tests monkeypatch
+# directly and expect same-package callers to observe via `_wr.` indirection.
+from reconcile import (  # noqa: E402  F401
+    _effective_execution_config,
+    _reconciliation_executor,
+    _executor_for_order,
+    map_order_outcome,
+    reconcile_order_once,
+    reconcile_order_with_backoff,
+    reconcile_startup,
+    _order_age_seconds,
+    _resolve_planned_orphan,
+    resolve_unknown_orders_once,
+    unknown_resolver_loop,
+    reconcile_position_drift,
+    emit_reconcile_alert,
+    RECONCILE_ALERT_MISMATCH,
+    RECONCILE_ALERT_RESOLVER_TIMEOUT,
+    RECONCILE_ALERT_PLANNED_ABANDONED,
+    RECONCILE_ALERT_PLANNED_ON_VENUE,
+    RECONCILE_MAX_ATTEMPTS,
+    RECONCILE_HISTORY_LIMIT,
+)
 from advisor import (  # noqa: E402  F401
     ADVISOR_SYSTEM_PROMPT,
     _advisor_state_snapshot,
@@ -381,25 +420,15 @@ ORDER_JOURNAL_CHECKPOINT_FILE = LOG_DIR / "order-journal.checkpoint.json"
 # (3) reconcile the order journal to that truth; (4) clear the pause via the control
 # state (symbol_pauses) once the symbol is safe to trade again. A paused symbol hard-
 # blocks submission (symbol_pause_info gate in ExecutionService.execute).
-RECONCILE_ALERT_MISMATCH = "RECONCILE_MISMATCH"
-RECONCILE_ALERT_RESOLVER_TIMEOUT = "UNKNOWN_RESOLVER_TIMEOUT"
-# A PLANNED order that crashed before submission (never advanced to SUBMITTED) was, by
-# write-ahead ordering, NEVER sent to the venue -- the resolver rejects it never_submitted.
-RECONCILE_ALERT_PLANNED_ABANDONED = "PLANNED_ORDER_ABANDONED"
-# Anomaly: a PLANNED orphan that the venue unexpectedly DOES know about (should not
-# happen given write-ahead) -- promoted to SUBMITTED for normal reconciliation, alerted.
-RECONCILE_ALERT_PLANNED_ON_VENUE = "PLANNED_ORDER_ON_VENUE"
+# RECONCILE_ALERT_MISMATCH/RESOLVER_TIMEOUT/PLANNED_ABANDONED/PLANNED_ON_VENUE and
+# RECONCILE_MAX_ATTEMPTS/BASE_DELAY/CAP_DELAY/WALL_CLOCK_BUDGET/HISTORY_LIMIT and
+# _PRESENT_ORDER_STATES moved to src/reconcile/ (Phase 5) -- see the `from reconcile
+# import (...)` re-export shim further down for wr.<name> compatibility.
 # Concrete operator transport (Task 6): alerts are mirrored to the unified
 # ALERTS_LEDGER (kind="operator") and optionally POSTed to an external webhook
 # (HERMX_ALERT_WEBHOOK_URL).
 ALERT_AUTH_FAILURE = "AUTH_FAILURE"
 ALERT_QUEUE_SATURATION = "QUEUE_SATURATION"
-# Bounded exponential backoff (:213): max 5 attempts, 500ms base, ~8s cap, <=~20s wall.
-RECONCILE_MAX_ATTEMPTS = 5
-RECONCILE_BASE_DELAY_SECONDS = 0.5
-RECONCILE_CAP_DELAY_SECONDS = 8.0
-RECONCILE_WALL_CLOCK_BUDGET_SECONDS = 20.0
-RECONCILE_HISTORY_LIMIT = 100
 # Task 6 periodic resolver controls.
 UNKNOWN_RESOLVER_INTERVAL_SECONDS = 30.0
 UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS = 900.0
@@ -412,10 +441,6 @@ PLANNED_ORDER_TIMEOUT_SECONDS = 300.0
 # Queue saturation signaling threshold for early warning; hard rejection now uses
 # PROCESS_QUEUE.maxsize and returns 503 when full.
 QUEUE_SATURATION_ALERT_DEPTH = 100
-# Raw OKX order states that mean "the order genuinely exists on the venue". Anything
-# else returned by the query layer (not_found / error / not_implemented / unknown /
-# empty) is treated as "not present here" so the fallback chain keeps searching.
-_PRESENT_ORDER_STATES = frozenset({"live", "partially_filled", "filled", "canceled"})
 # Set once the one-time startup reconcile bootstrap finishes; exposed for FUTURE
 # enforcement (Task 6 may disarm submission until this is True). In THIS task it is
 # only set/logged -- it never hard-blocks the disabled/observe-only path.
@@ -988,16 +1013,7 @@ _order_journal_index: "dict | None" = None
 # resolve_unknown_orders_once()/unknown_resolver_loop() below (Task 6).
 # ---------------------------------------------------------------------------
 
-def _reconcile_float(value, default=0.0):
-    """Tolerant float coercion for normalized query fields (PURE)."""
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
+# _reconcile_float moved to src/reconcile/orders.py (Phase 5).
 # Shared truthiness for the reconciliation feature flags so all three paths gate on
 # IDENTICAL rules and differ only by their documented default. A value in the falsey
 # set (or empty) disables; anything else enables. ``default`` is returned only when
@@ -1025,164 +1041,8 @@ def reconcile_post_submit_enabled() -> bool:
     return _reconcile_flag_enabled("HERMX_RECONCILE_ENABLED", default=False)
 
 
-def map_order_outcome(order: "dict | None", ordered: "float | None" = None) -> tuple:
-    """PURE: map a normalized order (or None) to a reconciliation outcome.
-
-    Returns ``(state, partial, reason)`` per the :211-:212 mapping rules:
-      * state=partially_filled OR (0 < accFillSz < ordered) -> FILLED, partial=True
-      * state=filled (and not a known partial)              -> FILLED, partial=False
-      * state=canceled with accFillSz=0                      -> REJECTED (canceled)
-      * state=canceled with accFillSz>0                      -> FILLED, partial=True
-      * not-found (absent from get_order/pending/archive)    -> UNKNOWN (not_found)
-      * state=live (non-terminal)                            -> SUBMITTED (keep polling)
-      * any other / inconclusive                             -> UNKNOWN
-
-    MONEY-SAFETY: absence is NEVER an auto-rejection. A not_found order may have filled
-    and aged out of the queryable windows, or the query layer may be transiently
-    failing; concluding REJECTED there would drop a live position as flat. Absence maps
-    to UNKNOWN so the order stays tracked (backoff re-polls it; the periodic resolver +
-    lifecycle backstop chase it). The ONLY venue-confirmed rejection is canceled with
-    zero fill.
-    """
-    if order is None:
-        return ORDER_STATE_UNKNOWN, False, "not_found"
-    state = str(order.get("state") or "").lower()
-    acc = _reconcile_float(order.get("acc_fill_sz"), 0.0)
-    is_partial_by_size = ordered is not None and ordered > 0 and 0.0 < acc < ordered
-    if state == "not_found":
-        return ORDER_STATE_UNKNOWN, False, "not_found"
-    if state == "partially_filled":
-        return ORDER_STATE_FILLED, True, "partially_filled"
-    if state == "filled":
-        if is_partial_by_size:
-            return ORDER_STATE_FILLED, True, "partial_by_size"
-        return ORDER_STATE_FILLED, False, "filled"
-    if state == "canceled":
-        if acc > 0.0:
-            return ORDER_STATE_FILLED, True, "canceled_after_partial_fill"
-        # canceled_zero_fill is the ONLY venue-confirmed rejection -- but only when the
-        # zero is REAL. A missing/malformed acc_fill_sz must NOT be coerced to 0 and
-        # rejected: a canceled-after-partial would then be dropped as flat. Keep it
-        # UNKNOWN (report-driven reconcile) so the backoff/resolver chases the true size.
-        if _reconcile_float(order.get("acc_fill_sz"), None) is None:
-            return ORDER_STATE_UNKNOWN, False, "canceled_fill_size_unavailable"
-        return ORDER_STATE_REJECTED, False, "canceled_zero_fill"
-    if state == "live":
-        # Non-terminal: still working. partial flag only informs the caller's logging.
-        return ORDER_STATE_SUBMITTED, is_partial_by_size, "live"
-    # error / not_implemented / unknown / empty -> inconclusive, keep it UNKNOWN.
-    return ORDER_STATE_UNKNOWN, False, f"inconclusive:{state or 'empty'}"
-
-
-def _order_is_present(order: "dict | None") -> bool:
-    """A normalized order genuinely exists on the venue (vs not_found/error/...)."""
-    return isinstance(order, dict) and str(order.get("state") or "").lower() in _PRESENT_ORDER_STATES
-
-
-def _order_matches(order: dict, ord_id: "str | None", cl_ord_id: "str | None") -> bool:
-    """Does a list-returned (pending/archive) order match the keys we are chasing?
-    Match by ordId or clOrdId when provided; with neither, accept the first present
-    order for the instrument."""
-    if not _order_is_present(order):
-        return False
-    if ord_id and order.get("ord_id") == ord_id:
-        return True
-    if cl_ord_id and order.get("cl_ord_id") == cl_ord_id:
-        return True
-    return not ord_id and not cl_ord_id
-
-
-def reconcile_order_once(executor, lookup: dict) -> dict:
-    """One pass of the OKX v5 fallback chain (:209):
-       1. GET /trade/order              (instId + ordId preferred, else clOrdId)
-       2. GET /trade/orders-pending     (instId) if 1 returns not-found
-       3. GET /trade/orders-history-archive (instId, limit) if still absent
-    Returns the normalized outcome dict consumed by the backoff driver."""
-    inst_id = lookup.get("inst_id")
-    ord_id = lookup.get("ord_id")
-    cl_ord_id = lookup.get("cl_ord_id")
-    ordered = lookup.get("ordered")
-    limit = int(lookup.get("history_limit") or RECONCILE_HISTORY_LIMIT)
-
-    matched: "dict | None" = None
-    source: "str | None" = None
-
-    if inst_id:
-        order = executor.get_order(inst_id, ord_id=ord_id, cl_ord_id=cl_ord_id)
-        if _order_is_present(order):
-            matched, source = order, "get_order"
-    if matched is None and inst_id:
-        for cand in executor.get_open_orders(inst_id) or []:
-            if _order_matches(cand, ord_id, cl_ord_id):
-                matched, source = cand, "orders_pending"
-                break
-    if matched is None and inst_id:
-        for cand in executor.get_order_history_archive(inst_id, limit=limit) or []:
-            if _order_matches(cand, ord_id, cl_ord_id):
-                matched, source = cand, "orders_history_archive"
-                break
-
-    state, partial, reason = map_order_outcome(matched, ordered=ordered)
-    return {
-        "state": state,
-        "partial": partial,
-        "reason": reason,
-        "matched_order": matched,
-        "source": source,
-        "acc_fill_sz": _reconcile_float((matched or {}).get("acc_fill_sz"), 0.0),
-        "avg_px": (matched or {}).get("avg_px") if matched else None,
-        "ord_id": (matched or {}).get("ord_id") if matched else ord_id,
-        "cl_ord_id": (matched or {}).get("cl_ord_id") if matched else cl_ord_id,
-    }
-
-
-def reconcile_order_with_backoff(
-    executor,
-    lookup: dict,
-    *,
-    max_attempts: int = RECONCILE_MAX_ATTEMPTS,
-    base_delay: float = RECONCILE_BASE_DELAY_SECONDS,
-    cap_delay: float = RECONCILE_CAP_DELAY_SECONDS,
-    wall_clock_budget: float = RECONCILE_WALL_CLOCK_BUDGET_SECONDS,
-    sleep=time.sleep,
-    clock=time.time,
-) -> dict:
-    """Bounded exponential-backoff reconciliation (:213). Terminal outcomes
-    (FILLED/REJECTED, incl. not_found) return immediately; a non-terminal (live)
-    order is re-polled with delays 0.5s,1s,2s,4s (capped 8s). When the attempt or
-    wall-clock bound is exhausted while still non-terminal, the outcome is UNKNOWN
-    and a RECONCILE_MISMATCH is the caller's responsibility. ``sleep``/``clock`` are
-    injectable so tests exercise the bound with no real waiting. The submission is
-    NEVER retried -- only the read-only status query is."""
-    start = clock()
-    last: "dict | None" = None
-    attempts = 0
-    for attempt in range(max_attempts):
-        attempts = attempt + 1
-        last = reconcile_order_once(executor, lookup)
-        if last["state"] in ORDER_TERMINAL_STATES:
-            last["attempts"] = attempts
-            last["elapsed_s"] = round(clock() - start, 3)
-            return last
-        if attempts >= max_attempts:
-            break
-        delay = min(cap_delay, base_delay * (2 ** attempt))
-        if (clock() - start) + delay > wall_clock_budget:
-            break
-        sleep(delay)
-
-    outcome = dict(last) if last else {
-        "matched_order": None, "source": None, "acc_fill_sz": 0.0, "avg_px": None,
-        "ord_id": lookup.get("ord_id"), "cl_ord_id": lookup.get("cl_ord_id"), "partial": False,
-    }
-    prior_reason = (last or {}).get("reason") or "no_result"
-    outcome["state"] = ORDER_STATE_UNKNOWN
-    outcome["reason"] = f"deadline_exhausted:{prior_reason}"
-    outcome["attempts"] = attempts
-    outcome["elapsed_s"] = round(clock() - start, 3)
-    return outcome
-
-
+# map_order_outcome / _order_is_present / _order_matches / reconcile_order_once /
+# reconcile_order_with_backoff moved to src/reconcile/orders.py (Phase 5).
 # emit_operator_alert / emit_auth_failure_alert / maybe_emit_queue_saturation_alert
 # were extracted to src/alerts.py (Phase 0) and are re-exported at the top of this
 # module. They read ALERTS_LEDGER / HERMX_ALERT_WEBHOOK_TIMEOUT_SECONDS /
@@ -1190,184 +1050,10 @@ def reconcile_order_with_backoff(
 # defined here) lazily via `import webhook_receiver as _wr`.
 
 
-def emit_reconcile_alert(kind: str, detail: dict) -> dict:
-    """Reconcile alert row in the unified ledger (kind="reconcile") + Task 6 operator
-    transport (emit_operator_alert writes a paired kind="operator" row)."""
-    record = {"ts": now_iso(), "kind": "reconcile", "alert": kind, "detail": detail or {}}
-    try:
-        append_jsonl(ALERTS_LEDGER, record)
-    except OSError as exc:
-        logging.error("failed to write reconcile alert %s: %s", kind, exc)
-    emit_operator_alert(kind, detail or {}, severity="warning")
-    return record
-
-
-def reconcile_position_drift(executor, journal_positions: dict, venue: str, mode: str) -> list:
-    """OBSERVE-ONLY (B1): detect journal-vs-venue position drift and alert. NEVER
-    auto-corrects, cancels, or submits.
-
-    Delegates detection to the adapter's pure ``detect_position_drift`` (which reads
-    ``executor.get_positions()`` and degrades to ``[]`` on any venue error), then logs
-    each drift as a WARNING and emits a ``RECONCILE_MISMATCH`` (type=position_drift).
-    Returns the drift list (also useful for tests / the dashboard snapshot)."""
-    from executors.ccxt_adapter import detect_position_drift
-    drifts = detect_position_drift(executor, journal_positions, venue, mode)
-    for d in drifts:
-        logging.warning(
-            "position_drift inst_id=%s journal_qty=%s venue_qty=%s drift=%s venue=%s mode=%s",
-            d.get("inst_id"), d.get("journal_qty"), d.get("venue_qty"), d.get("drift"), venue, mode,
-        )
-        emit_reconcile_alert(RECONCILE_ALERT_MISMATCH, {
-            "stage": "position_drift",
-            "type": "position_drift",
-            "inst_id": d.get("inst_id"),
-            "journal_qty": d.get("journal_qty"),
-            "venue_qty": d.get("venue_qty"),
-            "drift": d.get("drift"),
-            "venue": venue,
-            "mode": mode,
-        })
-    return drifts
-
-
-def _effective_execution_config(order_intent: "dict | None" = None) -> dict:
-    """The execution config the write path actually resolves: the adapter selector
-    (EXEC_BACKEND, which already honors HERMX_EXEC_BACKEND) plus the venue+mode to
-    query.
-
-    Issue #20a: the order-state reconciler must query the SAME (venue, mode) the order
-    was submitted to. When an ``order_intent`` (from the order-journal record) is given,
-    its persisted ``venue`` / ``simulated_trading`` override the OKX-demo default so a
-    Bybit-live order is checked on Bybit-live, not OKX-demo. Absent an intent (or a
-    legacy intent without those fields) it falls back to EXECUTION_DEFAULTS'
-    ``ccxt_exchange`` (okx) and leaves ``simulated_trading`` unset -> the adapter
-    defaults to the demo sandbox (the safe pre-#20a fallback)."""
-    exec_cfg = {"exchange": EXEC_BACKEND, "ccxt_exchange": EXECUTION_DEFAULTS["ccxt_exchange"]}
-    if isinstance(order_intent, dict):
-        venue = order_intent.get("venue")
-        if venue:
-            exec_cfg["ccxt_exchange"] = str(venue).strip().lower()
-        simulated = order_intent.get("simulated_trading")
-        if simulated is not None:
-            exec_cfg["simulated_trading"] = bool(simulated)
-    return {"execution": exec_cfg}
-
-
-def _reconciliation_executor(order_intent: "dict | None" = None):
-    """Build the read-only query executor for an order's (venue, mode), or None if
-    unavailable. Constructed lazily so a missing factory / bad config simply disables
-    reconciliation rather than crashing the receiver (fail closed to observe-only).
-
-    Uses _effective_execution_config(order_intent) so reconcile always queries the
-    venue+account the order was submitted to (#20a). Called with no argument it yields
-    the OKX-demo default executor -- the pre-#20a global executor and the fallback for
-    orders whose journal record predates venue/mode persistence."""
-    if ExecutorFactory is None:
-        return None
-    try:
-        return ExecutorFactory.create(_effective_execution_config(order_intent), ROOT)
-    except Exception as exc:  # pragma: no cover - defensive
-        logging.warning("reconciliation executor unavailable: %s", exc)
-        return None
-
-
-def _executor_for_order(intent: "dict | None", cache: dict, default_executor):
-    """Resolve the read-only reconcile executor for ONE order from the (venue, mode)
-    persisted on its journal intent (#20a).
-
-    Orders journalled before venue/mode persistence carry neither field -> return the
-    caller's ``default_executor`` (OKX-demo), i.e. unchanged pre-#20a behavior. Built
-    executors are cached by ``(venue, simulated)`` so N orders sharing one account
-    reuse a single authenticated client rather than opening N duplicates."""
-    if not isinstance(intent, dict):
-        return default_executor
-    venue = intent.get("venue")
-    simulated = intent.get("simulated_trading")
-    if not venue and simulated is None:
-        return default_executor  # legacy order: OKX-demo default, unchanged
-    key = (
-        str(venue or EXECUTION_DEFAULTS["ccxt_exchange"]).strip().lower(),
-        True if simulated is None else bool(simulated),
-    )
-    if key not in cache:
-        cache[key] = _reconciliation_executor(intent)
-    return cache[key]
-
-
-def reconcile_startup(executor=None) -> dict:
-    """One-time startup reconcile bootstrap (:215, acceptance :236). OBSERVE-ONLY:
-    reconcile every still-open order (load_open_orders) against the exchange and,
-    where the venue reports a terminal outcome and the journal state legally allows
-    it, write the authoritative terminal transition.
-
-    Sets RECONCILE_STARTUP_COMPLETE + RECONCILE_STARTUP_AT for FUTURE enforcement; it
-    does NOT auto-trade and does NOT hard-block submission in this task. ``summary``
-    keeps an (always-empty) ``position_mismatches`` list for backward-compatible shape.
-    Returns a summary dict (also useful for tests)."""
-    global RECONCILE_STARTUP_COMPLETE, RECONCILE_STARTUP_AT
-    # When a caller passes an executor (tests / injected), use it for every order
-    # (unchanged behavior). In production (executor is None) resolve a per-order
-    # executor from each order's persisted (venue, mode) so a Bybit-live order is
-    # checked on Bybit-live, not OKX-demo (#20a). ``default_executor`` is the OKX-demo
-    # fallback for legacy orders that predate venue/mode persistence.
-    explicit_executor = executor is not None
-    default_executor = executor if explicit_executor else _reconciliation_executor()
-    _exec_cache: dict = {}
-    summary = {"open_orders": [], "position_mismatches": [], "executor_available": default_executor is not None, "errors": []}
-
-    if default_executor is not None:
-        try:
-            open_orders = load_open_orders()
-        except Exception as exc:  # pragma: no cover - tolerant
-            open_orders = []
-            summary["errors"].append(f"load_open_orders: {exc}")
-        for rec in open_orders:
-            cl = rec.get("cl_ord_id")
-            cur_state = rec.get("state")
-            intent = rec.get("intent") or {}
-            lookup = {"inst_id": intent.get("inst_id"), "cl_ord_id": cl}
-            order_executor = default_executor if explicit_executor else _executor_for_order(intent, _exec_cache, default_executor)
-            if order_executor is None:
-                summary["errors"].append(f"executor_unavailable[{cl}]")
-                continue
-            try:
-                outcome = reconcile_order_once(order_executor, lookup)
-            except Exception as exc:  # pragma: no cover - tolerant
-                summary["errors"].append(f"reconcile_order_once[{cl}]: {exc}")
-                continue
-            recon_state = outcome["state"]
-            wrote = False
-            # Observe-only: only persist a LEGAL terminal transition (e.g. SUBMITTED/
-            # UNKNOWN -> FILLED/REJECTED). PLANNED->FILLED etc. is illegal and skipped.
-            if recon_state in ORDER_TERMINAL_STATES and order_state_can_transition(cur_state, recon_state):
-                try:
-                    record_order_state(
-                        cl, recon_state, intent=intent,
-                        detail={"startup_reconcile": True, "reason": outcome["reason"], "source": outcome["source"]},
-                        prev_state=cur_state,
-                    )
-                    wrote = True
-                except (ValueError, OSError) as exc:  # pragma: no cover - tolerant
-                    summary["errors"].append(f"record_order_state[{cl}]: {exc}")
-            if recon_state != cur_state and not (recon_state in ORDER_TERMINAL_STATES and wrote):
-                # Non-persisted divergence (e.g. still UNKNOWN) is still worth alerting.
-                emit_reconcile_alert(RECONCILE_ALERT_MISMATCH, {
-                    "stage": "startup_open_order", "cl_ord_id": cl,
-                    "journal_state": cur_state, "reconciled_state": recon_state, "reason": outcome["reason"],
-                })
-            summary["open_orders"].append({
-                "cl_ord_id": cl, "from": cur_state, "outcome": recon_state,
-                "reason": outcome["reason"], "wrote_transition": wrote,
-            })
-
-    RECONCILE_STARTUP_COMPLETE = True
-    RECONCILE_STARTUP_AT = now_iso()
-    logging.info(
-        "RECONCILE_STARTUP_COMPLETE at=%s executor_available=%s open_orders=%d position_mismatches=%d errors=%d",
-        RECONCILE_STARTUP_AT, summary["executor_available"], len(summary["open_orders"]),
-        len(summary["position_mismatches"]), len(summary["errors"]),
-    )
-    return summary
+# emit_reconcile_alert / reconcile_position_drift / _effective_execution_config /
+# _reconciliation_executor / _executor_for_order / reconcile_startup moved to
+# src/reconcile/ (Phase 5). ROOT / ExecutorFactory / ALERTS_LEDGER stay here and are
+# read lazily via `import webhook_receiver as _wr` from those modules.
 
 
 def unknown_resolver_enabled() -> bool:
@@ -1381,301 +1067,11 @@ def unknown_resolver_enabled() -> bool:
     return UNKNOWN_RESOLVER_INTERVAL_SECONDS > 0
 
 
-def _order_age_seconds(order_record: dict, now_ts: "str | None" = None) -> "float | None":
-    order_ts = parse_tv_time(order_record.get("ts"))
-    if order_ts is None:
-        return None
-    now_dt = parse_tv_time(now_ts) if now_ts else datetime.now(timezone.utc)
-    if now_dt is None:
-        now_dt = datetime.now(timezone.utc)
-    return max(0.0, (now_dt - order_ts).total_seconds())
-
-
-def _resolve_planned_orphan(executor, rec: dict, lookup: dict, age_seconds: "float | None", summary: dict) -> None:
-    """Lifecycle backstop for a crash-orphaned PLANNED order (closes the gap where a
-    PLANNED order could never be resolved: the SUBMITTED/UNKNOWN resolver excluded it and
-    PLANNED->UNKNOWN is illegal).
-
-    Write-ahead ordering guarantees SUBMITTED is journalled BEFORE executor.execute() is
-    called, so a record stuck at PLANNED crashed BEFORE the submit -- it was never sent.
-    Once it is older than PLANNED_ORDER_TIMEOUT_SECONDS we confirm the venue has no record
-    (single read-only pass, no backoff sleeps) and then take the LEGAL PLANNED->REJECTED
-    transition with reason ``never_submitted`` + an operator alert. Idempotency is
-    preserved: the rejected record is terminal, so the deterministic cl_ord_id stays
-    deduped. A still-fresh PLANNED order may be an in-process submit between the two
-    write-ahead writes, so it is left untouched. OBSERVE-ONLY: never submits/cancels."""
-    cl_ord_id = rec.get("cl_ord_id")
-    intent = rec.get("intent") or {}
-    symbol = intent.get("symbol")
-
-    if age_seconds is None or age_seconds <= PLANNED_ORDER_TIMEOUT_SECONDS:
-        summary["pending"] += 1  # still within the in-flight submit window
-        return
-
-    try:
-        outcome = reconcile_order_once(executor, lookup)
-    except Exception as exc:  # pragma: no cover - defensive
-        summary["errors"].append(f"reconcile_planned[{cl_ord_id}]: {exc}")
-        emit_operator_alert(
-            "PLANNED_RESOLVER_ERROR",
-            {"cl_ord_id": cl_ord_id, "symbol": symbol, "error": str(exc)},
-            severity="error",
-        )
-        return
-
-    if _order_is_present(outcome.get("matched_order")):
-        # ANOMALY: the venue knows an order we believe was never sent. Do NOT reject --
-        # promote PLANNED->SUBMITTED (legal) so the standard reconciliation resolves it,
-        # and alert loudly.
-        if order_state_can_transition(ORDER_STATE_PLANNED, ORDER_STATE_SUBMITTED):
-            try:
-                record_order_state(
-                    cl_ord_id,
-                    ORDER_STATE_SUBMITTED,
-                    intent=intent,
-                    detail={"planned_backstop": True, "reason": "planned_found_on_venue", "source": outcome.get("source")},
-                    prev_state=ORDER_STATE_PLANNED,
-                )
-            except (ValueError, OSError) as exc:
-                summary["errors"].append(f"record_planned_submitted[{cl_ord_id}]: {exc}")
-        emit_operator_alert(
-            RECONCILE_ALERT_PLANNED_ON_VENUE,
-            {"cl_ord_id": cl_ord_id, "symbol": symbol, "age_s": round(age_seconds, 3), "source": outcome.get("source")},
-            severity="error",
-        )
-        summary["pending"] += 1
-        return
-
-    # Venue has no record -> never submitted. Legal PLANNED -> REJECTED, idempotency-safe.
-    if order_state_can_transition(ORDER_STATE_PLANNED, ORDER_STATE_REJECTED):
-        try:
-            record_order_state(
-                cl_ord_id,
-                ORDER_STATE_REJECTED,
-                intent=intent,
-                detail={
-                    "planned_backstop": True,
-                    "reason": "never_submitted",
-                    "age_s": round(age_seconds, 3),
-                    "timeout_s": PLANNED_ORDER_TIMEOUT_SECONDS,
-                },
-                prev_state=ORDER_STATE_PLANNED,
-            )
-            summary["resolved"] += 1
-            summary["never_submitted"] += 1
-            emit_operator_alert(
-                RECONCILE_ALERT_PLANNED_ABANDONED,
-                {
-                    "cl_ord_id": cl_ord_id,
-                    "symbol": symbol,
-                    "age_s": round(age_seconds, 3),
-                    "timeout_s": PLANNED_ORDER_TIMEOUT_SECONDS,
-                    "reason": "never_submitted",
-                },
-                severity="warning",
-            )
-        except (ValueError, OSError) as exc:
-            summary["errors"].append(f"record_never_submitted[{cl_ord_id}]: {exc}")
-
-
-def resolve_unknown_orders_once(executor=None, *, now_ts: "str | None" = None, max_orders: "int | None" = None) -> dict:
-    """Task 6 periodic resolver pass for open SUBMITTED/UNKNOWN orders.
-
-    Re-runs reconciliation until terminal or per-order timeout budget expiry. On
-    budget expiry emits alerts and persists a per-symbol pause artifact.
-    """
-    # Per-order (venue, mode) executor resolution mirrors reconcile_startup (#20a): an
-    # explicitly-passed executor is used for every order; otherwise each order is checked
-    # on the account it was submitted to, with default_executor as the OKX-demo fallback.
-    explicit_executor = executor is not None
-    default_executor = executor if explicit_executor else _reconciliation_executor()
-    _exec_cache: dict = {}
-    summary = {
-        "checked": 0,
-        "resolved": 0,
-        "pending": 0,
-        "expired": 0,
-        "never_submitted": 0,
-        "paused_symbols": [],
-        "errors": [],
-        "executor_available": default_executor is not None,
-    }
-    if default_executor is None:
-        return summary
-
-    limit = max_orders if max_orders is not None else UNKNOWN_RESOLVER_MAX_ORDERS_PER_TICK
-    candidates = [
-        rec
-        for rec in load_open_orders()
-        if rec.get("state") in {ORDER_STATE_PLANNED, ORDER_STATE_SUBMITTED, ORDER_STATE_UNKNOWN}
-    ]
-    candidates.sort(key=lambda r: r.get("seq", 0))
-    for rec in candidates[: max(0, int(limit))]:
-        summary["checked"] += 1
-        cl_ord_id = rec.get("cl_ord_id")
-        cur_state = rec.get("state")
-        intent = rec.get("intent") or {}
-        symbol = intent.get("symbol")
-        # Age from ORIGIN (first journal record), not the latest -- re-recording must not
-        # reset the lifecycle clock. Falls back to the latest ts if origin is missing.
-        age_seconds = _order_age_seconds({"ts": rec.get("origin_ts") or rec.get("ts")}, now_ts=now_ts)
-        lookup = {"inst_id": intent.get("inst_id"), "cl_ord_id": cl_ord_id}
-        order_executor = default_executor if explicit_executor else _executor_for_order(intent, _exec_cache, default_executor)
-        if order_executor is None:
-            summary["errors"].append(f"executor_unavailable[{cl_ord_id}]")
-            continue
-
-        if cur_state == ORDER_STATE_PLANNED:
-            _resolve_planned_orphan(order_executor, rec, lookup, age_seconds, summary)
-            continue
-
-        if age_seconds is not None and age_seconds > UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS:
-            # Lifecycle backstop: alert + pause the symbol, but NEVER auto-close the order
-            # (no terminal write -- absence/ambiguity is not proof of any outcome). Dedupe
-            # so one stuck order does not re-pause/re-alert every tick: the pause reason is
-            # STABLE per (symbol, cl_ord_id, state), so pause_symbol() collapses repeats and
-            # only a genuinely NEW pause emits the operator alerts. A symbol-less order
-            # cannot be deduped via the pause store, so it always alerts (never swallowed).
-            summary["expired"] += 1
-            sym_norm = str(symbol or "").strip()
-            pause_reason = (
-                f"unknown resolver timeout: order {cl_ord_id} stuck {cur_state} "
-                f"> {UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS}s"
-            )
-            newly_paused = pause_symbol(symbol, pause_reason) if sym_norm else False
-            if newly_paused:
-                summary["paused_symbols"].append(sym_norm)
-            if newly_paused or not sym_norm:
-                emit_reconcile_alert(
-                    RECONCILE_ALERT_MISMATCH,
-                    {
-                        "stage": "unknown_resolver_timeout",
-                        "cl_ord_id": cl_ord_id,
-                        "symbol": symbol,
-                        "state": cur_state,
-                        "age_s": round(age_seconds, 3),
-                        "timeout_s": UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS,
-                        "reason": pause_reason,
-                    },
-                )
-                emit_operator_alert(
-                    RECONCILE_ALERT_RESOLVER_TIMEOUT,
-                    {
-                        "cl_ord_id": cl_ord_id,
-                        "symbol": symbol,
-                        "state": cur_state,
-                        "age_s": round(age_seconds, 3),
-                        "timeout_s": UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS,
-                    },
-                    severity="error",
-                )
-            continue
-
-        try:
-            outcome = reconcile_order_with_backoff(order_executor, lookup)
-        except Exception as exc:  # pragma: no cover - defensive
-            summary["errors"].append(f"reconcile[{cl_ord_id}]: {exc}")
-            emit_operator_alert(
-                "UNKNOWN_RESOLVER_ERROR",
-                {"cl_ord_id": cl_ord_id, "symbol": symbol, "error": str(exc)},
-                severity="error",
-            )
-            continue
-
-        next_state = outcome.get("state")
-        if next_state in ORDER_TERMINAL_STATES and order_state_can_transition(cur_state, next_state):
-            try:
-                record_order_state(
-                    cl_ord_id,
-                    next_state,
-                    intent=intent,
-                    detail={
-                        "unknown_resolver": True,
-                        "reason": outcome.get("reason"),
-                        "source": outcome.get("source"),
-                        "attempts": outcome.get("attempts"),
-                        "elapsed_s": outcome.get("elapsed_s"),
-                    },
-                    prev_state=cur_state,
-                )
-                summary["resolved"] += 1
-                continue
-            except (ValueError, OSError) as exc:
-                summary["errors"].append(f"record_order_state[{cl_ord_id}]: {exc}")
-
-        # Record the SUBMITTED->UNKNOWN transition ONCE. An already-UNKNOWN order that
-        # re-resolves to UNKNOWN is NOT re-recorded: a no-op state change would only bloat
-        # the journal, and the backstop measures age from origin_ts (not the latest record)
-        # so re-recording would buy nothing.
-        if (
-            next_state == ORDER_STATE_UNKNOWN
-            and cur_state != ORDER_STATE_UNKNOWN
-            and order_state_can_transition(cur_state, ORDER_STATE_UNKNOWN)
-        ):
-            try:
-                record_order_state(
-                    cl_ord_id,
-                    ORDER_STATE_UNKNOWN,
-                    intent=intent,
-                    detail={
-                        "unknown_resolver": True,
-                        "reason": outcome.get("reason"),
-                        "source": outcome.get("source"),
-                        "attempts": outcome.get("attempts"),
-                        "elapsed_s": outcome.get("elapsed_s"),
-                    },
-                    prev_state=cur_state,
-                )
-                cur_state = ORDER_STATE_UNKNOWN
-            except (ValueError, OSError) as exc:
-                summary["errors"].append(f"record_unknown[{cl_ord_id}]: {exc}")
-
-        emit_reconcile_alert(
-            RECONCILE_ALERT_MISMATCH,
-            {
-                "stage": "unknown_resolver_pending",
-                "cl_ord_id": cl_ord_id,
-                "symbol": symbol,
-                "journal_state": cur_state,
-                "reconciled_state": next_state,
-                "reason": outcome.get("reason"),
-                "attempts": outcome.get("attempts"),
-            },
-        )
-        summary["pending"] += 1
-    return summary
-
-
-def unknown_resolver_loop(stop_event: "threading.Event | None" = None, sleep=time.sleep) -> None:
-    # INTERVAL_SECONDS <= 0 disables the resolver. Short-circuit BEFORE the max(1.0, ...)
-    # floor below so 0 means "off", not "poll every 1s".
-    if UNKNOWN_RESOLVER_INTERVAL_SECONDS <= 0:
-        return
-    interval = max(1.0, UNKNOWN_RESOLVER_INTERVAL_SECONDS)
-    while True:
-        if stop_event is not None and stop_event.is_set():
-            return
-        _set_resolver_heartbeat()
-        try:
-            summary = resolve_unknown_orders_once()
-            if summary["checked"] or summary["expired"] or summary["errors"]:
-                logging.info(
-                    "UNKNOWN resolver tick checked=%d resolved=%d pending=%d expired=%d never_submitted=%d errors=%d",
-                    summary["checked"],
-                    summary["resolved"],
-                    summary["pending"],
-                    summary["expired"],
-                    summary.get("never_submitted", 0),
-                    len(summary["errors"]),
-                )
-        except Exception as exc:  # pragma: no cover - defensive
-            emit_operator_alert("UNKNOWN_RESOLVER_ERROR", {"error": str(exc)}, severity="error")
-
-        if stop_event is not None:
-            if stop_event.wait(interval):
-                return
-        else:
-            sleep(interval)
+# _order_age_seconds / _resolve_planned_orphan / resolve_unknown_orders_once /
+# unknown_resolver_loop moved to src/reconcile/unknown_resolver.py (Phase 5).
+# UNKNOWN_RESOLVER_*/PLANNED_ORDER_TIMEOUT_SECONDS/_RESOLVER_HEARTBEAT/
+# _set_resolver_heartbeat stay here and are read/called lazily via
+# `import webhook_receiver as _wr` from that module.
 
 
 def _record_execution_outcome(_ledger, row: dict) -> None:
@@ -2353,8 +1749,100 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, json.loads(LATEST_FILE.read_text(encoding="utf-8")))
                 except (OSError, ValueError):
                     self._send(503, {"ok": False, "error": "latest_unreadable"})
+        elif path in {"/api/admin/order-troubleshoot", "/shadow/api/admin/order-troubleshoot"}:
+            self._handle_order_troubleshoot_report()
         else:
             self._send(404, {"ok": False, "error": "not_found"})
+
+    def _handle_order_troubleshoot_report(self) -> None:
+        """GET /api/admin/order-troubleshoot -- read-only. Authenticated identically to
+        /api/close (X-Dashboard-Token == HERMX_SECRET, constant-time, fail closed if the
+        secret is blank). Never issues a live venue call -- see orders/troubleshoot.py."""
+        provided = (self.headers.get("X-Dashboard-Token") or "").strip()
+        if not SECRET or not hmac.compare_digest(provided, SECRET):
+            self._send(401, {"ok": False, "error": "unauthorized"})
+            return
+        results = troubleshoot_all_open_orders()
+        self._send(200, {
+            "ok": True,
+            "results": [
+                {
+                    "cl_ord_id": r.cl_ord_id,
+                    "issue_type": r.issue_type,
+                    "evidence": r.evidence,
+                    "actions": [{"id": a.id, "label": a.label} for a in r.actions],
+                }
+                for r in results
+            ],
+        })
+
+    def _handle_order_journal_apply_action(self) -> None:
+        """POST /api/admin/order-journal/apply-action -- the server re-derives eligibility
+        itself from the journal's OWN history (run_classifiers) and NEVER accepts a
+        caller-supplied target state; action_id only selects among what is currently,
+        server-computed eligible for this cl_ord_id. See orders/troubleshoot.py."""
+        provided = (self.headers.get("X-Dashboard-Token") or "").strip()
+        if not SECRET or not hmac.compare_digest(provided, SECRET):
+            self._send(401, {"ok": False, "error": "unauthorized"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            if length < 0:
+                raise ValueError("negative content length")
+        except ValueError:
+            self._send(400, {"ok": False, "error": "invalid_content_length"})
+            return
+        if length > max(1, HERMX_MAX_BODY_BYTES):
+            self._send(413, {"ok": False, "error": "payload_too_large", "max_body_bytes": max(1, HERMX_MAX_BODY_BYTES)})
+            return
+        try:
+            raw = self.rfile.read(length) if length else b""
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+            if not isinstance(body, dict):
+                raise ValueError("body must be a JSON object")
+        except Exception as exc:
+            self._send(400, {"ok": False, "error": "invalid_json", "detail": str(exc)})
+            return
+        cl_ord_id = str(body.get("cl_ord_id") or "").strip()
+        action_id = str(body.get("action_id") or "").strip()
+        operator = body.get("operator")
+        reason = body.get("reason")
+        if not cl_ord_id:
+            self._send(400, {"ok": False, "error": "missing_cl_ord_id"})
+            return
+        if not action_id:
+            self._send(400, {"ok": False, "error": "missing_action_id", "cl_ord_id": cl_ord_id})
+            return
+        result = run_classifiers(cl_ord_id)
+        eligible_ids = {a.id for a in (result.actions if result else [])}
+        if result is None or action_id not in eligible_ids:
+            self._send(200, {"ok": True, "outcome": "refused", "reason": "action_not_currently_eligible", "cl_ord_id": cl_ord_id})
+            return
+        if action_id != "restore_terminal":
+            # Unreachable given the eligible_ids check above (only restore_terminal is
+            # ever offered today) -- fail closed defensively if that ever changes.
+            self._send(200, {"ok": True, "outcome": "refused", "reason": "unknown_action_id", "cl_ord_id": cl_ord_id})
+            return
+        latest = latest_order_record(cl_ord_id)
+        from_state = (latest or {}).get("state")
+        to_state = result.evidence.get("terminal_state")
+        intent = (latest or {}).get("intent") or {}
+        try:
+            record_order_state(
+                cl_ord_id,
+                to_state,
+                intent=intent,
+                detail={"troubleshoot_heal": True, "operator": operator, "reason": reason, "evidence": result.evidence},
+                prev_state=from_state,
+            )
+        except ValueError as exc:
+            self._send(200, {"ok": True, "outcome": "refused", "reason": "race_lost", "detail": str(exc), "cl_ord_id": cl_ord_id})
+            return
+        except OSError as exc:
+            _fail_closed_state_write("order-journal-troubleshoot-heal", exc, context={"cl_ord_id": cl_ord_id})
+            self._send(500, {"ok": False, "error": "state_write_failed", "cl_ord_id": cl_ord_id})
+            return
+        self._send(200, {"ok": True, "outcome": "healed", "cl_ord_id": cl_ord_id, "from_state": from_state, "to_state": to_state})
 
     def _handle_operator_close(self) -> None:
         """POST /api/close -- operator-instructed flatten. Authenticated by the
@@ -2425,6 +1913,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path in {"/api/close", "/shadow/api/close"}:
             self._handle_operator_close()
+            return
+        if parsed.path in {"/api/admin/order-journal/apply-action", "/shadow/api/admin/order-journal/apply-action"}:
+            self._handle_order_journal_apply_action()
             return
         if parsed.path not in {"/webhook", "/shadow/webhook"}:
             self._send(404, {"ok": False, "error": "not_found"})
