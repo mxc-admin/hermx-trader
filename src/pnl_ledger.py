@@ -67,6 +67,19 @@ def _compute_net_realized(
       accounted for).
     * otherwise (default) -> ``pnl_gross + fee_cost`` (fee_cost signed, negative
       when paid).
+
+    M1 review (net-safety after C1 attribution): the ``ORDER_PNL_IS_NET is False``
+    branch below IS the correct per-venue guard and needs no change. It does NOT
+    silently misapply an unverified fee — ``fee_cost`` is the venue's own
+    already-signed fee from order history, and ``False`` correctly means "gross
+    figure, subtract the signed fee". What is per-venue-unverified is only whether
+    the exchange's ``pnl`` already nets fees; that is exactly what the flag encodes,
+    and it defaults ``False`` (gross) for every venue. Net is not *displayed* as
+    authoritative until ``ORDER_PNL_IS_NET`` is flipped per venue after an empirical
+    fee-sign check (gross stays the shown value). This behavior is test-locked by
+    ``test_pnl_net.py`` (net == gross + signed fee for all default venues), so the
+    fix here is a documented no-op — the safety lives in the flag + the display
+    layer, not in re-deriving net.
     """
     if pnl_gross is None:
         return None
@@ -131,6 +144,64 @@ def is_hermx_cl_ord_id(cl_ord_id: str | None, exchange_id: str | None = None) ->
     return False
 
 
+def record_submit_strategy(
+    cl_ord_id: str,
+    strategy_id: str,
+    venue: str | None = None,
+    mode: str | None = None,
+) -> None:
+    """Record a submit-time ``cl_ord_id -> strategy_id`` mapping (C1).
+
+    Thin re-export of :func:`pnl_strategy_map.record_submit_strategy` so callers
+    (and tests) can reach the writer through the ``pnl_ledger`` surface. Lazy
+    import keeps the two modules decoupled. Best-effort: a map-write failure must
+    never block a trade, so the caller wraps this in try/except.
+    """
+    from pnl_strategy_map import record_submit_strategy as _record
+    _record(cl_ord_id, strategy_id, venue, mode)
+
+
+def _parse_operator_close_strategy_id(
+    cl_ord_id: str | None, inst_id: str | None = None
+) -> str | None:
+    """Recover the strategy id from an ``operator_close_{symbol}_{sid}_{UTCday}`` id.
+
+    The UTC day is always exactly 8 digits (``YYYYMMDD``); everything between the
+    ``operator_close_`` prefix and that trailing date is ``{symbol}_{sid}``. Both
+    ``symbol`` and ``sid`` can contain underscores, so a naive ``rsplit`` is
+    ambiguous. We peel the symbol using the row's own ``inst_id`` (normalized to
+    the underscore form the id was minted with), leaving the remainder as the sid.
+
+    Falls back to a submit-map progressive-prefix probe when the inst_id doesn't
+    line up, and returns None when still ambiguous (preserving the "unattributed
+    but persisted" invariant rather than guessing wrong).
+    """
+    if not cl_ord_id or not str(cl_ord_id).startswith("operator_close_"):
+        return None
+    body = str(cl_ord_id)[len("operator_close_"):]
+    parts = body.split("_")
+    # Rightmost segment must be an 8-digit UTC day; otherwise the shape is unknown.
+    if len(parts) < 2 or not (len(parts[-1]) == 8 and parts[-1].isdigit()):
+        return None
+    middle = "_".join(parts[:-1])  # "{symbol}_{sid}"
+    # Primary: peel the symbol prefix using the row's instrument id.
+    if inst_id:
+        sym_us = str(inst_id).replace("-", "_").replace("/", "_")
+        prefix = sym_us + "_"
+        if middle.upper().startswith(prefix.upper()):
+            sid = middle[len(prefix):]
+            if sid:
+                return sid
+    # Fallback: probe the submit map with progressively shorter sid suffixes
+    # (longest-first), i.e. treat more of the middle as symbol until a mapped
+    # cl_ord_id's strategy matches. Only accepts an exact recorded mapping.
+    from pnl_strategy_map import _load_map
+    mapped = _load_map()
+    if cl_ord_id in mapped:
+        return mapped[cl_ord_id]
+    return None
+
+
 def read_closed_trades(
     since_ms: int | None = None,
     strategy_id: str | None = None,
@@ -187,7 +258,14 @@ def read_closed_trades(
             if "recorded_at_ms" not in row:
                 row["recorded_at_ms"] = None
             rows.append(row)
-    return rows
+    # Read-side dedupe by composite key (last occurrence wins). Backstop against
+    # any duplicate that reached disk — legacy data or a pre-fix TOCTOU race. The
+    # append path's flock now prevents *new* dupes; this collapses old ones so a
+    # single logical close is never double-counted on read (Test H3).
+    deduped: dict = {}
+    for row in rows:
+        deduped[_composite_key(row)] = row
+    return list(deduped.values())
 
 
 def max_recorded_closed_at(exchange: str, mode: str) -> int | None:
@@ -335,29 +413,35 @@ def append_closed_trades(entries: list[dict]) -> int:
         return 0
     path = _ledger_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
     with _LOCK:
-        # Re-read existing keys inside the lock so a concurrent writer's rows are
-        # visible (append-only file; last reader before we write wins on dedupe).
-        existing_keys = _load_existing_keys(path)
-        new_lines: list[str] = []
-        for entry in entries:
-            key = _composite_key(entry)
-            if key in existing_keys:
-                continue
-            new_lines.append(json.dumps(entry, ensure_ascii=False, sort_keys=True))
-            existing_keys.add(key)
-        if not new_lines:
-            return 0
-        with open(path, "a", encoding="utf-8") as handle:
+        # Open "a+" and take the exclusive flock BEFORE reading existing keys, so
+        # the whole read-modify-write is atomic across processes. Previously the
+        # key-read ran outside the lock: two concurrent writers could both load a
+        # stale key set and each append the same ordId (TOCTOU). The flock now
+        # serializes the full cycle; _load_existing_keys re-reads the file by path
+        # while we hold the lock (also keeps it monkeypatchable for the race test).
+        with open(path, "a+", encoding="utf-8") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             try:
-                for line in new_lines:
-                    handle.write(line + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+                existing_keys = _load_existing_keys(path)
+                new_lines: list[str] = []
+                for entry in entries:
+                    key = _composite_key(entry)
+                    if key in existing_keys:
+                        continue
+                    new_lines.append(json.dumps(entry, ensure_ascii=False, sort_keys=True))
+                    existing_keys.add(key)
+                if new_lines:
+                    handle.seek(0, os.SEEK_END)
+                    for line in new_lines:
+                        handle.write(line + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    written = len(new_lines)
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
-    return len(new_lines)
+    return written
 
 
 def _row_ts(row: dict) -> int:
@@ -379,6 +463,14 @@ def _build_entry(row: dict, exchange_id: str, mode: str, side: str, filled: floa
     pnl_gross = _as_float(row.get("realized_pnl"))
     if pnl_gross is None:
         pnl_gross = _as_float(row.get("pnl"))
+    if pnl_gross is None:
+        # The venue exposed no realized P&L for this close (e.g. bybit in order
+        # history). Persist the row with gross=None (an honest "unknown", distinct
+        # from a real 0.0) but leave a trace so the gap is auditable, not silent.
+        logger.debug(
+            "realized pnl unavailable (gross=None) for venue %s ordId %s — recording None",
+            exchange_id, row.get("ordId") or row.get("id"),
+        )
     fee_cost = _as_float(row.get("fee"))
     cl_ord_id = row.get("clOrdId") or row.get("clientOrderId")
     # Hyperliquid returns a numeric/hex cloid in place of the submitted mxc id; if
@@ -390,15 +482,30 @@ def _build_entry(row: dict, exchange_id: str, mode: str, side: str, filled: floa
             resolved = resolve_cloid(_text, exchange_id)
             if resolved:
                 cl_ord_id = resolved
+    # Strategy attribution (C1): exchange rows carry no strategy_id, so resolve it
+    # from the submit-time cl_ord_id -> strategy_id map (written when both were
+    # known). For Hyperliquid, cl_ord_id has already been resolved to the original
+    # mxc id above, so the map lookup is a direct hop. Operator-initiated closes
+    # encode the strategy in the cl_ord_id itself -> parse it as a fallback. When
+    # nothing resolves, strategy_id stays None (the row still persists; only its
+    # per-strategy attribution is best-effort).
+    strategy_id = row.get("strategy_id")
+    if strategy_id is None and cl_ord_id:
+        from pnl_strategy_map import resolve_strategy as _resolve_strategy
+        strategy_id = _resolve_strategy(cl_ord_id)
+    if strategy_id is None and cl_ord_id and str(cl_ord_id).startswith("operator_close_"):
+        strategy_id = _parse_operator_close_strategy_id(
+            cl_ord_id, row.get("instId") or row.get("inst_id")
+        )
     return {
         "schema_version": SCHEMA_VERSION,
         "exchange": exchange_id,
         "inst_id": row.get("instId") or row.get("inst_id"),
         "ord_id": row.get("ordId") or row.get("id"),
         "mode": mode,
-        # Strategy attribution is best-effort in Phase 1 (hardened in Phase 3 via
-        # the submit-time cl_ord_id map). None when not derivable from the row.
-        "strategy_id": row.get("strategy_id"),
+        # Strategy attribution resolved above from the submit-time cl_ord_id map
+        # (C1), or parsed from an operator_close cl_ord_id. None when not derivable.
+        "strategy_id": strategy_id,
         "side": side,
         "filled_qty": filled,
         "avg_px": _as_float(row.get("avgPx")),

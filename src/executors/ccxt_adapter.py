@@ -9,8 +9,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 import hashlib
+import logging
 import os
 import time
+
+logger = logging.getLogger(__name__)
 
 try:
     import ccxt  # type: ignore
@@ -53,6 +56,10 @@ def _normalized_realized_pnl(order: dict, info: dict, exchange_id: str) -> float
         # Realized P&L lives on trades, not orders; may be absent on the order row.
         return _to_float(info.get("realizedPnl"), None)
     # bybit + others: not available in order history.
+    logger.debug(
+        "realized_pnl unavailable for venue %s ordId %s — recording None",
+        venue, order.get("id"),
+    )
     return None
 
 

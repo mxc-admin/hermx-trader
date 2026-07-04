@@ -194,6 +194,30 @@ class ExecutionService:
             fail_closed_state_write("order-journal-submitted", exc, context={"cl_ord_id": cl_ord_id})
             raise
 
+        # C1 attribution: record the submit-time cl_ord_id -> strategy_id map now that
+        # we are committed to submitting (SUBMITTED is durably journalled, before the
+        # order reaches the venue). Both legs (open + close) map to the same strategy
+        # so a later reconciled close attributes correctly regardless of which leg's
+        # cl_ord_id the venue echoes back. Lazy import avoids any import cycle;
+        # best-effort (try/except) so a map-write failure can NEVER block the trade.
+        try:
+            from pnl_strategy_map import record_submit_strategy as _record_submit_strategy
+            _sid = readiness.get("strategy_id") or order_intent.get("strategy_id")
+            if _sid:
+                _venue = (readiness.get("instrument") or {}).get("exchange") or order_intent.get("venue")
+                _mode = readiness.get("execution_mode") or order_intent.get("mode")
+                _exec_intent = readiness.get("execution_intent") or {}
+                _legs = {
+                    _exec_intent.get("client_order_id_open") or _exec_intent.get("client_order_id"),
+                    _exec_intent.get("client_order_id_close"),
+                    cl_ord_id,
+                }
+                for _leg in _legs:
+                    if _leg:
+                        _record_submit_strategy(_leg, _sid, _venue, _mode)
+        except Exception:
+            pass
+
         started = time.time()
         redact_secrets = self._h("redact_secrets")
 

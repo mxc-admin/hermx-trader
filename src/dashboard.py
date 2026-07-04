@@ -1083,6 +1083,28 @@ def _snapshot_for_mode(okx_live_by_mode, mode):
     return by_mode.get(key) or by_mode.get("demo") or {"ok": False, "positions": {}, "error": None}
 
 
+def _executor_venue_mode(executor, config):
+    """Resolve the (venue, mode) an executor actually connected to.
+
+    Read from the executor's own ``execution_cfg`` (the venue it dialed and its
+    ``simulated_trading`` flag) so reconcile is never mislabeled by a hardcoded
+    literal. Falls back to the config-derived venue, and returns ``mode=None``
+    (unknown) rather than a fabricated ``"demo"`` when the executor can't report
+    it — an honest unknown is safer than a wrong default."""
+    venue = None
+    mode = None
+    exec_cfg = getattr(executor, "execution_cfg", None)
+    if isinstance(exec_cfg, dict):
+        raw = str(exec_cfg.get("ccxt_exchange") or exec_cfg.get("exchange") or "").strip().lower()
+        if raw and raw != "ccxt":
+            venue = raw
+        if "simulated_trading" in exec_cfg:
+            mode = "demo" if bool(exec_cfg.get("simulated_trading", True)) else "live"
+    if venue is None:
+        venue = _strategy_venue(config)
+    return venue, mode
+
+
 def okx_order_history_snapshot(config):
     now = time.time()
     cached = _OKX_ORDER_HISTORY_CACHE.get("snapshot")
@@ -1099,10 +1121,17 @@ def okx_order_history_snapshot(config):
         # Fold any HermX close rows into the durable closed-trade ledger. Deduped
         # by composite key, so re-running the snapshot is idempotent. Wrapped so a
         # reconcile failure can never fail the (read-only) snapshot.
+        #
+        # Thread the ACTUAL (venue, mode) read off the executor that fetched these
+        # rows — never the hardcoded ("okx","demo") literal, which would mislabel
+        # every non-OKX / live close (code-quality rule: reconcile call sites must
+        # use the actual (venue, mode)). Mode defaults to None (unknown), never a
+        # fabricated "demo", when the executor can't report it.
         try:
             from pnl_ledger import reconcile_from_order_history
 
-            reconcile_from_order_history(rows or [], "okx", "demo")
+            venue, mode = _executor_venue_mode(executor, config)
+            reconcile_from_order_history(rows or [], venue, mode)
         except Exception:
             pass
         snapshot = {
