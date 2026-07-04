@@ -228,6 +228,8 @@ Revised and re-numbered from the source plan to fold in demo/live separation (Ph
 
 **Known limitations.** No accounting-window reset button yet. No portfolio card.
 
+**UPnL is single-asset per strategy.** Open unrealized P&L (`open_upl_usd`) is read from the venue position for a strategy's single declared `strategy.asset` field. A strategy trading more than one instrument therefore shows UPnL for its primary declared asset only — positions on any other instrument are not summed into its UPnL. This is a deliberate simplification: a correct multi-instrument UPnL would require a per-instrument position cache keyed by `(strategy, inst_id)`, which the current one-asset model does not maintain. If multi-instrument strategies are ever introduced, this assumption must be revisited.
+
 **Fixes:** #5, #1 (correct display), #4 (fee-correct display).
 
 ---
