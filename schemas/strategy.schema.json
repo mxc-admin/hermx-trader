@@ -156,7 +156,12 @@
           "type": "object",
           "properties": {
             "budget_usd": { "type": "number", "exclusiveMinimum": 0 },
-            "reinvest": { "type": "boolean", "default": true }
+            "reinvest": { "type": "boolean", "default": true },
+            "max_notional_usd": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Phase A (A1) optional absolute per-strategy pre-trade notional ceiling (USD). Independent of budget_usd x leverage. An order whose planned_notional_usd exceeds min(this, HERMX_MAX_NOTIONAL_USD) is refused before it reaches the venue. Unset => no per-strategy cap."
+            }
           },
           "required": ["budget_usd"]
         },

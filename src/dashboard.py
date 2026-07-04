@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -320,6 +321,34 @@ def _accounting_start_for(strategy_id: str, ctrl_state=None):
         except (TypeError, ValueError):
             return None
     return None
+
+
+# Phase A (A2) global trading_state mirror. Mirrors webhook_receiver.get/set_trading_state
+# (control-state.json is the single shared artifact). Only 'active'/'reducing' are valid;
+# an unknown/legacy value reads as 'active' (fail-open to normal trading).
+_VALID_TRADING_STATES = frozenset({"active", "reducing"})
+
+
+def _get_trading_state(ctrl_state=None) -> str:
+    """The global trading_state, defaulting to 'active'. ``ctrl_state`` may be a
+    pre-loaded control-state dict to avoid re-reading."""
+    state = ctrl_state if isinstance(ctrl_state, dict) else _load_control_state()
+    st = str(state.get("trading_state") or "active").strip().lower()
+    return st if st in _VALID_TRADING_STATES else "active"
+
+
+def _set_trading_state(state: str) -> bool:
+    """Set the global trading_state. Read-modify-write of control-state; validates the
+    input ('active'|'reducing'). Mirrors webhook_receiver.set_trading_state."""
+    st = str(state or "").strip().lower()
+    if st not in _VALID_TRADING_STATES:
+        return False
+    now = datetime.now(timezone.utc).isoformat()
+    cs = _load_control_state()
+    cs["trading_state"] = st
+    cs["updated_at"] = now
+    _save_control_state(cs)
+    return True
 
 
 def active_strategies(strategies=None):
@@ -1786,6 +1815,7 @@ def api_payload():
         "portfolio": portfolio,
         "strategy_overrides": _overrides,
         "accounting_windows": _acct_windows,
+        "trading_state": _get_trading_state(_ctrl),
         "strategy_alerts": model.get("strategy_alerts") or [],
         "okx_live": model.get("okx_live"),
         "okx_live_by_mode": model.get("okx_live_by_mode") or {},
@@ -3055,6 +3085,29 @@ class Handler(BaseHTTPRequestHandler):
                 return unquote(path[len(prefix):]).strip("/").strip()
         return None
 
+    # ---- Global trading-state control (write) ------------------------------
+    # POST   /api/control/trading-state  body {"state": "active"|"reducing"}
+    # DELETE /api/control/trading-state  -> reset to "active"
+    _TRADING_STATE_PATHS = frozenset({
+        "/dashboard/api/control/trading-state",
+        "/shadow/dashboard/api/control/trading-state",
+        "/api/control/trading-state",
+    })
+
+    def _is_trading_state_path(self, path):
+        return path.rstrip("/") in {p.rstrip("/") for p in self._TRADING_STATE_PATHS}
+
+    def _apply_trading_state(self, state):
+        st = str(state or "").strip().lower()
+        if st not in _VALID_TRADING_STATES:
+            self._send_control_error(400, "state must be one of: active, reducing")
+            return
+        if not _set_trading_state(st):
+            self._send_control_error(400, "failed to set trading_state")
+            return
+        body = json.dumps({"ok": True, "trading_state": st}, ensure_ascii=False).encode("utf-8")
+        self.send_bytes(200, body, "application/json; charset=utf-8")
+
     def _send_control_error(self, status, message):
         body = json.dumps({"ok": False, "error": message}, ensure_ascii=False).encode("utf-8")
         self.send_bytes(status, body, "application/json; charset=utf-8")
@@ -3107,6 +3160,24 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if self._is_trading_state_path(path):
+            if not self._dashboard_auth_ok():
+                self._auth_challenge()
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                length = 0
+            raw = self.rfile.read(length) if length > 0 else b""
+            body = {}
+            if raw:
+                try:
+                    body = json.loads(raw.decode("utf-8")) or {}
+                except Exception:
+                    self._send_control_error(400, "invalid JSON body")
+                    return
+            self._apply_trading_state(body.get("state"))
+            return
         sid = self._strategy_control_id(path)
         if sid is None:
             self.send_bytes(404, b"not found", "text/plain")
@@ -3145,6 +3216,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         path = urlparse(self.path).path
+        if self._is_trading_state_path(path):
+            if not self._dashboard_auth_ok():
+                self._auth_challenge()
+                return
+            self._apply_trading_state("active")  # DELETE resets to normal trading
+            return
         sid = self._strategy_control_id(path)
         if sid is None:
             self.send_bytes(404, b"not found", "text/plain")
@@ -3158,7 +3235,24 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
+def _warm_dashboard_cache():
+    """Best-effort pre-warm of _MODEL_CACHE so the first /api request doesn't
+    pay the cold-start model-build latency (and risk a client timeout).
+
+    Runs in a daemon thread from __main__ only — never at import time — so unit
+    tests importing this module don't trigger network calls.
+    """
+    try:
+        dashboard_model()
+    except Exception as exc:  # noqa: BLE001 — warming is best-effort
+        print(f"[dashboard] cache pre-warm failed (non-fatal): {exc}", file=sys.stderr)
+
+
 if __name__ == "__main__":
     if DASH_AUTH_ENABLED and not DASH_AUTH_TOKEN:
         print("[dashboard] HERMX_DASH_AUTH enabled but HERMX_SECRET is blank; failing closed with 401 for protected routes.", file=sys.stderr)
-    ThreadingHTTPServer((HERMX_BIND_HOST, PORT), Handler).serve_forever()
+    server = ThreadingHTTPServer((HERMX_BIND_HOST, PORT), Handler)
+    # Pre-warm the model cache in the background; the server binds and serves
+    # immediately while warming happens off the request path.
+    threading.Thread(target=_warm_dashboard_cache, daemon=True).start()
+    server.serve_forever()

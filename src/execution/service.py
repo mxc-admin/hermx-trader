@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import logging
 import os
 import time
 from pathlib import Path
@@ -10,6 +11,43 @@ from pathlib import Path
 # exchange sandbox/paper account; 'live' is the ONLY mode permitted to reach a real
 # venue, and only with the global HERMX_LIVE_TRADING kill switch armed.
 CANONICAL_EXECUTION_MODES = frozenset({"demo", "live"})
+
+# A1 -- pre-trade notional CAP. An absolute USD ceiling read ONCE at module load,
+# independent of a strategy's budget_usd x leverage (which cannot catch a fat-fingered
+# budget/leverage in the same file the planned notional is derived from). DEFAULT UNSET
+# (inf) => no cap, byte-identical to today (ship-safe, matches ORDER_PNL_IS_NET /
+# HERMX_RECONCILE_ENABLED convention). Tests monkeypatch this module attribute.
+HERMX_MAX_NOTIONAL_USD_ENV = float(os.environ.get("HERMX_MAX_NOTIONAL_USD", "inf"))
+
+
+def _check_pretrade_risk(readiness: dict, config: dict) -> tuple[bool, str]:
+    """PURE: is the planned notional within the absolute pre-trade ceiling?
+
+    Ceiling = ``min(strategy capital.max_notional_usd, HERMX_MAX_NOTIONAL_USD_ENV)``
+    -- an INDEPENDENT absolute figure, never derived from budget x leverage. Unset
+    (inf) or non-positive (a ``0``/typo env) is treated as NO cap: the gate must never
+    block every order on a bad ceiling. A missing/None ``planned_notional_usd`` is a
+    fail-safe pass (a close carries 0/None and must never trip)."""
+    intent = (readiness or {}).get("execution_intent") or {}
+    planned = intent.get("planned_notional_usd")
+    if planned is None:
+        return (True, "")
+    try:
+        planned = float(planned)
+    except (TypeError, ValueError):
+        return (True, "")
+
+    cap_cfg = (config or {}).get("capital") or {}
+    strat_ceiling = cap_cfg.get("max_notional_usd")
+    ceiling = min(
+        float(strat_ceiling) if strat_ceiling else float("inf"),
+        HERMX_MAX_NOTIONAL_USD_ENV,
+    )
+    if ceiling == float("inf") or ceiling <= 0:
+        return (True, "")  # unset / non-positive => no cap
+    if planned > ceiling:
+        return (False, f"notional_exceeds_max:{planned:.2f}>{ceiling:.2f}")
+    return (True, "")
 
 
 def resolve_execution_config(config: dict, readiness: dict | None = None) -> dict:
@@ -157,6 +195,33 @@ class ExecutionService:
             if symbol_pause:
                 return _blocked("symbol_paused", "symbol_pause", symbol_pause=symbol_pause)
 
+        # Gate 4 (A1) -- pre-trade notional CAP. Refuse to submit any order whose
+        # planned_notional_usd exceeds an INDEPENDENT absolute ceiling, catching a
+        # fat-fingered budget_usd/leverage/reinvest before it reaches a real venue.
+        # A close carries 0/None planned notional and never trips (no special-case).
+        # Returns BEFORE the write-ahead journal, so a blocked order leaves no PLANNED row.
+        strategy_config_lookup = self._h("strategy_config_lookup")
+        ok_risk, risk_reason = _check_pretrade_risk(readiness, strategy_config_lookup(readiness) or {})
+        if not ok_risk:
+            logging.warning(
+                "pretrade_notional block strategy_id=%s reason=%s symbol=%s",
+                readiness.get("strategy_id"), risk_reason, readiness.get("symbol"),
+            )
+            emit = self._h("emit_reconcile_alert")
+            emit(
+                self._h("reconcile_alert_mismatch"),
+                {"stage": "pretrade_risk", "reason": risk_reason, "symbol": readiness.get("symbol")},
+            )
+            return _blocked(risk_reason, "pretrade_notional")
+
+        # Gate 5 (A2) -- global trading_state. When the operator has put the whole
+        # system into "reducing" (risk-off), block every non-close order. A close_only
+        # record ALWAYS passes -- HermX never blocks a close (blocking it would trap an
+        # operator mid-incident, same invariant as the kill switch / symbol pause).
+        trading_state = self._h("trading_state")()
+        if trading_state == "reducing" and not readiness.get("close_only"):
+            return _blocked("trading_state_reducing:reversal_blocked", "trading_state")
+
         order_intent_from_readiness = self._h("order_intent_from_readiness")
         cl_ord_id_from_readiness = self._h("cl_ord_id_from_readiness")
         latest_order_record = self._h("latest_order_record")
@@ -221,6 +286,7 @@ class ExecutionService:
         started = time.time()
         redact_secrets = self._h("redact_secrets")
 
+        adapter_result = None
         try:
             if self.executor_factory is None:
                 raise RuntimeError("executor_factory_unavailable")
@@ -304,6 +370,24 @@ class ExecutionService:
         order_state_can_transition = self._h("order_state_can_transition")
         emit_reconcile_alert = self._h("emit_reconcile_alert")
         reconcile_alert_mismatch = self._h("reconcile_alert_mismatch")
+
+        # A1b -- silent under-execution alert. When EVERY order leg clamped to
+        # size 0 (sub-min notional), the strategy wanted a position but nothing was
+        # submitted. The service still records a clean terminal REJECTED (unchanged),
+        # but the zero_size is otherwise buried in the payload with no operator signal.
+        # Surface a WARNING + reconcile alert so the under-execution is noticed.
+        executed_orders = ((adapter_result or {}).get("payload") or {}).get("executed_orders") or []
+        if mode == "submit_failed" and executed_orders and all(
+            (row or {}).get("reason") == "zero_size" for row in executed_orders
+        ):
+            logging.warning(
+                "under_execution zero_size cl_ord_id=%s symbol=%s legs=%d",
+                cl_ord_id, readiness.get("symbol"), len(executed_orders),
+            )
+            emit_reconcile_alert(
+                reconcile_alert_mismatch,
+                {"stage": "under_execution", "reason": "zero_size_below_min", "cl_ord_id": cl_ord_id},
+            )
 
         if reconcile_post_submit_enabled() and mode == "submit_partial":
             # A partial multi-leg submit is an operator-actionable money-safety event:

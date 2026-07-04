@@ -361,6 +361,9 @@ def paper_execution_hooks(execution_ledger: Path, order_journal: Path) -> dict:
         "webhook_auth_config_healthy": lambda: True,
         "watchdog_submission_state": lambda: (True, None),
         "symbol_pause_info": lambda symbol: None,
+        # Phase A gates default to no-op: no capital cap (empty config) + active state.
+        "strategy_config_lookup": lambda readiness: {},
+        "trading_state": lambda: "active",
         "order_intent_from_readiness": lambda readiness: readiness.get("execution_intent") or {},
         "cl_ord_id_from_readiness": lambda readiness: (readiness.get("execution_intent") or {}).get("client_order_id"),
         "latest_order_record": lambda client_order_id: None,

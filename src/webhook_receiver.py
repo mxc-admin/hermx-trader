@@ -1174,6 +1174,12 @@ def default_control_state() -> dict:
         # Phase 3 accounting windows: {strategy_id: {accounting_start_at: ms, set_at}}.
         # Locks P&L before the timestamp without deleting ledger history.
         "accounting_windows": {},
+        # Phase A (A2) global trading_state: "active" (normal) | "reducing" (risk-off,
+        # close-only). MUST live in the default dict or the load_control_state merge
+        # ({k in default}) silently drops it -- the same class of bug that once dropped
+        # accounting_windows. A simple string, so the merge preserves it with no
+        # special re-attach (unlike the dict-valued keys below).
+        "trading_state": "active",
         "notes": "Shadow control file. Dashboard/Hermes may read this. Live execution remains disabled here.",
     }
 
@@ -1365,6 +1371,50 @@ def accounting_start_for(strategy_id: str) -> "int | None":
         except (TypeError, ValueError):
             return None
     return None
+
+
+# Phase A (A2) -- global trading_state. Collapsed to ONE extra state ("reducing" /
+# risk-off): a Nautilus-style HALTED that also blocks closes would contradict HermX's
+# deliberate never-block-a-close invariant (a close only REDUCES exposure). "active" is
+# normal; "reducing" blocks every non-close order at the ExecutionService gate.
+_VALID_TRADING_STATES = frozenset({"active", "reducing"})
+
+
+def set_trading_state(state: str) -> bool:
+    """Set the global trading_state in control-state.json. Validates the input:
+    only 'active' or 'reducing' are accepted (anything else is a no-op returning
+    False, so a typo can never disarm the gate)."""
+    st = str(state or "").strip().lower()
+    if st not in _VALID_TRADING_STATES:
+        return False
+    cs = load_control_state()
+    cs["trading_state"] = st
+    cs["updated_at"] = now_iso()
+    save_control_state(cs)
+    return True
+
+
+def get_trading_state() -> str:
+    """Read the global trading_state, defaulting to 'active'. An unknown/legacy value
+    fails open to 'active' (normal trading) -- 'reducing' is the safe EXTRA state, and
+    the live kill switch still guards real-venue submits independently."""
+    st = str(load_control_state().get("trading_state") or "active").strip().lower()
+    return st if st in _VALID_TRADING_STATES else "active"
+
+
+def clear_trading_state() -> bool:
+    """Reset trading_state to 'active' (the gate no-op)."""
+    return set_trading_state("active")
+
+
+def _strategy_config_for_readiness(readiness: "dict | None") -> dict:
+    """Resolve the strategy config (with its capital block) for a readiness record so
+    the A1 pre-trade notional ceiling can read ``capital.max_notional_usd``. Reads the
+    module-bound STRATEGIES by the readiness ``strategy_id``; empty dict when unknown."""
+    sid = str((readiness or {}).get("strategy_id") or "").strip()
+    if not sid:
+        return {}
+    return STRATEGIES.get(sid) or {}
 
 
 def _canonical_state_json(state: dict) -> str:
@@ -2675,6 +2725,9 @@ def _run_execution_service(record: dict, *, journal_hook=None) -> dict:
             "watchdog_submission_state": _watchdog_submission_state,
             "live_trading_enabled": live_trading_enabled,
             "symbol_pause_info": symbol_pause_info,
+            # Phase A gates: A1 reads the strategy capital cap; A2 reads trading_state.
+            "strategy_config_lookup": _strategy_config_for_readiness,
+            "trading_state": get_trading_state,
             "order_intent_from_readiness": _order_intent_from_readiness,
             "cl_ord_id_from_readiness": _cl_ord_id_from_readiness,
             "latest_order_record": latest_order_record,
