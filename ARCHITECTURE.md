@@ -477,6 +477,7 @@ Intelligence is **purely additive** and lives *outside* the money path. Pattern:
 | `src/webhook/money.py` | Pure money/decimal leaf: `Decimal` coercion (`D`), fixed-precision quantizers/formatters (`dec_usd`/`dec_notional`/`dec_pct`/`dec_units`), and recursive `canonicalize_decimal_fields`; re-exported by `webhook_receiver` for backward compatibility |
 | `src/dashboard.py` | Read-only operator dashboard + `/api` + `/health`; HTTP `:8098` |
 | `src/dashboard_core.py` | Dashboard data plumbing: tolerant ledger reads, OKX ticker cache, per-ledger read stats |
+| `src/pnl_ledger.py` | Durable closed-trade P&L ledger: append-only `closed-trades.jsonl` writes, net/gross realized helpers, reconciliation readback, and high-water accounting for order-history age-out detection |
 | `src/hermx_shared.py` | Single source of truth for `canonical_timeframe()` (shared by receiver + dashboard) |
 | `src/execution/service.py` | `ExecutionService` — the single money-safety chokepoint (7 invariants); `resolve_execution_config` |
 | `src/executors/base.py` | `BaseExecutor` contract + normalized fill/order/position/balance shapes |

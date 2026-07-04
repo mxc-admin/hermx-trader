@@ -3,7 +3,7 @@
 **Status:** RESEARCH + ANALYSIS (no implementation in this pass)
 **Author:** research pass, 2026-07-02
 **Companion docs:** `docs/HERMES_CRON_MONITOR_DESIGN.md` (the 5 shipped monitor jobs),
-`docs/MONITOR_DAEMON_SPEC.md` (superseded daemon spec — still the source of fingerprint/window logic).
+`MONITOR_DAEMON_SPEC.md` (removed/superseded daemon spec — still the source of fingerprint/window logic).
 **Audience:** whoever extends the monitoring surface next.
 
 > This document maps every failure mode we could think of for the HermX execution layer to
@@ -524,7 +524,7 @@ too old, reusing the lib as-is (the only lib touch is adding an `"intake"` suppr
   bases `:30-32`, list_strategies `:310-319`.
 - `deploy/hermes-scripts/` — `hermx_gate_lib.py` (windows `:33`, `is_fresh` `:106-119`),
   `hermx-reconcile-gate.py:50-90`, `hermx-risk-gate.py:28-60`, `hermx-health-watch.py:30-51`.
-- `docs/MONITOR_DAEMON_SPEC.md` — fingerprints §4.2 (`:372-383`), windows §4.3 (`:398-405`),
+- `MONITOR_DAEMON_SPEC.md` (removed) — fingerprints §4.2 (`:372-383`), windows §4.3 (`:398-405`),
   candidate sources §10.1 (`:946-954`).
 - Tests — `tests/test_monitor_cron_gates.py`, `tests/test_action_close_intake.py`,
   `tests/test_unknown_resolver_controls.py`, `tests/test_characterization_hotfix_ledgers.py`,

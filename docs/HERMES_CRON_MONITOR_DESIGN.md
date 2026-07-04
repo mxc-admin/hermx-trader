@@ -1,7 +1,7 @@
 # HermX Monitoring via Hermes Built-in Cron — Technical Design
 
 **Status:** DESIGN (design only — no implementation code in this pass)
-**Supersedes:** `docs/MONITOR_DAEMON_SPEC.md` (the custom `src/monitor_daemon.py` design)
+**Supersedes:** `MONITOR_DAEMON_SPEC.md` (removed — the custom `src/monitor_daemon.py` design)
 **Author:** research + design pass, 2026-07-02
 **Audience:** the developer who will wire up the monitoring jobs in a follow-up session.
 
@@ -277,11 +277,11 @@ UNKNOWN-never-flat contract baked in. No new skill is strictly required to ship 
 
 ### 5.2 Two optional new skills (additive, recommended but not blocking)
 
-- **`skills/hermx-monitor/SKILL.md`** — a read-only "digest" skill that composes
+- **`hermx-monitor` skill** *(not implemented — not on disk)* — a read-only "digest" skill that composes
   status + positions + signal-memory into a **standardized operator digest format**. Benefit: the
   digest layout lives in one tested skill instead of being re-described in every cron prompt.
   Follow the frontmatter schema of `skills/hermx-status/SKILL.md`. Register it via §4.1.
-- **`skills/dashboard-risk/SKILL.md`** — the planned MXC risk-read skill
+- **`dashboard-risk` skill** *(not implemented — not on disk)* — the planned MXC risk-read skill
   (`docs/HERMX_AGENT_SYSTEM_DESIGN.md:496-525`; referenced in `related_skills` but not on disk).
   Reads the MXC Kinetic dashboard (`pp_acc`/`pp_vel`/`regime`/`risk_state`), honoring the
   `risk_index_gate_enabled` flag in `control-state.json`. Lets the risk job delegate MXC parsing
@@ -651,5 +651,5 @@ discipline. Monitors are strictly read-only against HermX (§5.4).
 | Skill body uses cwd-relative import | `skills/hermx-status/SKILL.md` (`sys.path.insert(0, "skills/hermx-ops/lib")`) |
 | `control-state.json` shape (gate flag, risk_limits) | repo `control-state.json` (`risk_limits.max_daily_loss_usd`, `symbol_pauses`) |
 | Cron features: `[SILENT]`, `wakeAgent`, `--no-agent`, `context_from`, workdir serialization, fail-closed on default change, recursion guard | `~/.hermes/hermes-agent/website/docs/{user-guide/features/cron.md,guides/cron-script-only.md,developer-guide/cron-internals.md}` |
-| Fingerprints / windows / skill map / MXC gate (ported) | `docs/MONITOR_DAEMON_SPEC.md` §4.2, §4.3, §5.2, §6.4 |
+| Fingerprints / windows / skill map / MXC gate (ported) | `MONITOR_DAEMON_SPEC.md` (removed) §4.2, §4.3, §5.2, §6.4 |
 ```

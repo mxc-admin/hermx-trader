@@ -64,7 +64,7 @@ Phase 0 is a **spike**, not a shipping phase — it exists to answer TD §10's o
 - (Q6 rate limits, Q7 SDK, Q8 sandbox — **taken as resolved from docs**, no live check needed.)
 
 ### Deliverables
-- `docs/SNAPTRADE_PHASE0_FINDINGS.md` — one row per question: doc answer + **confirmed?** + evidence (payload snippet). (Cross-reference `SNAPTRADE_API_FINDINGS.md`.)
+- `SNAPTRADE_PHASE0_FINDINGS.md` (new, to be created under `docs/`) — one row per question: doc answer + **confirmed?** + evidence (payload snippet). (Cross-reference `docs/SNAPTRADE_API_FINDINGS.md`.)
 - `tests/fixtures/snaptrade/` — recorded real raw payloads (secrets stripped): a positions response, a balances response, an activities/transactions response, order objects for each status (`EXECUTED`/`PENDING`/`CANCELED`/`REJECTED`/`PARTIAL`), a `POST /trade/place` response, a `POST /trade/impact` response, and a sample webhook body per event type (`TRADE_UPDATE`, `CONNECTION_BROKEN`, `ACCOUNT_HOLDINGS_UPDATED`). Sandbox covers the read fixtures + error scenarios; Alpaca paper covers the place/impact fixtures.
 
 ### Testing / verification
@@ -251,7 +251,7 @@ A TradingView signal (e.g. `SPY`) routes through the **normal pipeline** and sel
 5. **Schema extended + validated:** `type: equity`, rejects leverage/margin for cash, demo → paper.
 6. **Legal check** initiated (order-routing-on-behalf-of-users obligations at intended scale) — must **clear** before Phase 3 live enable.
 7. **Pricing re-verified** at commit time.
-- All above signed off in `docs/SNAPTRADE_PAPER_PILOT.md`.
+- All above signed off in `SNAPTRADE_PAPER_PILOT.md` (new, to be created under `docs/`).
 
 ### Rollback
 - Runtime: `engine-config.json` `snaptrade.enabled: false` and/or `control-state.json` `snaptrade_enabled: false` → adapter dark, webhook endpoint gated off (`webhook_enabled: false`). SnapTrade strategies fail closed at `create()`.
@@ -494,7 +494,7 @@ Phase column: **P1** = read-only, **P2** = paper, **P3** = live/multi-account.
 
 ## 8. Post-Launch
 
-### Operational runbook (`docs/SNAPTRADE_RUNBOOK.md` → `SNAPTRADE_LIVE_RUNBOOK.md`)
+### Operational runbook (`SNAPTRADE_RUNBOOK.md` → `SNAPTRADE_LIVE_RUNBOOK.md`, both new under `docs/`)
 - **Connection expiry / re-auth:** how to spot "re-link required", regenerate the portal URL, re-link without losing the account→strategy mapping, verify health flips back.
 - **`userSecret` rotation:** rotate + re-encrypt in place; verify no downtime.
 - **Revoke:** delete a connection → the routed strategy fails closed; confirm crypto unaffected.
@@ -507,7 +507,7 @@ Phase column: **P1** = read-only, **P2** = paper, **P3** = live/multi-account.
 - Update `CLAUDE.md` / `.claude/CLAUDE.md` Key Files to list `src/snaptrade/` and `snaptrade_adapter.py`.
 - Add SnapTrade venues to `docs/hermx-slash-commands.md` where operator commands (`/hx-positions`, `/hx-close`) now span brokers.
 - Record any new proven pattern in **both** `.claude/rules/code-quality.md` and `.windsurf/rules/code-quality.md` (dual-file rule) — e.g. the backend(`snaptrade`)-vs-venue(`snaptrade:alpaca:acct`) distinction, which is exactly the class of bug the shadow-config regression taught us to guard.
-- Close out `docs/SNAPTRADE_PHASE0_FINDINGS.md` open questions as each is answered; fold Q10 (regulatory) and Q11 (options, deferred) into a future-work note.
+- Close out `SNAPTRADE_PHASE0_FINDINGS.md` open questions as each is answered; fold Q10 (regulatory) and Q11 (options, deferred) into a future-work note.
 
 ---
 

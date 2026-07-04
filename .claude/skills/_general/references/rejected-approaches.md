@@ -169,7 +169,7 @@
 - **Reason:** `-path './node_modules' -prune` only prunes the top-level dir. `dashboard-ui/node_modules` (535 `.md` files) evades it. Prune by name at any depth: `-name node_modules -prune`.
 - **Date:** July 2026
 
-### Custom monitor daemon (`docs/MONITOR_DAEMON_SPEC.md`)
+### Custom monitor daemon *(spec removed; superseded by `docs/HERMES_CRON_MONITOR_DESIGN.md`)*
 - **What:** A ~600-line custom daemon for scheduling, dedup, delivery, and resilience of HermX monitors.
 - **Tested:** Compared against Hermes built-in cron capabilities.
 - **Verdict:** REJECTED (superseded)

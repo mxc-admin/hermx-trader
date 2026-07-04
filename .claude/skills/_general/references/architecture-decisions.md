@@ -138,7 +138,7 @@
 
 ### Hermes built-in cron over a custom monitor daemon
 - **Decision:** Use Hermes' built-in cron (60s tick scheduler + `hermes cron create/edit/run/list`) for all monitors.
-- **Alternatives:** A ~600-line custom monitor daemon (`docs/MONITOR_DAEMON_SPEC.md`, rejected).
+- **Alternatives:** A ~600-line custom monitor daemon (rejected; superseded by `docs/HERMES_CRON_MONITOR_DESIGN.md`).
 - **Rationale:** Built-in cron already provides scheduler, dedup, delivery, and resilience. No new process, no new store.
 
 ### Pre-check gate scripts as the HermX↔Hermes bridge

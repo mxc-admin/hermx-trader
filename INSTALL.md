@@ -305,8 +305,8 @@ dashboard token. Send it as the `X-Dashboard-Token` header, or as the Bearer / B
 HERMX_RECEIVER_PORT=8891    # webhook receiver (loopback)
 HERMX_DASHBOARD_PORT=8098   # dashboard (loopback)
 # Legacy aliases (deprecated, still honored for backward compatibility):
-# SHADOW_PORT=8891
-# CLEAN_DASHBOARD_PORT=8098
+# SHADOW_PORT=8891          # deprecated alias for HERMX_RECEIVER_PORT
+# CLEAN_DASHBOARD_PORT=8098 # deprecated alias for HERMX_DASHBOARD_PORT
 ```
 
 **(e) Hermes Agent / Telegram values — collect now, store later**
