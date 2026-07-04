@@ -214,10 +214,21 @@ def _parse_operator_close_strategy_id(
         return None
     body = str(cl_ord_id)[len("operator_close_"):]
     parts = body.split("_")
-    # Rightmost segment must be an 8-digit UTC day; otherwise the shape is unknown.
-    if len(parts) < 2 or not (len(parts[-1]) == 8 and parts[-1].isdigit()):
+    # Trailing tokens carry the UTC day (8 digits). Legacy ids end at the day;
+    # newer ids append a finer ``_{HHMMSS}`` (6 digits) debounce token after it so
+    # two distinct same-day closes get distinct ids. Locate the 8-digit day token in
+    # both shapes; everything before it is "{symbol}_{sid}".
+    if len(parts) >= 2 and len(parts[-1]) == 8 and parts[-1].isdigit():
+        middle_parts = parts[:-1]
+    elif (
+        len(parts) >= 3
+        and len(parts[-1]) == 6 and parts[-1].isdigit()
+        and len(parts[-2]) == 8 and parts[-2].isdigit()
+    ):
+        middle_parts = parts[:-2]
+    else:
         return None
-    middle = "_".join(parts[:-1])  # "{symbol}_{sid}"
+    middle = "_".join(middle_parts)  # "{symbol}_{sid}"
     # Primary: peel the symbol prefix using the row's instrument id.
     if inst_id:
         sym_us = str(inst_id).replace("-", "_").replace("/", "_")

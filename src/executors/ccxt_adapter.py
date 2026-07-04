@@ -438,7 +438,11 @@ class CcxtExecutor(BaseExecutor):
             elif hasattr(client, "markets"):
                 market = (getattr(client, "markets", {}) or {}).get(symbol) or {}
         except Exception:
-            market = {}
+            # Do NOT fall back to market={} -> contract_size=1.0: on a contract where
+            # contractSize != 1 that fabricated default silently mis-sizes every order.
+            # Re-raise so execute() records UNKNOWN (submit_timeout/submit_exception)
+            # instead of sizing and submitting on a guessed spec.
+            raise
 
         contract_size = _to_float((market or {}).get("contractSize"), 1.0) or 1.0
         precision_step = _step_from_precision(((market or {}).get("precision") or {}).get("amount"))
@@ -467,10 +471,25 @@ class CcxtExecutor(BaseExecutor):
             contracts = _to_float(row.get("contracts"), None)
             if contracts is None:
                 contracts = _to_float(row.get("contractsSize"), 0.0)
-            contracts = abs(float(contracts or 0.0))
+            info = row.get("info") if isinstance(row.get("info"), dict) else {}
             side = str(row.get("side") or "").lower()
-            if side not in {"long", "short"} and contracts > 0:
-                side = "long"
+            if side not in {"long", "short"}:
+                # ccxt left the side blank -> recover it from venue-native fields before
+                # giving up. Defaulting a blank side to "long" (the old behavior)
+                # mislabels a real short, so a CLOSE_SHORT is skipped and the short is
+                # never flattened. Fall back to "unknown" (not "long") when truly
+                # undeterminable so the close path can still act on the action's side.
+                pos_side = str(info.get("posSide") or "").lower()
+                signed = _to_float(info.get("pos") or info.get("positionAmt"), None)
+                if pos_side in {"long", "short"}:
+                    side = pos_side
+                elif signed is not None and signed < 0:
+                    side = "short"
+                elif signed is not None and signed > 0:
+                    side = "long"
+                else:
+                    side = "unknown"
+            contracts = abs(float(contracts or 0.0))
             if contracts > 0:
                 return {"side": side, "contracts": contracts, "raw": row}
         return {"side": "flat", "contracts": 0.0, "raw": None}
@@ -576,6 +595,25 @@ class CcxtExecutor(BaseExecutor):
             return _to_float(ticker.get("last"), None)
         except Exception:
             return None
+
+    def _close_fallback_price(self, position: dict, reference_price: float | None) -> float | None:
+        """Last-resort price for a Hyperliquid reduce-only close when the ticker feed is
+        down (``_reference_price`` returned None). Prefers the live reference, then the
+        open position's own mark/entry price (ccxt top-level, then venue-native ``info``),
+        so an emergency flatten still carries a usable slippage bound."""
+        if reference_price and reference_price > 0:
+            return reference_price
+        raw = (position or {}).get("raw") or {}
+        for key in ("markPrice", "entryPrice", "lastPrice"):
+            val = _to_float(raw.get(key), None)
+            if val and val > 0:
+                return val
+        info = raw.get("info") if isinstance(raw.get("info"), dict) else {}
+        for key in ("markPx", "entryPx", "avgPx", "avgEntryPx"):
+            val = _to_float(info.get(key), None)
+            if val and val > 0:
+                return val
+        return None
 
     def _contracts_for_notional(self, notional_usd: float, price: float, market_spec: dict) -> float:
         contract_size = float(market_spec.get("contract_size") or 1.0)
@@ -720,7 +758,12 @@ class CcxtExecutor(BaseExecutor):
             for action in actions:
                 if action in {"CLOSE_LONG", "CLOSE_SHORT"}:
                     expected_side = "long" if action == "CLOSE_LONG" else "short"
-                    if current_side != expected_side:
+                    # Skip only when the venue reports a DEFINITE opposite side. If the
+                    # side is unknown (ccxt left it blank and no native field disambiguated
+                    # it), trust the action's expected_side rather than skipping -- a real
+                    # short reported with a blank side must stay closable (reduceOnly makes
+                    # a wrong guess a no-op at the venue, so this is safe).
+                    if current_side not in {expected_side, "unknown"}:
                         executed_orders.append({
                             "action": action,
                             "submitted": False,
@@ -743,8 +786,14 @@ class CcxtExecutor(BaseExecutor):
                         client_order_id=client_order_id_close,
                         exchange_id=exchange_id,
                     )
+                    # Hyperliquid rejects an order with a None price. On a reduce-only
+                    # close the reference feed being down must NOT block an emergency
+                    # flatten, so fall back to the position's own mark/entry price.
+                    close_price = price
+                    if exchange_id == "hyperliquid" and close_price is None:
+                        close_price = self._close_fallback_price(position, reference_price)
                     try:
-                        order = client.create_order(symbol, order_type, close_side, close_amount, price, params)
+                        order = client.create_order(symbol, order_type, close_side, close_amount, close_price, params)
                         self._record_hl_cloid(order, client_order_id_close, exchange_id)
                         executed_orders.append({
                             "action": action,

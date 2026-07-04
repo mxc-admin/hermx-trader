@@ -2081,6 +2081,12 @@ def map_order_outcome(order: "dict | None", ordered: "float | None" = None) -> t
     if state == "canceled":
         if acc > 0.0:
             return ORDER_STATE_FILLED, True, "canceled_after_partial_fill"
+        # canceled_zero_fill is the ONLY venue-confirmed rejection -- but only when the
+        # zero is REAL. A missing/malformed acc_fill_sz must NOT be coerced to 0 and
+        # rejected: a canceled-after-partial would then be dropped as flat. Keep it
+        # UNKNOWN (report-driven reconcile) so the backoff/resolver chases the true size.
+        if _reconcile_float(order.get("acc_fill_sz"), None) is None:
+            return ORDER_STATE_UNKNOWN, False, "canceled_fill_size_unavailable"
         return ORDER_STATE_REJECTED, False, "canceled_zero_fill"
     if state == "live":
         # Non-terminal: still working. partial flag only informs the caller's logging.
@@ -2761,11 +2767,15 @@ def _execute_via_service(record: dict) -> dict:
 
 
 def _operator_close_cl_ord_id(symbol: str, strategy_id: str) -> str:
-    """Deterministic per-(symbol, strategy, UTC-day) close id. Idempotent: a repeat
-    close for the same symbol/strategy on the same day collides on the order-journal
-    dedupe key and is refused ``duplicate_cl_ord_id`` rather than double-submitted."""
-    day = datetime.now(timezone.utc).strftime("%Y%m%d")
-    return f"operator_close_{symbol}_{strategy_id}_{day}"
+    """Per-(symbol, strategy) close id at 1-second granularity. Idempotent within the
+    same UTC second: an accidental resubmit collides on the order-journal dedupe key
+    and is refused ``duplicate_cl_ord_id``, but two DISTINCT closes for the same
+    symbol/strategy later the same day no longer collide (a full-day id silently
+    dropped the second one). The trailing ``_{YYYYMMDD}_{HHMMSS}`` keeps the 8-digit
+    UTC-day token intact for the fallback attribution parser
+    (``pnl_ledger._parse_operator_close_strategy_id``)."""
+    now = datetime.now(timezone.utc)
+    return f"operator_close_{symbol}_{strategy_id}_{now.strftime('%Y%m%d')}_{now.strftime('%H%M%S')}"
 
 
 def build_operator_close_readiness(symbol: str, strategy: dict, cl_ord_id: str) -> dict:

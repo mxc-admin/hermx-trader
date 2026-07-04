@@ -147,6 +147,28 @@ def test_canceled_after_partial_maps_filled_partial(wr):
     assert (out["state"], out["partial"]) == (wr.ORDER_STATE_FILLED, True)
 
 
+def test_canceled_missing_acc_fill_sz_maps_unknown_not_rejected(wr):
+    """Regression: a canceled order whose acc_fill_sz is absent (None) must NOT be
+    coerced to a fabricated 0 and rejected -- that would drop a canceled-after-partial
+    position as flat. Absent fill size is inconclusive -> UNKNOWN, stays tracked."""
+    order = norm_order("canceled", acc=0.0)
+    order["acc_fill_sz"] = None  # venue omitted the field / query returned it missing
+    ex = StubExecutor(order=order)
+    out = wr.reconcile_order_once(ex, LOOKUP)
+    assert out["state"] == wr.ORDER_STATE_UNKNOWN
+    assert out["state"] != wr.ORDER_STATE_REJECTED
+    assert out["reason"] == "canceled_fill_size_unavailable"
+
+
+def test_canceled_confirmed_zero_fill_still_rejected(wr):
+    """A canceled order with a REAL confirmed zero fill preserves the terminal
+    REJECTED outcome (the only venue-confirmed rejection)."""
+    ex = StubExecutor(order=norm_order("canceled", acc=0.0))
+    out = wr.reconcile_order_once(ex, LOOKUP)
+    assert out["state"] == wr.ORDER_STATE_REJECTED
+    assert out["reason"] == "canceled_zero_fill"
+
+
 def test_fallback_order_miss_pending_hit(wr):
     # get_order not-found, but the order is live in orders-pending.
     ex = StubExecutor(order=norm_not_found(), pending=[norm_order("filled", acc=10.0)])

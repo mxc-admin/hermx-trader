@@ -163,3 +163,42 @@ def test_close_is_idempotent_on_duplicate_cl_ord_id(wr, monkeypatch):
     assert second["reason"] == "duplicate_cl_ord_id"
     # Only the first close ever reached the executor.
     fake.execute.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 7. Distinct same-day closes must NOT collide (cl_ord_id day-granularity bug).
+# ---------------------------------------------------------------------------
+
+def test_two_distinct_same_day_closes_both_submit(wr, monkeypatch):
+    """Regression: a full-day close id (``operator_close_{sym}_{sid}_{YYYYMMDD}``)
+    made a SECOND distinct close for the same symbol/strategy on the same UTC day
+    collide on the order-journal dedupe key -- silently refused ``duplicate_cl_ord_id``
+    so the flatten never reached the venue. With seconds granularity two closes a few
+    seconds apart get distinct ids and BOTH reach the executor."""
+    import datetime as _dt
+
+    monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
+    strategy = _strategy(execution_mode="demo")
+
+    times = [
+        _dt.datetime(2026, 7, 4, 10, 0, 0, tzinfo=_dt.timezone.utc),
+        _dt.datetime(2026, 7, 4, 10, 0, 5, tzinfo=_dt.timezone.utc),  # same day, +5s
+    ]
+
+    class _ClockDT(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return times.pop(0)
+
+    monkeypatch.setattr(wr, "datetime", _ClockDT)
+
+    fake = _fake_executor()
+    with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):
+        first = wr.execute_operator_close("BTCUSDT", strategy)
+        second = wr.execute_operator_close("BTCUSDT", strategy)
+
+    assert first["mode"] == "submit_enabled"
+    assert second["mode"] == "submit_enabled"
+    assert first["_cl_ord_id"] != second["_cl_ord_id"]
+    # Both distinct closes reached the venue -- neither was dropped as a duplicate.
+    assert fake.execute.call_count == 2

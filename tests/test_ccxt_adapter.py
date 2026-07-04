@@ -430,6 +430,180 @@ def test_operator_close_long_without_target_direction(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Fix 2: market-spec lookup failure must fail closed (never size on defaults).
+# ---------------------------------------------------------------------------
+
+
+class _FakeMarketFailClient(_FakeClient):
+    """load_markets / market() raise (transient venue/network failure)."""
+
+    def load_markets(self):
+        raise Exception("network timeout during load_markets")
+
+    def market(self, _symbol):
+        raise Exception("market lookup failed")
+
+
+def test_market_spec_lookup_failure_blocks_order_not_default_size(monkeypatch):
+    """Regression: a bare ``except: market = {}`` defaulted contract_size to 1.0 on a
+    transient lookup failure, silently mis-sizing orders on contracts where
+    contractSize != 1. The lookup failure must instead surface as UNKNOWN and never
+    reach create_order with a fabricated size."""
+    ex = _executor()
+    fake = _FakeMarketFailClient()
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    readiness = {
+        "signal_side": "buy",
+        "signal_price": 60000.0,
+        "inst_id": "BTC-USDT-SWAP",
+        "td_mode": "cross",
+        "execution_intent": {
+            "client_order_id": "cid-spec-fail",
+            "target_direction": "long",
+            "planned_notional_usd": 1500.0,
+            "actions": ["OPEN_LONG"],
+        },
+    }
+
+    out = ex.execute(readiness)
+
+    assert out["ok"] is False
+    assert out["mode"] in {"submit_exception", "submit_timeout"}
+    # Never sized/submitted on a fabricated contract_size=1.0.
+    assert fake.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: a real short reported with a blank ccxt side must stay closable.
+# ---------------------------------------------------------------------------
+
+
+class _FakeBlankSideShortClient(_FakeClient):
+    """A real SHORT position ccxt reports with a blank top-level side; only the
+    venue-native ``info.posSide`` reveals direction (the reported bug)."""
+
+    def fetch_positions(self, symbols=None):
+        sym = symbols[0] if symbols else "BTC/USDT:USDT"
+        return [
+            {
+                "symbol": sym,
+                "side": "",  # blank -> old code defaulted to "long"
+                "contracts": 3,
+                "entryPrice": 60500.0,
+                "info": {"instId": "BTC-USDT-SWAP", "posSide": "short"},
+            }
+        ]
+
+
+class _FakeUnknownSideClient(_FakeClient):
+    """A position with a blank side AND no native disambiguator -> genuinely unknown."""
+
+    def fetch_positions(self, symbols=None):
+        sym = symbols[0] if symbols else "BTC/USDT:USDT"
+        return [{"symbol": sym, "side": "", "contracts": 3, "entryPrice": 60500.0, "info": {}}]
+
+
+def test_close_short_with_blank_side_still_flattens(monkeypatch):
+    ex = _executor()
+    fake = _FakeBlankSideShortClient()
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    readiness = {
+        "close_only": True,
+        "signal_side": None,
+        "inst_id": "BTC-USDT-SWAP",
+        "td_mode": "cross",
+        "execution_intent": {
+            "actions": ["CLOSE_LONG", "CLOSE_SHORT"],
+            "reduce_only": True,
+            "client_order_id": "operator_close_BTC-USDT-SWAP_strat-1_20260704",
+            "client_order_id_close": "operator_close_BTC-USDT-SWAP_strat-1_20260704",
+        },
+    }
+
+    out = ex.execute(readiness)
+
+    assert out["ok"] is True
+    # CLOSE_LONG skipped (position is short); CLOSE_SHORT fires as a buy reduceOnly.
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["side"] == "buy"
+    assert fake.calls[0]["params"].get("reduceOnly") is True
+    reasons = [r.get("reason") for r in out["payload"]["executed_orders"]]
+    assert "no_short_position_to_close" not in reasons
+
+
+def test_close_short_with_unknown_side_trusts_action(monkeypatch):
+    ex = _executor()
+    fake = _FakeUnknownSideClient()
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    readiness = {
+        "close_only": True,
+        "signal_side": None,
+        "inst_id": "BTC-USDT-SWAP",
+        "execution_intent": {
+            "actions": ["CLOSE_SHORT"],
+            "reduce_only": True,
+            "client_order_id": "operator_close_BTC-USDT-SWAP_strat-1_20260704",
+            "client_order_id_close": "operator_close_BTC-USDT-SWAP_strat-1_20260704",
+        },
+    }
+
+    out = ex.execute(readiness)
+
+    assert out["ok"] is True
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["side"] == "buy"
+
+
+# ---------------------------------------------------------------------------
+# Fix 5: Hyperliquid reduce-only close must not submit price=None when feed down.
+# ---------------------------------------------------------------------------
+
+
+def test_hl_reduce_only_close_falls_back_to_position_price(monkeypatch):
+    ex = _hl_executor()
+    fake = _FakeHLLongClient()
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+    # Ticker feed down: reference price resolves to None.
+    monkeypatch.setattr(ex, "_reference_price", lambda *a, **k: None)
+
+    readiness = {
+        "close_only": True,
+        "signal_side": None,
+        "inst_id": "SOL-USDC-SWAP",
+        "execution_intent": {
+            "actions": ["CLOSE_LONG", "CLOSE_SHORT"],
+            "reduce_only": True,
+            "client_order_id": "550e8400-e29b-41d4-a716-446655440010",
+            "client_order_id_close": "550e8400-e29b-41d4-a716-446655440011",
+        },
+    }
+
+    out = ex.execute(readiness)
+
+    assert out["ok"] is True
+    # CLOSE_LONG fires (position is long); price falls back to the position entryPrice.
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["price"] == 59000.0
+
+
+def test_hl_entry_with_none_price_still_blocks(monkeypatch):
+    """The reduce-only fallback must NOT leak into the entry path: a new OPEN with no
+    resolvable price still refuses to submit (unchanged)."""
+    ex = _hl_executor()
+    fake = _FakeHLClient()  # flat -> OPEN_LONG path
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+    monkeypatch.setattr(ex, "_reference_price", lambda *a, **k: None)
+
+    out = ex.execute(_hl_open_readiness())
+
+    assert out["ok"] is False
+    assert fake.calls == []
+
+
+# ---------------------------------------------------------------------------
 # Tier-2 adapter auth wiring (Binance, Bitget, Gate)
 # ---------------------------------------------------------------------------
 
