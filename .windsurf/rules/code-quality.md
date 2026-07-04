@@ -73,6 +73,27 @@ Write-side dedup under a lock still leaves a TOCTOU window where a duplicate row
 ### Log fee-currency mismatch and None realized-PnL instead of silently writing zero
 A fee reported in a non-quote currency, or a missing venue `pnl`/`realizedPnl` field, silently corrupts accounting if coerced to zero. Warn (log-and-continue) and persist the row with the anomaly recorded — never write a fabricated zero.
 
+### `reconcile_from_order_history` writes `strategy_id=None` — never recoverable from cl_ord_id alone
+Exchange order-history rows carry no `strategy_id`. `mxc{sha256(...)}` cl_ord_ids are not invertible. Any read path that filters `row.strategy_id == real_sid` will silently return $0 for every reconciled row. The only correct fix is a **submit-time map** (`pnl_strategy_map.py`): record `{cl_ord_id → strategy_id}` at the moment the order is submitted (when both are known). Never attempt hash reversal.
+
+### Tests that hand-inject `strategy_id` bypass the reconcile attribution seam
+If every ledger test seeds rows with `strategy_id` set directly (bypassing `reconcile_from_order_history`), the full `reconcile → aggregate_strategy_pnl` round-trip is untested. A single missing end-to-end test (`reconcile_from_order_history(hermx_rows) → aggregate_strategy_pnl(sid)`) was why C1 shipped silently. Always include at least one round-trip test for any ledger attribution path.
+
+### `default_control_state()` merge filter silently drops keys not in the default dict
+`load_control_state()` uses `{k for k in default}` to merge old files, silently dropping any key not present in `default_control_state()`. Every new `control-state.json` key (`accounting_windows`, `trading_state`, etc.) MUST be added to `default_control_state()` AND explicitly re-attached after merge. Missing this causes the key to vanish on the next state load.
+
+### `fcntl.flock` must wrap the ENTIRE read-modify-write, not just the write
+`append_closed_trades` originally called `_load_existing_keys` (the dedup read) BEFORE acquiring `flock(LOCK_EX)`. Two concurrent processes could each read a stale key set and both write the same `ordId` → duplicate rows → double-counted P&L. The lock must be acquired on an `a+` handle BEFORE reading keys, with the full read-filter-append inside the locked section.
+
+### `operator_close_{symbol}_{sid}_{day}` is ambiguous with simple `rsplit`
+Both `symbol` (e.g. `BTC_USDT`) and `strategy_id` (e.g. `my_strat_v2`) can contain underscores. A naive `rsplit("_", 2)` misparses the sid. The UTCday is always exactly 8 digits (`YYYYMMDD`, no underscores): strip the rightmost `_YYYYMMDD` suffix first, then use the submit map to resolve the rest. Never rely on split-counting alone for this format.
+
+### Pre-trade notional ceiling must be independent-absolute, not derived from budget×leverage
+A notional cap expressed as `budget_usd × leverage` is tautological — a fat-fingered `budget_usd` raises both the ceiling and the notional simultaneously, so the gate never fires. The ceiling must come from an independent source: `min(capital.max_notional_usd, HERMX_MAX_NOTIONAL_USD_ENV)` where both are operator-set absolute values. Unset ceiling = no cap (safe default).
+
+### `HALTED` trading state that blocks closes violates HermX's never-block-a-close invariant
+A `HALTED` state that blocks all submissions including closes is unsafe — emergency flatten must work exactly when new entries are disabled. The correct safe state is `reducing`: blocks new reversals/opens, but `close_only=True` signals always pass regardless of state.
+
 ### Re-read current code before executing a planned change
 Tests and code can change between when a plan is written and when it is executed (concurrent sessions, prior fixes). A plan item said to delete a hardcoded `reconcile_from_order_history(rows, "okx", "demo")` call, but a prior session had already fixed it by threading real `(venue, mode)` and a test now requires the call to exist — blind deletion would have regressed. Always re-read the current code (and its tests) immediately before acting on a planned edit.
 

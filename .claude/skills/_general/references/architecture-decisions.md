@@ -196,6 +196,26 @@
 - **Alternatives:** Per-instrument position cache keyed within a strategy.
 - **Rationale:** Every current strategy trades a single `inst_id`. A per-instrument cache is real complexity for zero present demand. Documented as a limitation in `PNL_MASTER_PLAN.md`; revisit only if a multi-instrument strategy is introduced.
 
+### Submit-time `cl_ord_id → strategy_id` map as the attribution seam
+- **Decision:** `src/pnl_strategy_map.py` persists `{cl_ord_id → strategy_id}` at order-submit time (both values are known). `pnl_ledger._build_entry` resolves `strategy_id` via this map at reconcile time.
+- **Alternatives:** Hash reversal of `mxc{sha256(...)}` cl_ord_id (rejected — not invertible); requiring `strategy_id != None` to write a row (rejected — silently drops external closes).
+- **Rationale:** The mapping is only knowable at submit time. Reconcile rows from the exchange carry no strategy context. `strategy_id=None` rows are still written — unattributed closes must be visible, not silently dropped.
+
+### Pre-trade notional cap is independent-absolute (`capital.max_notional_usd` + `HERMX_MAX_NOTIONAL_USD`)
+- **Decision:** `_check_pretrade_risk()` in `ExecutionService.execute()` gates on `min(capital.max_notional_usd, HERMX_MAX_NOTIONAL_USD)`, both independently operator-set absolute values.
+- **Alternatives:** Ceiling derived from `budget_usd × leverage` (rejected — tautological, fat-fingered budget raises both ceiling and notional simultaneously). No cap (rejected for live trading).
+- **Rationale:** Only an independent absolute ceiling can catch a misconfigured strategy. Unset = no cap (safe by default, matches `HERMX_LIVE_TRADING` convention). Gate is inserted after symbol-pause, before WAL write — a blocked order writes no journal row.
+
+### `trading_state` collapsed to `{active, reducing}` — no HALTED state
+- **Decision:** `control-state.json` carries `trading_state: "active" | "reducing"`. `reducing` blocks new reversals/opens; `close_only=True` signals always pass regardless of state.
+- **Alternatives:** `HALTED` state that blocks all submissions including closes (rejected — contradicts never-block-a-close invariant; emergency flatten must work exactly when new entries are disabled).
+- **Rationale:** One safe state is simpler and correct. A close that can't execute during a halt is more dangerous than an entry that slips through. The `{k for k in default}` merge guard in `load_control_state()` is paired: `trading_state` is in `default_control_state()`.
+
+### Observe-only venue-truth reconciliation (Phase B) — never auto-correct
+- **Decision:** Position-drift detection, balance reconciliation, and external fill ledgering are all observe-only. Drift is logged + `RECONCILE_MISMATCH` emitted; no auto-correction, no execution blocking.
+- **Alternatives:** Auto-correct position drift by placing a flattening order (rejected — introduces a new autonomous order path with no operator approval). Block execution on balance drift (rejected — balance drift is informational, not actionable without operator review).
+- **Rationale:** At HermX's scale, venue-truth checks are primarily a visibility tool. Auto-correction is a Nautilus-tier complexity that introduces new failure modes (the "correct" order could itself fail). Operator sees the drift via alert and acts manually.
+
 ### Observability by periodic pull gate (Hermes cron), not an event bus
 - **Decision:** Reconcile-lag and other observability signals are surfaced by periodic pre-check gate scripts (Hermes cron) reading state read-only, not by an in-process event bus.
 - **Alternatives:** Event-bus/pub-sub emission on every state transition (Nautilus-style).

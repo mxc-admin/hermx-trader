@@ -197,6 +197,41 @@
 - **Reason:** Nautilus reconciliation is report-driven only — it leaves venue-absent orders untouched, never synthesizing a rejection. HermX already aligns. Forcing `REJECTED` re-introduces the "drop a live position as flat" bug. Correct path is an optional non-position-affecting `ABANDONED` state, but only after a production UNKNOWN census.
 - **Date:** July 2026
 
+### Require `strategy_id != None` to write a ledger row (C1 attribution fix)
+- **What:** Block `append_closed_trades` if the resolved `strategy_id` is None, to prevent unattributed rows.
+- **Tested:** Design review against existing external-close and reconcile paths.
+- **Verdict:** REJECTED
+- **Reason:** Silently drops all external closes and any close whose submit-map entry was missed. The correct invariant is `strategy_id=None` rows still get written (they're money events); unattributed closes must be visible to the operator. Dedup by composite key prevents duplication.
+- **Date:** July 2026
+
+### `rsplit("_", 2)` for `operator_close_` strategy-id parsing
+- **What:** Parse `operator_close_{symbol}_{sid}_{day}` by splitting on `_` with `maxsplit=2`.
+- **Tested:** Analyzed real symbol formats (`BTC_USDT`) and strategy_id formats (`my_strat_v2`).
+- **Verdict:** REJECTED
+- **Reason:** Both `symbol` and `strategy_id` can contain underscores; `rsplit` misparses the sid. The UTCday suffix (`_YYYYMMDD`) is always exactly 8 digits and contains no underscores — strip it first, then use the submit map. Never rely on split-counting for this format.
+- **Date:** July 2026
+
+### Submit-rate throttle for HermX (Nautilus Opp 8)
+- **What:** Add a per-strategy order submit-rate limit (e.g. Nautilus `Throttler`).
+- **Tested:** Analyzed actual signal rate: WAL dedup + no-pyramid rule bounds rate to ~1/bar (~1/7200s for 2h strategies).
+- **Verdict:** REJECTED
+- **Reason:** HermX already has two structural rate limiters (WAL dedup + pyramid prevention). A dedicated throttler adds infrastructure for a constraint that cannot currently be hit in practice. Revisit if high-frequency strategies are introduced.
+- **Date:** July 2026
+
+### Affordability check as a pre-trade gate (Nautilus Opp 1c)
+- **What:** Gate execution on `planned_notional > venue_balance` before submitting.
+- **Tested:** Design analysis — balance fetch requires a live exchange call.
+- **Verdict:** REJECTED as a pre-trade gate; deferred to Phase B2 (balance reconcile, observe-only)
+- **Reason:** Meaningless in demo mode (sandbox balance is fake). Pre-trade balance fetch adds latency on the hot execution path. The correct implementation is observe-only balance drift alerting (Phase B2), not a blocking gate.
+- **Date:** July 2026
+
+### Auto-correcting position drift (Nautilus Opp 3 auto-correct variant)
+- **What:** When venue position != journal position, automatically place a correcting order.
+- **Tested:** Design analysis.
+- **Verdict:** REJECTED
+- **Reason:** Introduces a new autonomous order path with no operator approval. The correcting order can itself fail, creating a second drift. At HermX's scale, operator visibility + manual action is safer than machine auto-correction. Observe-only + RECONCILE_MISMATCH alert is the correct implementation.
+- **Date:** July 2026
+
 ### Delete the `reconcile_from_order_history` call in `okx_order_history_snapshot`
 - **What:** Remove the literal `reconcile_from_order_history(rows, "okx", "demo")` call flagged by the plan (P2-2).
 - **Tested:** Re-read current code + existing test before executing the planned deletion.
