@@ -53,6 +53,16 @@ ORDER_PNL_IS_NET = {
 # would spuriously satisfy ``prev != 0.0`` and mis-detect the next fill as a close.
 QTY_EPS = 1e-9
 
+# Venue order states that are NOT yet terminal — an in-flight partial or resting
+# order whose accFillSz is not final. Ledgering such a row would freeze a partial
+# fill that the append-only dedupe never updates once the order fully fills, so
+# reconcile skips these (unless reduceOnly marks the row an explicit close). A
+# conservative allowlist of known-non-terminal states: anything else (including a
+# missing state field) fails open — we assume terminal when we don't know.
+_NON_TERMINAL_ORDER_STATES = frozenset(
+    {"live", "partially_filled", "open", "new", "pending_new"}
+)
+
 
 def _compute_net_realized(
     pnl_gross: float | None, fee_cost: float | None, exchange_id: str
@@ -597,6 +607,20 @@ def reconcile_from_order_history(
                 inst_id, prev, side,
             )
         if not is_close:
+            continue
+
+        # Terminal-only ledgering: skip an in-flight partial/resting fill whose state
+        # is not yet terminal, UNLESS reduceOnly says the venue explicitly marked it a
+        # close (an explicit close is processed regardless of state). A missing/None
+        # state fails open (assume terminal). Prevents a partial accFillSz from being
+        # frozen into the append-only ledger before the order fully fills.
+        state = row.get("state")
+        if not reduce_only and state is not None \
+                and str(state).lower() in _NON_TERMINAL_ORDER_STATES:
+            logger.debug(
+                "skipping_nonterminal_row inst_id=%s ord_id=%s state=%s",
+                inst_id, row.get("ordId") or row.get("id"), state,
+            )
             continue
 
         cl_ord_id = row.get("clOrdId") or row.get("clientOrderId")

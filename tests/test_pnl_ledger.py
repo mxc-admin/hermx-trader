@@ -473,6 +473,54 @@ def test_sign_guard_mismatch_logs_and_continues(ledger_dir, caplog):
     assert [r["ord_id"] for r in pnl_ledger.read_closed_trades()] == ["bad1"]
 
 
+# --- terminal-only ledgering (skip in-flight partials) ----------------------
+
+def _term_rows(*, state="__absent__", reduce_only=False):
+    # A position-delta close (buy opens, sell reduces to flat). ``state`` and
+    # ``reduce_only`` on the close row vary per test; state="__absent__" omits it.
+    close = {"instId": "BTC-USDT-SWAP", "ordId": "c", "clOrdId": "mxcClose",
+             "side": "sell", "accFillSz": 1.0, "avgPx": "51000", "pnl": "10.0",
+             "reduceOnly": reduce_only, "uTime": 200}
+    if state != "__absent__":
+        close["state"] = state
+    return [
+        {"instId": "BTC-USDT-SWAP", "ordId": "o", "clOrdId": "mxcOpen",
+         "side": "buy", "accFillSz": 1.0, "avgPx": "50000", "uTime": 100},
+        close,
+    ]
+
+
+def test_nonterminal_row_is_skipped(ledger_dir):
+    written = pnl_ledger.reconcile_from_order_history(
+        _term_rows(state="live", reduce_only=False), "okx", "demo"
+    )
+    assert written == 0
+    assert pnl_ledger.read_closed_trades() == []
+
+
+def test_reduce_only_nonterminal_is_processed(ledger_dir):
+    # reduceOnly says it's an explicit close -> processed regardless of state.
+    written = pnl_ledger.reconcile_from_order_history(
+        _term_rows(state="live", reduce_only=True), "okx", "demo"
+    )
+    assert written == 1
+
+
+def test_absent_state_is_processed(ledger_dir):
+    # No state field -> fail open (assume terminal) -> processed.
+    written = pnl_ledger.reconcile_from_order_history(
+        _term_rows(reduce_only=False), "okx", "demo"
+    )
+    assert written == 1
+
+
+def test_terminal_state_is_processed(ledger_dir):
+    written = pnl_ledger.reconcile_from_order_history(
+        _term_rows(state="filled", reduce_only=False), "okx", "demo"
+    )
+    assert written == 1
+
+
 # --- P0-1 max_recorded_closed_at (age-out high-water helper) -----------------
 
 def test_max_recorded_closed_at_returns_max(ledger_dir):
