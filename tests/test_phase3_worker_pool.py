@@ -4,6 +4,12 @@ import queue
 import threading
 import time
 
+import pytest
+
+# Slow by design: these exercise the real worker threads with real (small)
+# time.sleep() intervals to assert ordering/parallelism under a real clock.
+pytestmark = pytest.mark.slow
+
 
 def _start_workers(wr, count: int = 2) -> None:
     for i in range(count):

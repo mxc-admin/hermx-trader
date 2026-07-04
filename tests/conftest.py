@@ -258,7 +258,11 @@ from http.server import HTTPServer, ThreadingHTTPServer  # noqa: E402
 
 def _serve(handler_cls):
     server = HTTPServer(("127.0.0.1", 0), handler_cls)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    # poll_interval=0.05: server.shutdown() waits for the poll loop to notice,
+    # so the stdlib default 0.5s adds up to 0.5s of teardown tax per test.
+    thread = threading.Thread(
+        target=lambda: server.serve_forever(poll_interval=0.05), daemon=True
+    )
     thread.start()
     return server, thread
 
@@ -273,7 +277,9 @@ def _stop(server, thread):
 def serve_dashboard(dash_mod):
     """Run the dashboard Handler on an ephemeral loopback port for one test."""
     server = ThreadingHTTPServer(("127.0.0.1", 0), dash_mod.Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(
+        target=lambda: server.serve_forever(poll_interval=0.05), daemon=True
+    )
     thread.start()
     try:
         yield server.server_address[1]

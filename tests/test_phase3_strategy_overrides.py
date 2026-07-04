@@ -314,7 +314,7 @@ def _write_strategy(strategies_dir: Path, strategy_id: str, **overrides) -> None
 
 
 @pytest.fixture
-def dash(tmp_path):
+def dash(tmp_path, monkeypatch):
     """dashboard + dashboard_core reloaded against a fresh temp HERMX_ROOT, with
     one active demo strategy on disk and the executor stubbed offline."""
     root = tmp_path / "shadow-root"
@@ -344,6 +344,26 @@ def dash(tmp_path):
         "ok": True, "positions": {}, "account": {}, "error": None,
         "generated_at": "2026-06-25T00:00:00Z",
     }
+    monkeypatch.setattr(dash_mod, "okx_order_history_snapshot", lambda config: {"ok": False})
+    # Per-(venue,mode) strategy snapshots (dashboard/model.py:404,407) build a real
+    # executor and hit the venue over HTTP whenever a strategy file exists on disk.
+    # Stub them offline like okx_order_history_snapshot above.
+    monkeypatch.setattr(
+        dash_mod,
+        "strategy_live_snapshot",
+        lambda strategy_config, mode: {
+            "ok": True, "positions": {}, "account": {}, "error": None,
+            "generated_at": "2026-06-25T00:00:00Z",
+            "venue": dash_mod._strategy_venue(strategy_config),
+            "mode": "live" if str(mode or "").lower() == "live" else "demo",
+            "simulated_trading": str(mode or "").lower() != "live",
+        },
+    )
+    monkeypatch.setattr(
+        dash_mod,
+        "strategy_order_history_snapshot",
+        lambda strategy_config, mode: {"ok": False, "rows": []},
+    )
     dash_mod._MODEL_CACHE["expires_at"] = 0.0
     dash_mod._MODEL_CACHE["model"] = None
 

@@ -24,6 +24,10 @@ from pathlib import Path
 
 import pytest
 
+# Slow by design: every case spawns a fresh Python subprocess so the module's
+# import-time env resolution is exercised for real (no reload side effects).
+pytestmark = pytest.mark.slow
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
 
