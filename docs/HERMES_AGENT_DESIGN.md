@@ -1,14 +1,15 @@
 # HermX + Hermes Agent — Trading Assistant System Design
 
 **Status:** Living engineering specification
-**Last updated:** 2026-06-28
+**Last updated:** 2026-07-04
 **Owner:** HermX
 **Scope:** End-to-end design for the HermX execution core and the Hermes Agent orchestration layer, including planned intelligence (Kronos, MXC risk, TradingView CDP) and the user communication layer (Telegram/WhatsApp).
 
-> **Reading note.** Sections 1–6 and 10–11 describe the system as designed; where a
+> **Reading note.** Sections 1 and 3–7, plus 11–12, describe the system as designed
+> (§2 argues why this design beats the alternatives); where a
 > component is **already built and tested**, it is marked **[BUILT]**. Where it is
-> **planned**, it is marked **[PLANNED]**. The intelligence roadmap (§7) and
-> implementation plan (§12) make the build/plan boundary explicit. The single most
+> **planned**, it is marked **[PLANNED]**. The intelligence roadmap (§8) and
+> implementation plan (§13) make the build/plan boundary explicit. The single most
 > important invariant in this document: **money-safety lives in Python gate code, never
 > in agent/skill prose.** Every "the agent decides" statement is bounded by that.
 
@@ -17,17 +18,18 @@
 ## Table of Contents
 
 1. [Vision & Goals](#1-vision--goals)
-2. [System Architecture](#2-system-architecture)
-3. [Signal Processing Pipeline](#3-signal-processing-pipeline)
-4. [Hermes Agent Orchestration Design](#4-hermes-agent-orchestration-design)
-5. [Skills Specification](#5-skills-specification)
-6. [User Communication Layer](#6-user-communication-layer)
-7. [Intelligence Evolution Roadmap](#7-intelligence-evolution-roadmap)
-8. [Deployment Architecture](#8-deployment-architecture)
-9. [Reliability Design](#9-reliability-design)
-10. [Security Model](#10-security-model)
-11. [Data & State Model](#11-data--state-model)
-12. [Implementation Plan](#12-implementation-plan)
+2. [Why This Design Is Superior](#2-why-this-design-is-superior)
+3. [System Architecture](#3-system-architecture)
+4. [Signal Processing Pipeline](#4-signal-processing-pipeline)
+5. [Hermes Agent Orchestration Design](#5-hermes-agent-orchestration-design)
+6. [Skills Specification](#6-skills-specification)
+7. [User Communication Layer](#7-user-communication-layer)
+8. [Intelligence Evolution Roadmap](#8-intelligence-evolution-roadmap)
+9. [Deployment Architecture](#9-deployment-architecture)
+10. [Reliability Design](#10-reliability-design)
+11. [Security Model](#11-security-model)
+12. [Data & State Model](#12-data--state-model)
+13. [Implementation Plan](#13-implementation-plan)
 
 ---
 
@@ -63,7 +65,41 @@ blessing.
 | **Copy-and-deploy** | Anyone can clone the repo, fill a `.env`, run one install script, and have their own VPS instance with a unique stable ingress URL (their own Tailscale tailnet). No shared infrastructure, no central service. |
 | **Fail safe, fail open** | Safety gates fail *closed* (block the order). Intelligence layers fail *open* (proceed deterministically) so a slow/broken LLM or a down Kronos API can never wedge the desk. |
 
-### 1.3 Non-goals
+### 1.3 What the agent does today, and how it grows
+
+**Today, the agent is an assistant that carries your commands [BUILT].** It reads the
+system the way an operator would — open positions, PnL, arm status, the last alert —
+and answers in plain language. It carries out explicit operator commands, both as
+slash commands (`/hx-status`, `/hx-positions`, `/hx-close`, `/hx-emergency-stop`, … —
+§6.g) and as natural-language requests, and every one of those actions travels over
+the same loopback HTTP API a human with `curl` would use. The agent never touches
+money logic directly: it holds no exchange credentials, computes no sizes, and its
+only order-creating write is `POST /webhook` — a request the deterministic gate chain
+(§4.4) evaluates exactly as if TradingView had sent it.
+
+**Near-term, it becomes a monitor with a veto [BUILT seam, default OFF].** The
+pre-execution advisor seam (§4.1 step 5) is already wired into the receiver: flip one
+env flag and every signal is shown to the agent *before* it reaches the gate chain,
+where the agent may answer `proceed` or `skip`. The seam fails open — a slow, broken,
+or absent LLM changes nothing — and it graduates to a live binary veto (Phase 2) only
+after a burn-in period in which its logged verdicts have earned the operator's trust.
+
+**Longer-term, it learns from its own trades and monitors risk beyond the desk
+[PLANNED].** Every advisor verdict lands in `advisor-decisions.jsonl` and every
+execution outcome in `executions.jsonl`, so simply running the system accumulates a
+real `(signal, context, outcome)` dataset as a byproduct. On that corpus the agent's
+judgment evolves from rule-based conviction scoring (Phase 3) to a calibrated,
+learned prior (Phase 4) — the agent literally learning from its own trade history —
+while it continuously consults external risk context: market regime and risk state
+from the MXC dashboard, and chart confirmation over TradingView CDP. Section 8 (the
+Intelligence Evolution Roadmap) is the authoritative spec for this arc; this
+subsection is its narrative summary.
+
+Across that whole evolution one thing never changes: **money-safety lives in Python
+gate code, never in agent/skill prose.** The agent grows more capable in front of the
+deterministic floor — never by lowering it.
+
+### 1.4 Non-goals
 
 - The agent is **not** a high-frequency system. Signals arrive **1–2 per day** on
   **2h–4h** strategy timeframes (canonical set: `30m, 1h, 2h, 3h, 4h`). There is no
@@ -71,13 +107,77 @@ blessing.
 - The agent does **not** compute position size. Ever. Sizing is `capital.budget_usd * leverage`
   from the strategy file, computed in the receiver.
 - The agent does **not** hold exchange credentials, shell, or filesystem access for
-  order purposes. Its only act path is `POST /webhook` on loopback.
+  order purposes. Its only order path is `POST /webhook` on loopback; its only other
+  writes are the sizeless, fail-closed close and mode-override endpoints (§6.g).
 
 ---
 
-## 2. System Architecture
+## 2. Why This Design Is Superior
 
-### 2.1 Three layers
+An operator who wants automated execution of TradingView strategies has, realistically,
+four options: hand exchange keys to an autonomous AI trading bot, run a pure rule-based
+executor with no AI at all, subscribe to a black-box signal service, or run HermX +
+Hermes. This section states why the fourth wins — not in the abstract, but on the
+failure modes that actually cost money. It is a justification, not a spec; the
+load-bearing mechanisms it cites are specified in §4.4 (gate chain), §8 (roadmap), and
+§11 (security model).
+
+### 2.1 At a glance
+
+| | Autonomous LLM bot (holds keys) | Pure rule-based executor | Black-box signal service | **HermX + Hermes** |
+|---|---|---|---|---|
+| Worst case when the AI is wrong | moves real money on a hallucination | n/a — but no judgment either | unknowable | relays one *valid-schema* signal that the gate chain still independently evaluates |
+| Natural-language operations | yes | no | no | yes **[BUILT]** |
+| Adaptive judgment | yes, uncontrolled | none | opaque | phased, each phase reversible via one env flag |
+| Auditability | prompt logs, at best | code, usually | none | every gate decision, advisor verdict, and order journaled in JSONL + readable Python |
+| Safety floor independent of the AI | no | yes (it *is* the floor) | no | yes — gate chain + kill switch are architecturally AI-free |
+
+### 2.2 The comparisons, concretely
+
+**vs. an autonomous LLM/agent bot holding exchange keys.** In that model, a single
+hallucination or prompt injection *is* an order — there is no independent check between
+the model's output and the exchange. Here, the agent has zero exchange credentials and
+zero ability to size a position. As §11 states, the worst a fully-compromised or
+hallucinating agent can do is relay a valid-schema signal that the deterministic gate
+chain still independently evaluates — and it cannot relay anything past an engaged kill
+switch. The blast radius of an AI failure is capped by architecture, not by prompt
+engineering.
+
+**vs. a pure rule-based / no-AI executor.** A rules-only executor is safe but blind and
+mute: no natural-language operations, no adaptive judgment, and the operator babysits
+dashboards and log files directly. HermX keeps exactly that deterministic core as its
+floor (§4.4) and adds a conversational, increasingly discretionary layer on top —
+status, PnL, tracing, and guarded mutations in plain language today (§6.g), advisory
+judgment tomorrow (§8) — without weakening the core, because the layer sits *in front
+of* the gates, never inside them.
+
+**vs. black-box signal services and opaque bots.** With those, you cannot see why a
+trade happened, and you cannot audit what will happen next. Here nothing is a black
+box: every gate decision, advisor verdict, and order is permanently journaled in
+auditable JSONL (§10, §12), the entire money path is Python you can read, and even the
+AI's reasoning trail is on disk in `advisor-decisions.jsonl`. "Trust me" is replaced by
+"read the ledger."
+
+**The key differentiator: progressive, reversible autonomy.** Most "AI trading bot"
+products are all-or-nothing — you hand over the keys on day one. Here, every increase
+in the agent's authority (§8: advisory → veto → conviction-scored → discretionary →
+proactive) is opt-in, has an explicit entry gate, and is instantly reversible via a
+single env flag. Trust in the AI layer is earned incrementally against a logged track
+record, and is never bet all at once.
+
+**Fail-open intelligence, fail-closed safety.** The doc's core philosophy is also its
+core advantage: safety gates fail *closed* (block the order), intelligence layers fail
+*open* (proceed deterministically). Because the floor — gate chain and kill switch —
+is architecturally independent of the AI layer, adding smarter AI over time can only
+make the system more conservative (an extra veto) or more capable (better answers,
+better context). It can never make the system less safe, because the AI has no lever
+that lowers the floor.
+
+---
+
+## 3. System Architecture
+
+### 3.1 Three layers
 
 | Layer | Responsibility | Components |
 |-------|----------------|------------|
@@ -92,7 +192,7 @@ There is no privileged backchannel, no MCP server, no direct function calls into
 gate chain. This is what makes the agent *removable* and the safety *independent of
 the agent*.
 
-### 2.2 Component & data-flow diagram
+### 3.2 Component & data-flow diagram
 
 ```
                                    ┌──────────────────────────────────────────────┐
@@ -120,7 +220,8 @@ the agent*.
                                    │  │                              │   │           │
                                    │  │  skills (loopback HTTP only):│   │           │
                                    │  │   hermx-control      [BUILT] │   │           │
-                                   │  │   signal-memory    [PLANNED] │   │           │
+                                   │  │   /hx-* cmd family   [BUILT] │   │           │
+                                   │  │   signal-memory      [BUILT] │   │           │
                                    │  │   kronos-validate   [PLAN]   │───┼──┐        │
                                    │  │   dashboard-risk    [PLAN]   │───┼──┼──┐     │
                                    │  │   tradingview-chart [PLAN]   │───┼──┼──┼─┐   │
@@ -163,7 +264,7 @@ the agent*.
                            └──────────────────────────┘
 ```
 
-### 2.3 External integrations
+### 3.3 External integrations
 
 | Integration | Direction | Transport | Status |
 |-------------|-----------|-----------|--------|
@@ -177,9 +278,9 @@ the agent*.
 
 ---
 
-## 3. Signal Processing Pipeline
+## 4. Signal Processing Pipeline
 
-### 3.1 Full flow: Pine Script alert → exchange order
+### 4.1 Full flow: Pine Script alert → exchange order
 
 ```
 [1] TradingView Pine strategy fires an alert (2h/4h close)
@@ -213,14 +314,14 @@ the agent*.
         - FAILS OPEN: timeout / malformed / missing binary → proceed
         - when enabled, a `skip` blocks the trade (reason: vetoed_by_advisor)
         ▼
-[6] ExecutionService.execute(readiness)  ← deterministic gate chain (see §3.4)
+[6] ExecutionService.execute(readiness)  ← deterministic gate chain (see §4.4)
         ▼
 [7] CcxtExecutor.execute(readiness)  → OKX perpetual swap order (clOrdId set)
         ▼
 [8] Order journal records terminal state; dashboard :8098 reflects it; ledgers append.
 ```
 
-### 3.2 Where Hermes intercepts
+### 4.2 Where Hermes intercepts
 
 Hermes participates at **two** points, both already wired or trivially extendable:
 
@@ -235,16 +336,16 @@ Hermes participates at **two** points, both already wired or trivially extendabl
    `/webhook`. This path does not touch step 5; it produces a *new* inbound signal
    that re-enters at step 3.
 
-### 3.3 How each intelligence source contributes
+### 4.3 How each intelligence source contributes
 
 | Source | What it answers | How it's consulted | Failure posture |
 |--------|-----------------|--------------------|-----------------|
 | **Kronos** [PLANNED] | "Does a learned candle-prediction model agree with the signal's direction, and how strongly?" | `kronos-validate` skill POSTs OHLCV + signal; returns `direction_prob` + `conviction`. | Timeout/down → treated as `UNKNOWN`, contributes nothing, never blocks. |
 | **MXC Dashboard** [PLANNED] | "What's the current regime/risk context (pp_acc, pp_vel, risk-on/off)?" | `dashboard-risk` skill GETs the MXC page, parses metrics into a structured risk assessment. | Unreachable → `risk: UNKNOWN`; the deterministic health gate already routes signal-only strategies (`duo_raw`) without MXC. |
 | **TradingView CDP** [PLANNED] | "Does the actual chart confirm the setup (indicator values, clean structure, not mid-candle)?" | `tradingview-chart` skill drives the operator's desktop Chrome via CDP MCP tools: screenshot + read indicators. | Desktop offline → `chart: UNKNOWN`, contributes nothing. |
-| **signal-memory** [PLANNED] | "What did we just do — recent decisions, open positions, daily PnL — so we don't double up or fight ourselves?" | `signal-memory` skill returns a rolling log of last N signals + outcomes. | Empty/stale → agent proceeds with reduced context, flags it. |
+| **signal-memory** [BUILT] | "What did we just do — recent decisions, open positions, daily PnL — so we don't double up or fight ourselves?" | `signal-memory` skill reads the dashboard's `GET /api/signals` endpoint for a rolling log of last N signals + outcomes. | Empty/stale → agent proceeds with reduced context, flags it. |
 
-### 3.4 Deterministic gate chain (the floor under everything)
+### 4.4 Deterministic gate chain (the floor under everything)
 
 `ExecutionService.execute()` (`src/execution/service.py`) runs **regardless of what the
 agent decided**. Order is fixed; all must pass to submit.
@@ -262,12 +363,12 @@ agent decided**. Order is fixed; all must pass to submit.
 queue lag below `HERMX_QUEUE_LAG_SLO_SECONDS` (30). `auth_healthy` = webhook auth
 configured and secret present.
 
-### 3.5 Decision matrix — combined-input → outcome
+### 4.5 Decision matrix — combined-input → outcome
 
 This is the **target** decision logic for **Phase 3** (conviction scoring). In Phase 1
 the agent has no vote; in Phase 2 it has binary veto. The matrix below shows how the
 agent will combine inputs into an advisor verdict (`proceed | skip` + score) — which is
-*then* still subject to the deterministic gate chain (§3.4). The agent can only make a
+*then* still subject to the deterministic gate chain (§4.4). The agent can only make a
 "go" into a "no-go"; it can never turn a gate-blocked order into a submitted one.
 
 Legend: ✓ = confirms signal, ✗ = contradicts, **?** = UNKNOWN/unavailable.
@@ -289,9 +390,9 @@ Legend: ✓ = confirms signal, ✗ = contradicts, **?** = UNKNOWN/unavailable.
 
 ---
 
-## 4. Hermes Agent Orchestration Design
+## 5. Hermes Agent Orchestration Design
 
-### 4.1 Agent lifecycle
+### 5.1 Agent lifecycle
 
 - **Always-on.** The Hermes Agent runs as a long-lived process on the VPS (`hermes`
   binary), supervised by systemd alongside the receiver and dashboard, `Restart=always`.
@@ -299,7 +400,7 @@ Legend: ✓ = confirms signal, ✗ = contradicts, **?** = UNKNOWN/unavailable.
   restart it reloads its skills and reconstructs context by *reading* the system
   (`/api`, `/health`, `/latest`) and the `signal-memory` ledger. A crash loses nothing
   that matters — the money record lives in HermX ledgers, not the agent.
-- **Skill-loaded.** At start it loads the skill catalog (§4.2). Skills are markdown
+- **Skill-loaded.** At start it loads the skill catalog (§5.2). Skills are markdown
   contracts + the loopback HTTP endpoints they may call. Reloading a skill is just
   re-reading a file.
 - **Two invocation modes:**
@@ -308,12 +409,12 @@ Legend: ✓ = confirms signal, ✗ = contradicts, **?** = UNKNOWN/unavailable.
   - *Conversational daemon* — the messenger gateway feeds operator messages to a
     persistent agent session that answers and (on instruction) relays signals. [PLANNED]
 
-### 4.2 Skill catalog
+### 5.2 Skill catalog
 
 | Skill | Status | Purpose | Endpoints / tools |
 |-------|--------|---------|-------------------|
 | `hermx-control` | **[BUILT]** | Read state + relay signals over loopback. | `GET :8098/api`, `GET :8098/health`, `GET :8891/health`, `GET :8891/latest`, `POST :8891/webhook` |
-| `signal-memory` | [PLANNED] | Rolling log of last N signals + outcomes for context. | reads `logs/executions.jsonl`, `logs/advisor-decisions.jsonl` (via a small read endpoint, not raw FS) |
+| `signal-memory` | **[BUILT]** | Rolling log of last N signals + outcomes for context. | `GET :8098/api/signals?n=N[&symbol=…]` (dashboard read endpoint, not raw FS) |
 | `kronos-validate` | [PLANNED] | Validate candle-prediction direction/conviction. | `POST <KRONOS_API_URL>/predict` |
 | `dashboard-risk` | [PLANNED] | Structured risk read from MXC dashboard. | `GET mxc-kinetic-crypto.replit.app` |
 | `tradingview-chart` | [PLANNED] | Screenshot + indicator read + chart validation. | TradingView CDP MCP tools |
@@ -322,7 +423,39 @@ Legend: ✓ = confirms signal, ✗ = contradicts, **?** = UNKNOWN/unavailable.
 > native gateway (`hermes gateway` config with `TELEGRAM_BOT_TOKEN` and
 > `TELEGRAM_ALLOWED_USERS`). No separate skill is required.
 
-### 4.3 Skill interface contract
+#### 5.2.1 The `/hx-*` slash-command skill family **[BUILT]**
+
+Alongside `hermx-control` (the original single-skill model), HermX ships a family of
+focused operator skills — each `skills/hermx-*/SKILL.md` becomes a dynamic slash
+command in Hermes. They share one helper library
+(`skills/hermx-ops/lib/hermx_ops.py`, stdlib-only) and one canonical endpoint contract
+(`skills/hermx-ops/references/api-contract.md`), and they inherit the exact posture of
+`hermx-control`: **loopback HTTP only**, no exchange credentials, no sizing, and
+**UNKNOWN-never-flat** — a failed or stale read is reported as UNKNOWN, never as
+"no positions."
+
+| Command | Kind | Purpose |
+|---------|------|---------|
+| `/hx-status` | read-only | armed?, mode, dashboard/receiver reachability, last alert |
+| `/hx-positions` | read-only | open positions (UNKNOWN, never "flat", on a failed read) |
+| `/hx-strategy-list` | read-only | strategies with `file_mode` vs `effective_mode` |
+| `/hx-trace` | read-only | follow one signal intake → dedupe → pipeline → execution |
+| `/hx-tv-alerts` | read-only | copy-paste TradingView alert templates for a strategy |
+| `/hx-help` | read-only | list or explain the commands (pure text, no HTTP) |
+| `/hx-strategy-mode` | mutating | per-strategy pause/resume/demo/live override via `POST /api/control/strategy/{id}` (dry-run first; `live` needs explicit "yes") |
+| `/hx-close` | mutating | flatten ONE position, reduce-only and sizeless, via `POST /api/close` |
+| `/hx-emergency-stop` | mutating | kill switch / flatten all / force demo / pause a symbol |
+| `/hx-troubleshoot` | mutating | classify stuck/UNKNOWN orders; one-confirm fix for the single provably-safe pattern only |
+| `/hx-restart` | mutating (lifecycle) | health-check and restart the down service(s) |
+| `/hx-upgrade` | mutating (lifecycle) | run `deploy/deploy.sh` with auto-rollback |
+| `/hx-exchange` | mutating (credentials) | add/validate/remove exchange API keys via `scripts/exchange.sh` over SSH — the skill never sees a secret |
+
+The mutating commands add exactly two money-adjacent write endpoints beyond
+`POST /webhook`: the receiver's reduce-only `POST /api/close` and the dashboard's
+`POST /api/control/strategy/{id}` — both token-authenticated, fail-closed, and
+incapable of expressing an order size. Family-level contract detail: §6.g.
+
+### 5.3 Skill interface contract
 
 Every skill MUST satisfy this contract so the agent can sequence them safely:
 
@@ -346,9 +479,11 @@ Two contract rules are load-bearing:
    read as flat."*)
 2. **A skill cannot widen its own authority.** The endpoints list is exhaustive. No
    skill may call an exchange, a shell, or the filesystem for order purposes. The only
-   write the agent can cause is `POST /webhook`.
+   order-creating write the agent can cause is `POST /webhook`; the only other writes
+   any skill may cause are the audited, sizeless `POST /api/close` (reduce-only) and
+   `POST /api/control/strategy/{id}` (mode override) used by the `/hx-*` family (§6.g).
 
-### 4.4 Multi-skill validation sequence
+### 5.4 Multi-skill validation sequence
 
 For a signal the agent is asked to evaluate (Phase 2+), the sequence is:
 
@@ -359,14 +494,14 @@ For a signal the agent is asked to evaluate (Phase 2+), the sequence is:
 3. dashboard-risk.assess(symbol) → regime, risk_on/off
 4. tradingview-chart.validate(symbol, timeframe)
                                   → clean? indicators confirm? mid-candle?
-5. aggregate → decision matrix (§3.5) → {proceed | skip | escalate} (+ score in P3)
+5. aggregate → decision matrix (§4.5) → {proceed | skip | escalate} (+ score in P3)
 ```
 
 The agent runs 1–4 **in parallel where possible** (they are independent reads) and
 aggregates. It must **degrade gracefully**: any `status: unknown` contributes nothing
 and is named explicitly in the verdict's `risk_note`.
 
-### 4.5 Timeout handling
+### 5.5 Timeout handling
 
 | Situation | Behavior |
 |-----------|----------|
@@ -378,7 +513,7 @@ and is named explicitly in the verdict's `risk_note`.
 The governing principle: **no intelligence dependency can wedge the desk.** Every
 optional layer fails open; only the deterministic gates fail closed.
 
-### 4.6 Agent memory
+### 5.6 Agent memory
 
 The agent's working memory across signals is reconstructed, not retained:
 
@@ -395,13 +530,13 @@ can never drift from the money record.
 
 ---
 
-## 5. Skills Specification
+## 6. Skills Specification
 
-Each skill below follows the §4.3 contract. `[BUILT]` is shipped; `[PLANNED]` is spec.
+Each skill below follows the §5.3 contract. `[BUILT]` is shipped; `[PLANNED]` is spec.
 
 ---
 
-### 5.a `hermx-control` **[BUILT]**
+### 6.a `hermx-control` **[BUILT]**
 
 **Purpose.** Read HermX state and relay sanctioned signals, talking only to the local
 HermX HTTP API on loopback. Never touches an exchange; never invents a size.
@@ -450,7 +585,7 @@ say so rather than improvise a close via `/webhook`.
 
 ---
 
-### 5.b `kronos-validate` **[PLANNED]**
+### 6.b `kronos-validate` **[PLANNED]**
 
 **Purpose.** Ask a learned candle-prediction model (Kronos LLM) whether it agrees with
 the signal's direction and how strongly.
@@ -495,7 +630,7 @@ nothing to the decision matrix; logged. Never blocks.
 
 ---
 
-### 5.c `dashboard-risk` **[PLANNED]**
+### 6.c `dashboard-risk` **[PLANNED]**
 
 **Purpose.** Read the MXC Kinetic Crypto dashboard and return a structured risk
 assessment (regime, acceleration/velocity, risk-on/off) for context.
@@ -531,7 +666,7 @@ without MXC, so an MXC outage degrades context but not execution.
 
 ---
 
-### 5.d `tradingview-chart` **[PLANNED]**
+### 6.d `tradingview-chart` **[PLANNED]**
 
 **Purpose.** Validate the actual chart setup on the operator's desktop TradingView via
 Chrome DevTools Protocol: screenshot, read indicator values, confirm the structure and
@@ -566,7 +701,7 @@ tool calls, not raw CDP.
 
 ---
 
-### 5.e Operator comms — Hermes native gateway (not a skill)
+### 6.e Operator comms — Hermes native gateway (not a skill)
 
 Telegram operator interaction is handled via Hermes' native gateway (`hermes gateway`
 config with `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_USERS`). No separate skill is
@@ -579,7 +714,7 @@ operator comms degrade but **execution is unaffected**.
 
 ---
 
-### 5.f `signal-memory` **[PLANNED]**
+### 6.f `signal-memory` **[PLANNED]**
 
 **Purpose.** Maintain and serve a rolling log of the last N signals and their outcomes
 so the agent has continuity across signals (avoid doubling up, notice contradictions).
@@ -614,9 +749,9 @@ the agent flags reduced context.
 
 ---
 
-## 6. User Communication Layer
+## 7. User Communication Layer
 
-### 6.1 Telegram bot design
+### 7.1 Telegram bot design
 
 **Commands (structured):**
 
@@ -627,7 +762,7 @@ the agent flags reduced context.
 | `/hx-positions` | per-symbol detail | `GET /api` |
 | `/last` | last processed alert | `GET /latest` |
 | `/killswitch` | report kill-switch state (read-only) | `GET /health` |
-| `/cancel <id>` | request cancel of a pending order (confirmation flow) | see §6.4 |
+| `/cancel <id>` | request cancel of a pending order (confirmation flow) | see §7.4 |
 | `/hx-help` | command list | — |
 
 **Natural-language queries.** The agent also answers free text ("are we good?", "did
@@ -635,14 +770,14 @@ the SOL alert go through?", "how much are we down today?") by mapping intent to 
 same reads. Ambiguous money-relevant questions get precise, non-reassuring answers
 (stale data ⇒ "I can't confirm right now," never "nothing open").
 
-### 6.2 WhatsApp integration
+### 7.2 WhatsApp integration
 
 Same intent set over the WhatsApp Business Cloud API. WhatsApp's template-message rules
 mean **proactive** notifications (e.g., "signal vetoed") use pre-approved templates;
 **reactive** replies (operator asked first) are free-form within the session window.
 Telegram has no such restriction and is the primary channel; WhatsApp is the fallback.
 
-### 6.3 What the agent CAN answer vs. CANNOT do
+### 7.3 What the agent CAN answer vs. CANNOT do
 
 | The agent CAN (read-only) | The agent CANNOT without confirmation |
 |---------------------------|---------------------------------------|
@@ -652,7 +787,7 @@ Telegram has no such restriction and is the primary channel; WhatsApp is the fal
 | kill-switch / arm state | anything that changes money state |
 | explain a strategy file's constraints | override a gate / pause / kill switch (impossible by design) |
 
-### 6.4 Confirmation flow for agent-initiated actions
+### 7.4 Confirmation flow for agent-initiated actions
 
 Any action that *changes money state* (relay a human-instructed signal; cancel) uses an
 explicit confirm step:
@@ -673,7 +808,7 @@ Rules:
 - The confirmation message restates the *exact* payload so the operator approves what
   will actually be sent.
 
-### 6.5 Rate limiting / abuse prevention
+### 7.5 Rate limiting / abuse prevention
 
 - **Sender allowlist** (`TELEGRAM_ALLOWED_USERS` / `WHATSAPP_ALLOWED_USERS`): non-listed
   senders are dropped at the gateway, before the agent.
@@ -686,14 +821,14 @@ Rules:
 
 ---
 
-## 7. Intelligence Evolution Roadmap
+## 8. Intelligence Evolution Roadmap
 
 Each phase is **individually reversible** via env flags. "Rollback" below is the exact
 lever that returns to the prior phase's behavior with no code change.
 
 ### Phase 1 — Deterministic execution; agent = advisory annotator **[CURRENT]**
 
-- **Built:** Full deterministic pipeline (§3.4). Advisor seam exists, `HERMX_ADVISOR_ENABLED`
+- **Built:** Full deterministic pipeline (§4.4). Advisor seam exists, `HERMX_ADVISOR_ENABLED`
   default OFF. `hermx-control` skill ships. Agent can read and relay, cannot decide.
 - **Entry gate:** none — this is the baseline.
 - **Rollback:** N/A (this is the floor).
@@ -712,7 +847,7 @@ lever that returns to the prior phase's behavior with no code change.
 
 - **Built:** `kronos-validate`, `dashboard-risk`, `tradingview-chart`, `signal-memory`
   shipped. The agent aggregates inputs into a **0–100 conviction score** (decision
-  matrix §3.5). A configurable threshold (`HERMX_ADVISOR_MIN_SCORE`) gates execution:
+  matrix §4.5). A configurable threshold (`HERMX_ADVISOR_MIN_SCORE`) gates execution:
   below threshold ⇒ skip/escalate.
 - **Entry gate:** the four intelligence skills each have measured availability and a
   logged track record; the threshold is tuned against historical `advisor-decisions.jsonl`.
@@ -733,21 +868,21 @@ lever that returns to the prior phase's behavior with no code change.
 
 - **Built:** The agent runs scheduled market scans (via the same intelligence skills)
   and *proposes* trade ideas not triggered by a TradingView alert. Every proposal still
-  enters via `POST /webhook` and **requires operator confirmation** (§6.4) — the agent
+  enters via `POST /webhook` and **requires operator confirmation** (§7.4) — the agent
   never self-initiates an order.
 - **Entry gate:** Phases 2–4 stable; a long record of the agent's *proposals* (logged,
   not executed) that the operator would have approved; explicit opt-in flag
   (`HERMX_PROACTIVE_ENABLED`).
 - **Rollback:** `HERMX_PROACTIVE_ENABLED=false` — the agent goes back to purely reactive.
 
-> Across all phases, the §3.4 gate chain and the kill switch are untouched. Autonomy is
+> Across all phases, the §4.4 gate chain and the kill switch are untouched. Autonomy is
 > added *in front of* the floor, never by lowering it.
 
 ---
 
-## 8. Deployment Architecture
+## 9. Deployment Architecture
 
-### 8.1 VPS baseline
+### 9.1 VPS baseline
 
 - **OS:** Ubuntu 22.04 LTS.
 - **Layout:** code at `/opt/hermx`, venv at `/opt/hermx/.venv`, `.env` at
@@ -762,7 +897,7 @@ lever that returns to the prior phase's behavior with no code change.
   → `https://hermx.<tailnet>.ts.net/webhook`. No inbound firewall rule; everything else
   stays loopback.
 
-### 8.2 Docker Compose spec [PLANNED — parallel to the systemd path]
+### 9.2 Docker Compose spec [PLANNED — parallel to the systemd path]
 
 A single `docker-compose.yml` mirroring the systemd services for users who prefer
 containers:
@@ -798,9 +933,9 @@ services:
 ```
 
 > `network_mode: host` is deliberate: it keeps `:8891`/`:8098` on `127.0.0.1` so only
-> Tailscale Funnel reaches the outside, preserving the loopback-only posture (§10).
+> Tailscale Funnel reaches the outside, preserving the loopback-only posture (§11).
 
-### 8.3 Environment configuration
+### 9.3 Environment configuration
 
 `.env` (secrets, mode 600) holds everything sensitive; config files (`engine-config.json`,
 `strategies/*.json`) hold non-secret runtime behavior. Real env keys (from `setup/env.example`):
@@ -818,9 +953,9 @@ services:
 | Advisor [BUILT, OFF] | `HERMX_ADVISOR_ENABLED`, `HERMX_ADVISOR_COMMAND`, `HERMX_ADVISOR_SKILLS`, `HERMX_ADVISOR_MODEL`, `HERMX_ADVISOR_TIMEOUT_SECONDS` |
 | Intelligence [PLANNED] | `KRONOS_API_URL`, `MXC_DASHBOARD_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USERS`, `WHATSAPP_*`, `HERMX_ADVISOR_MIN_SCORE`, `HERMX_PROACTIVE_ENABLED` |
 
-### 8.4 Copy-and-deploy (step by step)
+### 9.4 Copy-and-deploy (step by step)
 
-This is the deploy flow (see INSTALL.md §8.4, `deploy/install-services.sh`, and
+This is the deploy flow (see INSTALL.md §9.4, `deploy/install-services.sh`, and
 `docker-compose.yml`), condensed:
 
 1. Provision an Ubuntu 22.04 VPS.
@@ -843,7 +978,7 @@ This is the deploy flow (see INSTALL.md §8.4, `deploy/install-services.sh`, and
 Because each user runs their **own tailnet**, every instance gets a unique, stable
 ingress URL with no shared infrastructure — the system is genuinely fork-and-own.
 
-### 8.5 Backup / restore
+### 9.5 Backup / restore
 
 | Stateful (back up) | Stateless (reproducible) |
 |--------------------|--------------------------|
@@ -859,14 +994,14 @@ ledgers reconstructs authoritative position state.
 
 ---
 
-## 9. Reliability Design
+## 10. Reliability Design
 
 | Concern | Mechanism |
 |---------|-----------|
 | **Process supervision** | systemd `Restart=always`, `RestartSec=5`, restart-storm guard (`StartLimitIntervalSec=60`/`Burst=5`) on receiver, dashboard, and (P2+) agent. |
 | **Ingress persistence** | `tailscale funnel --bg 8891` runs detached and survives reboots (tailscaled is itself a service; receiver unit `After=tailscaled.service`). |
 | **Signal-miss detection** | UptimeRobot (or equivalent) polling `GET /health` over the Funnel URL; alert on non-200 or stale receiver heartbeat. |
-| **Agent crash recovery** | Agent is stateless; on restart it reloads skills and reconstructs context from reads (§4.6). Nothing is lost because the agent owns no money state. |
+| **Agent crash recovery** | Agent is stateless; on restart it reloads skills and reconstructs context from reads (§5.6). Nothing is lost because the agent owns no money state. |
 | **Exchange connectivity** | CCXT calls bounded by `HERMX_SUBMIT_TIMEOUT_SECONDS` (45). A timeout/exception ⇒ order state `UNKNOWN` (not assumed filled, not assumed rejected). The unknown-resolver loop (`resolve_unknown_orders_once`, every `HERMX_UNKNOWN_RESOLVER_INTERVAL_SECONDS`) reconciles `UNKNOWN` → `FILLED`/`REJECTED` against the exchange. |
 | **Crash-torn ledgers** | Appends are fsync'd; `read_jsonl_tolerant()` quarantines a crash-truncated trailing line and fails loud on mid-file corruption — no silent data loss. |
 | **Kill switch** | `HERMX_LIVE_TRADING=false` blocks **all** `execution_mode=live` submission before any gate, in under a second, with no restart needed (read per-execution). `false`/unset is the live-safe default; demo trading is unaffected. |
@@ -876,14 +1011,14 @@ The system never *guesses* a fill; it records `UNKNOWN` and reconciles.
 
 ---
 
-## 10. Security Model
+## 11. Security Model
 
 | Surface | Control |
 |---------|---------|
 | **Network** | All services bind `127.0.0.1` only. The *only* public surface is `:8891/webhook` via Tailscale Funnel. No other inbound ports. |
 | **Webhook auth** | `X-Webhook-Secret` (shared secret) mandatory; optional HMAC (`HERMX_REQUIRE_HMAC`) adds `X-Webhook-Timestamp` + `X-Webhook-Signature` (SHA256) with a replay window (`HERMX_REPLAY_WINDOW_SECONDS`, 300s). Body capped at `HERMX_MAX_BODY_BYTES`. Per-IP rate limit. |
 | **Dashboard auth** | Optional token (`HERMX_DASH_AUTH` + `HERMX_SECRET`) via `X-Dashboard-Token`; typically off on a same-host loopback deploy since it isn't publicly reachable. |
-| **Messaging auth** | Telegram bot token / WhatsApp business credentials, plus a **sender allowlist** so only the operator's accounts are accepted (§6.5). |
+| **Messaging auth** | Telegram bot token / WhatsApp business credentials, plus a **sender allowlist** so only the operator's accounts are accepted (§7.5). |
 | **Agent confinement** | The agent reaches the system **only** via loopback HTTP. It cannot read `.env`, hold exchange credentials, or call CCXT/shell/filesystem for order purposes. Its sole write is `POST /webhook`. |
 | **Safety location** | Money-safety gates are **Python code** in `ExecutionService.execute()`, *not* skill/agent text. The skill prose is guidance only and is explicitly stated to be non-authoritative. An adversarial or buggy LLM cannot widen its authority because the authority isn't in the prose. |
 | **Secrets at rest** | `.env` is mode 600, owner-only; never committed; never exposed to the agent. |
@@ -894,9 +1029,9 @@ evaluates — and it cannot relay anything while the kill switch is engaged.
 
 ---
 
-## 11. Data & State Model
+## 12. Data & State Model
 
-### 11.1 Where data lives
+### 12.1 Where data lives
 
 | Data | File(s) (`logs/` unless noted) | Format | Role |
 |------|-------------------------------|--------|------|
@@ -915,7 +1050,7 @@ evaluates — and it cannot relay anything while the kill switch is engaged.
 | Last alert | `latest.json` | JSON | `/latest` |
 | Runtime config | `engine-config.json` | JSON | non-secret config |
 
-### 11.2 Durability & integrity
+### 12.2 Durability & integrity
 
 - All ledger appends are **fsync'd**; Decimal fields canonicalized before write.
 - `read_jsonl_tolerant()` tolerates a crash-truncated tail (quarantined to
@@ -923,13 +1058,13 @@ evaluates — and it cannot relay anything while the kill switch is engaged.
 - Journals carry `schema_version`; the position-journal checkpoint stores a verified
   snapshot + high-water mark and reconciles on load.
 
-### 11.3 Agent memory scope
+### 12.3 Agent memory scope
 
 The agent retains nothing authoritative. Its context is reconstructed from reads
-(§4.6) and the `signal-memory` view over `executions.jsonl` + `advisor-decisions.jsonl`
+(§5.6) and the `signal-memory` view over `executions.jsonl` + `advisor-decisions.jsonl`
 (last N). This guarantees the agent is correct immediately after a restart.
 
-### 11.4 Signal history for ML (future)
+### 12.4 Signal history for ML (future)
 
 `advisor-decisions.jsonl` + `executions.jsonl` together form the training corpus for
 Phase 4: each record links `(signal, intelligence inputs, advisor verdict, outcome)`.
@@ -938,7 +1073,7 @@ a byproduct. When the corpus is large enough, the ML layer trains offline on the
 
 ---
 
-## 12. Implementation Plan
+## 13. Implementation Plan
 
 Ordered by **what unlocks the most value next**, with the build/plan boundary explicit.
 
@@ -950,7 +1085,7 @@ Ordered by **what unlocks the most value next**, with the build/plan boundary ex
 - CCXT executor (OKX/KuCoin/Bybit/Hyperliquid; OKX perpetual swap specifics).
 - Unknown-order resolver loop; reconciliation with backoff.
 - Dashboard (`/api`, `/health`, `/`).
-- `hermx-control` skill; deploy flow in INSTALL.md §8.4 (`deploy/install-services.sh`,
+- `hermx-control` skill; deploy flow in INSTALL.md §9.4 (`deploy/install-services.sh`,
   `docker-compose.yml`); systemd units in `deploy/`.
 - Pre-execution **advisor seam** (`run_execution_advisor`, `execute_okx_with_advisor`),
   default OFF, fail-open, with `tests/test_phase8_advisor.py` green.
@@ -961,7 +1096,7 @@ Ordered by **what unlocks the most value next**, with the build/plan boundary ex
 |------|-------------|------------|---------|--------|
 | **1** | `signal-memory` read endpoint + skill | executions/advisor ledgers (exist) | agent continuity; ML corpus surfaced | [PLANNED] |
 | **2** | `hermes gateway` (Telegram first; native, not a skill) | `hermx-control` (exists) | conversational ops — the headline UX win | [PLANNED] |
-| **3** | Confirmation flow (§6.4) | step 2 | safe human-instructed relay over chat | [PLANNED] |
+| **3** | Confirmation flow (§7.4) | step 2 | safe human-instructed relay over chat | [PLANNED] |
 | **4** | Advisor burn-in: log & review verdicts | advisor seam (exists) | verdicts validated before relying on the veto | config-only |
 | **5** | `kronos-validate` skill + `KRONOS_API_URL` | Kronos API stood up | direction/conviction confirmation | [PLANNED] |
 | **6** | `dashboard-risk` skill (MXC parse) | MXC reachable | regime/risk context in verdicts | [PLANNED] |
@@ -984,7 +1119,7 @@ Ordered by **what unlocks the most value next**, with the build/plan boundary ex
 - **Scoring and ML last.** Steps 9–13 require accumulated data and standing infra
   (Kronos, CDP); they ride on the corpus the earlier phases generate for free.
 
-> Throughout, the deterministic gate chain (§3.4) and kill switch are never modified.
+> Throughout, the deterministic gate chain (§4.4) and kill switch are never modified.
 > Every new capability is added in front of the floor and is reversible with an env flag.
 
 ---

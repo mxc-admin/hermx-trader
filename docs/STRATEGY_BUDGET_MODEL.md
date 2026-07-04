@@ -41,7 +41,7 @@ Strategy files live in `strategies/*.json` and validate against
 | `capital.reinvest` | v2, optional (`strategy.schema.json:159-163`) | Compounding switch. | **`true`** — compounding on (`src/strategy/records.py:91-103`). |
 | `capital.max_notional_usd` | v2, optional (`strategy.schema.json:164-168`) | Absolute per-strategy pre-trade notional ceiling (USD), independent of `budget_usd × leverage`. | Unset ⇒ no cap (`src/execution/service.py:43,46-47`). |
 | `leverage` | v1+v2, required (`strategy.schema.json:172`) | Notional multiplier only — never sent to the venue (see §4). | `1.0` if falsy (`src/strategy/readiness.py:138`). |
-| `budget_usd` (flat, top-level) | v1 (`strategy.schema.json:83`) | Legacy flat form; read as fallback when `capital.budget_usd` is absent (`src/strategy/records.py:85-87`). | — |
+| `budget_usd` (flat, top-level) | v1 (`strategy.schema.json:83`) | Legacy flat form; read as fallback when `capital.budget_usd` is absent (`src/strategy/records.py:87-88`). | — |
 
 Read helpers (single source of truth for both execution and dashboard):
 `strategy_budget_usd()` (`src/strategy/records.py:80-88`, nested-then-flat) and
