@@ -156,6 +156,26 @@
 - **Alternatives:** Build a new dedicated rejected-order monitor/gate.
 - **Rationale:** Cheapest high-value fix — reuses the existing gate plumbing; no new gate, script, or job needed.
 
+### Per-strategy environment isolation key is (venue, mode), not strategy_id
+- **Decision:** Executor and snapshot caches are keyed by `"{venue}:{mode}"` (e.g. `"okx:demo"`, `"kucoin:live"`), not by `strategy_id`.
+- **Alternatives:** One executor per strategy (rejected — duplicate connections, rate-limit waste); one global executor per mode without venue (rejected — wrong account for non-OKX venues).
+- **Rationale:** Two strategies on OKX-live share one authenticated account — per-strategy executors would duplicate connections. One executor per `(venue, mode)` pair is the minimal correct granularity.
+
+### P&L ledger row schema includes mandatory mode column
+- **Decision:** Every `closed-trades.jsonl` row carries `mode: "demo"|"live"`. A single file holds all modes; queries filter by mode.
+- **Alternatives:** Separate files per mode (`closed-trades-demo.jsonl`, `closed-trades-live.jsonl`); no mode column.
+- **Rationale:** The order-history snapshot (`okx_order_history_snapshot`) is mode-scoped. Without a mode column, a demo-pinned snapshot would mis-attribute live closes as demo on any future mode-aware extension.
+
+### Hyperliquid cloid attribution via submit-time map, not hash reversal
+- **Decision:** At order submit time, persist `{mxc_id → numeric_cloid}` in `cloid-map.jsonl`. Attribution reads the map.
+- **Alternatives:** Deterministic reverse of the hash at read time (rejected — only works if the hash is invertible; HL uses sha256 truncation, non-reversible).
+- **Rationale:** Submit-time map is always correct with no dependency on hash algorithm knowledge. One small append-only file on the rw mount.
+
+### Dynamic budget: layer effective_budget on seed, not replace
+- **Decision:** `budget_usd` in strategy JSON is the seed. `effective_budget = budget_usd + closed_net_pnl` is computed at runtime.
+- **Alternatives:** Full migration of `budget_usd` out of strategy JSON into accounting state.
+- **Rationale:** Keeps strategy files stable. The dynamic layer (`effective_budget`) captures the real tradeable capital without touching the strategy loader.
+
 ### Remove inert monitors rather than keep them
 - **Decision:** `hermx-risk-watch` was removed from the installer because it gates on a nonexistent flag (`risk_index_gate_enabled`) and can never fire.
 - **Alternatives:** Keep it wired "for coverage" until the flag exists.

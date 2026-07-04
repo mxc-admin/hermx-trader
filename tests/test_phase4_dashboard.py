@@ -11,11 +11,14 @@ import importlib
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from http.client import HTTPConnection
 from pathlib import Path
 
 import pytest
 
-from conftest import _write_strategy
+import dashboard as dashboard_mod
+
+from conftest import _serve, _stop, _write_strategy
 
 
 # ---------------------------------------------------------------------------
@@ -549,3 +552,61 @@ def test_api_payload_exposes_order_reconcile_operator(dash):
     assert "open_orders" in api and "reconcile_alerts" in api and "operator_alerts" in api
     assert len(api["open_orders"]["rows"]) == 1
     assert "stats" in api["open_orders"]
+
+
+# ---------------------------------------------------------------------------
+# Static-path auth (H1): merged from the retired test_dashboard_static_auth.py.
+# do_GET used an exact-path allowlist, so /dashboard/index.html (which carries the
+# DASH_AUTH_TOKEN in a <meta> tag) was served to unauthenticated callers. The prefix
+# check must challenge every path under /dashboard. These drive the real Handler over
+# loopback against a minimal static export. They monkeypatch the dashboard module
+# globals directly (not the `dash` reload fixture).
+# ---------------------------------------------------------------------------
+
+def _get(port, path, headers=None):
+    conn = HTTPConnection("127.0.0.1", port, timeout=2)
+    conn.request("GET", path, headers=headers or {})
+    resp = conn.getresponse()
+    raw = resp.read()
+    conn.close()
+    return resp.status, raw
+
+
+def _static_dir(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "index.html").write_text("<html><head></head><body>hi</body></html>", encoding="utf-8")
+    return out
+
+
+def test_dashboard_index_requires_auth_no_token_leak(tmp_path, monkeypatch):
+    monkeypatch.setattr(dashboard_mod, "DASH_AUTH_ENABLED", True)
+    monkeypatch.setattr(dashboard_mod, "DASH_AUTH_TOKEN", "dash-token")
+    monkeypatch.setattr(dashboard_mod, "STATIC_DIR", _static_dir(tmp_path))
+
+    server, thread = _serve(dashboard_mod.Handler)
+    try:
+        status, body = _get(server.server_address[1], "/dashboard/index.html")
+        assert status == 401
+        # The token must never appear in an unauthenticated response body.
+        assert b"dash-token" not in body
+    finally:
+        _stop(server, thread)
+
+
+def test_dashboard_index_served_with_token_when_authed(tmp_path, monkeypatch):
+    monkeypatch.setattr(dashboard_mod, "DASH_AUTH_ENABLED", True)
+    monkeypatch.setattr(dashboard_mod, "DASH_AUTH_TOKEN", "dash-token")
+    monkeypatch.setattr(dashboard_mod, "STATIC_DIR", _static_dir(tmp_path))
+
+    server, thread = _serve(dashboard_mod.Handler)
+    try:
+        status, body = _get(
+            server.server_address[1],
+            "/dashboard/index.html",
+            headers={"Authorization": "Bearer dash-token"},
+        )
+        assert status == 200
+        assert b'<meta name="hermx-token" content="dash-token">' in body
+    finally:
+        _stop(server, thread)

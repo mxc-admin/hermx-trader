@@ -134,6 +134,27 @@
 - **Reason:** `side not in ALLOWED_SIDES` hard-400s at `build_record:2829` before the jsonschema gate — never reaches `validate_alert_schema()`. `source="webhook"` 202s early via the `non_tradingview_source` path. Valid schema-invalid trigger: `tv_signal_price="not-a-price"` (no pre-schema gate; fails jsonschema `oneOf(number|string)`).
 - **Date:** July 2026
 
+### SHADOW_ROOT as backward-compat fallback (HERMX_ROOT or SHADOW_ROOT)
+- **What:** Retain `SHADOW_ROOT` as a fallback in root resolution (`HERMX_ROOT or SHADOW_ROOT`) for operator backward compatibility.
+- **Tested:** User explicitly rejected it — "we do not need to support this legacy."
+- **Verdict:** REJECTED
+- **Reason:** Legacy fallbacks create test isolation failures (a stale `HERMX_ROOT` in the environment overrides test-managed `SHADOW_ROOT`) and cause confusion about which var is canonical. Remove completely; operators rename their `.env`.
+- **Date:** July 2026
+
+### Per-strategy executors (one executor per strategy_id)
+- **What:** Build a separate `CcxtExecutor` per strategy for position reads and reconciliation.
+- **Tested:** Architecture analysis during Phase 0.5.
+- **Verdict:** REJECTED
+- **Reason:** Two strategies on the same `(venue, mode)` share one authenticated account; per-strategy executors would create duplicate connections and hit rate limits. The correct isolation key is `(venue, mode)`, not `strategy_id`.
+- **Date:** July 2026
+
+### Gross P&L displayed before empirical fee-inclusion check
+- **What:** Display `net_realized_pnl` immediately on Phase 2 landing, relying on assumed `ORDER_PNL_IS_NET` values.
+- **Tested:** Design review.
+- **Verdict:** REJECTED
+- **Reason:** Each exchange has unique fee-inclusion semantics in the `pnl` / `realizedPnl` field. Displaying net before an empirical close-and-compare risks overstating or understating P&L by the fee amount. Ship gross (`pnl_gross`) first; flip `ORDER_PNL_IS_NET` after verification.
+- **Date:** July 2026
+
 ### Bare Docker volume names in backup/restore scripts
 - **What:** Reference `hermx-state`/`hermx-data` directly in `docker run -v hermx-state:/state ...`.
 - **Tested:** Compared script volume names against compose-created volume names.

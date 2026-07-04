@@ -61,5 +61,17 @@ Zero hits in `src/`. The key exists in `control-state.json` but is silently drop
 ### Only BTC has trainable signal history
 In `raw-webhooks.jsonl` / `pipeline.jsonl`, btcusdt has ~222 intake rows; ETH/SOL/XRP have ~1 each. Per-strategy frequency/absence baselines are un-trainable today for anything but BTC.
 
+### Hyperliquid returns numeric/hex cloid in order history, not the submitted mxc_id
+When HermX submits `clientOrderId = "mxc-abc"` to Hyperliquid, the exchange stores a hashed numeric or `0x{sha256[:32]}` cloid. Order history reads return the hashed value, not the original. `is_hermx_cl_ord_id()` prefix checks therefore miss all Hyperliquid orders unless a submit-time map is maintained.
+
+### Order history snapshot is demo-pinned by default after Phase 0.5
+`strategy_order_history_snapshot()` builds a per-`(venue, mode)` executor. Any call site that hard-codes `("okx", "demo")` into `reconcile_from_order_history()` will label all rows as OKX-demo regardless of the actual executor. Always pass the executor's resolved `(venue, mode)`.
+
+### SHADOW_ROOT is fully removed — no fallback honored
+After the flag cleanup, root resolution is `HERMX_ROOT` only. `SHADOW_ROOT` is no longer read anywhere in `src/` or `tests/`. Operators with `.env` files using `SHADOW_ROOT` must rename to `HERMX_ROOT`.
+
+### `resolve_cloid()` reads the full map file per call (O(map_size))
+`cloid-map.jsonl` is read entirely on every `resolve_cloid()` call. At current volume this is fine, but if Hyperliquid reconcile processes many rows against a large map, the repeated linear scan adds latency. An in-memory cache or index would be the follow-up.
+
 ### Installer cron quoting/`hermes cron edit` grammar is untested
 `ensure_job()` relies on `hermes cron edit "$name" $*` accepting the same positional args as `create`, and on shell double-eval of `"..."` strings containing apostrophes. Neither is exercised by any test, and a dry-run won't catch the quoting break — it fails only at real invocation.

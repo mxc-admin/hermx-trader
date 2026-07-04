@@ -46,6 +46,24 @@ A cron job that gates on a nonexistent flag (e.g. `risk_index_gate_enabled`) nev
 ### Absence detection needs no new gate-lib primitive
 Frequency/zero-intake ("absence") gates do NOT require a new primitive in `hermx_gate_lib.py`. The per-gate script reads a rolling window, computes a count, manufactures a synthetic condition, and feeds it to the existing `run_gate()`/`evaluate()`. Only the condition-derivation is gate-specific (it always lives in the script); the lib touch is at most a suppression-window key.
 
+### Test fixtures must manage ALL env vars in a resolution chain
+When root resolution uses `HERMX_ROOT or SHADOW_ROOT`, a test fixture that only manages `SHADOW_ROOT` fails when `HERMX_ROOT` is set in the environment. Whenever renaming or collapsing env var aliases, update ALL test fixtures to save/set/restore the full resolution chain — not just the old name.
+
+### Executor hard-coded to a venue is a latent wrong-account landmine
+`_effective_execution_config()` hard-coding `ccxt_exchange="okx"` with no `simulated_trading` key caused: (a) live OKX orders reconciled against OKX demo → not_found → UNKNOWN state, (b) KuCoin/Bybit orders reconciled against OKX → stuck forever. Whenever building an executor for reconciliation, read the venue and mode from the **order's own intent record**, not from global defaults. Default to OKX-demo only as last-resort fallback.
+
+### Reconcile call sites must use the actual (venue, mode) read, not hardcoded literals
+`reconcile_from_order_history(rows, "okx", "demo")` hardcoded in `dashboard.py` would mis-label live or non-OKX closes as OKX-demo. Always thread the actual `(venue, mode)` from the executor that fetched the rows into the reconcile call.
+
+### P&L ledger must never inherit WAL size-rotation policy
+`closed-trades.jsonl` is a lifetime record — unlike the raw-webhooks WAL which has a bounded `SIGNALS_MAX_N` rotation, the P&L ledger is append-only forever. Any refactor that uses WAL rotation helpers for the ledger file silently deletes financial history. Never apply pruning to `closed-trades.jsonl`.
+
+### Net P&L must not be displayed until empirically verified per-venue
+`ORDER_PNL_IS_NET` is False (gross) for all venues by default. Displaying net P&L before verifying the exchange's fee-inclusion semantics on a real close can overstate or understate P&L. Ship gross first, then flip the flag after empirical check.
+
+### Hyperliquid cloid is 0x hex, not decimal
+`_to_hyperliquid_cloid()` produces `0x{sha256[:32]}` — a hex string, not a decimal integer. Any `is_hermx_cl_ord_id()` guard using `text.isdigit()` misses it. Broaden the guard to `startswith("0x") or isdigit()` when resolving Hyperliquid cloids.
+
 ## Anti-Patterns (populated by /learn)
 <!-- Entries added here as anti-patterns are identified -->
 
