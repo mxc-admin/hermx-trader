@@ -219,11 +219,6 @@ def test_wall_clock_budget_bounds_attempts(wr):
 # (f) post-submit hook: reconciliation writes the authoritative terminal transition.
 # ---------------------------------------------------------------------------
 
-def _armed_config() -> dict:
-    # Phase A: no config arming flags -- the per-strategy submit flag arms paper submission.
-    return {"execution": {"exchange": "ccxt"}}
-
-
 def _blocked_record(cl="mxc-xrpusdt-buy-blocked0000000de") -> dict:
     """An otherwise-armed record whose per-strategy submit flag is off (gate blocked)."""
     rec = _armed_record(cl)

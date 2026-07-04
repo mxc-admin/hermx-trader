@@ -389,6 +389,25 @@ class CcxtExecutor(BaseExecutor):
             out.append(f"OPEN_{target.upper()}")
         return out
 
+    def _record_hl_cloid(self, order, client_order_id, exchange_id: str) -> None:
+        """Persist the submit-time mxc->cloid mapping for Hyperliquid (Phase 7b).
+
+        Hyperliquid echoes a numeric/hex cloid (not the submitted ``mxc`` id) in
+        order history, so ``is_hermx_cl_ord_id`` can't attribute it by prefix.
+        Recording the returned cloid here lets reconciliation resolve it back.
+        Best-effort: a map-write failure must never fail a live submit.
+        """
+        if exchange_id != "hyperliquid" or not client_order_id or not isinstance(order, dict):
+            return
+        info = order.get("info") if isinstance(order.get("info"), dict) else {}
+        returned_cloid = order.get("cloid") or order.get("clientOrderId") or info.get("cloid")
+        if returned_cloid and str(returned_cloid) != str(client_order_id):
+            try:
+                from pnl_cloid_map import record_cloid_mapping
+                record_cloid_mapping(str(client_order_id), str(returned_cloid), "hyperliquid")
+            except Exception:
+                pass
+
     def _order_params(self, *, readiness: dict, reduce_only: bool, client_order_id: str | None, exchange_id: str) -> dict:
         params = {}
         is_hyperliquid = exchange_id == "hyperliquid"
@@ -604,6 +623,7 @@ class CcxtExecutor(BaseExecutor):
                     )
                     try:
                         order = client.create_order(symbol, order_type, close_side, close_amount, price, params)
+                        self._record_hl_cloid(order, client_order_id_close, exchange_id)
                         executed_orders.append({
                             "action": action,
                             "submitted": True,
@@ -670,6 +690,7 @@ class CcxtExecutor(BaseExecutor):
                     )
                     try:
                         order = client.create_order(symbol, order_type, open_side, open_amount, price, params)
+                        self._record_hl_cloid(order, client_order_id_open, exchange_id)
                         executed_orders.append({
                             "action": action,
                             "submitted": True,

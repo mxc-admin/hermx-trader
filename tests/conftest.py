@@ -225,3 +225,158 @@ def assert_snapshot(wr_root):
 def load_alert(rel_path: str) -> dict:
     """Load an alert payload fixture by path relative to tests/fixtures/alerts/."""
     return json.loads((FIXTURES_DIR / "alerts" / rel_path).read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# Shared HTTP-server harnesses (loopback, ephemeral port).
+#
+# Two shapes, both previously copy-pasted across the integration suites:
+#   * _serve/_stop -- explicit (server, thread) pair for try/finally call sites
+#     (webhook + dashboard auth/security tests).
+#   * serve_dashboard -- contextmanager yielding the bound port (strategy-override
+#     dashboard tests).
+# ---------------------------------------------------------------------------
+
+import threading  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+from http.server import HTTPServer, ThreadingHTTPServer  # noqa: E402
+
+
+def _serve(handler_cls):
+    server = HTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def _stop(server, thread):
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=2)
+
+
+@contextmanager
+def serve_dashboard(dash_mod):
+    """Run the dashboard Handler on an ephemeral loopback port for one test."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), dash_mod.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# Executor test doubles (mock CCXT submit seam + normalized adapter results).
+# ---------------------------------------------------------------------------
+
+def adapter_result(*, ok=True, mode="submit_enabled", client_order_id=None,
+                   order_id="ord-1", payload=None) -> dict:
+    """A normalized adapter result (BaseExecutor.normalized_result shape)."""
+    return {
+        "ok": ok,
+        "mode": mode,
+        "exchange": "ccxt",
+        "elapsed_ms": 5,
+        "fill_summary": {"status": "submitted", "order_id": order_id, "client_order_id": client_order_id},
+        "payload": {} if payload is None else payload,
+    }
+
+
+def fake_executor(result=None):
+    """Stand-in CCXT submit executor: its .execute is the single submit call."""
+    from unittest import mock  # local import keeps conftest import-time light
+    fake = mock.Mock()
+    fake.execute = mock.Mock(return_value=adapter_result() if result is None else result)
+    return fake
+
+
+# ---------------------------------------------------------------------------
+# Strategy JSON fixture writer (schema v2 template).
+# ---------------------------------------------------------------------------
+
+STRATEGY_TEMPLATE = {
+    "schema_version": 2,
+    "name": "Test Strategy",
+    "asset": "BTCUSDT",
+    "instrument": {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap"},
+    "timeframe": "2h",
+    "chart_type": "heikin_ashi",
+    "budget_usd": 1500,
+    "leverage": 2,
+    "margin_mode": "isolated",
+    "execution_mode": "demo",
+    "submit_orders": True,
+    "status": "active_demo",
+}
+
+
+def _write_strategy(strategies_dir: Path, strategy_id: str, **overrides) -> Path:
+    row = dict(STRATEGY_TEMPLATE)
+    row["strategy_id"] = strategy_id
+    row.update(overrides)
+    path = strategies_dir / f"{strategy_id}.json"
+    path.write_text(json.dumps(row), encoding="utf-8")
+    return path
+
+
+# ---------------------------------------------------------------------------
+# PnL ledger isolation fixture.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def ledger_dir(tmp_path, monkeypatch):
+    """Isolated data dir for the ledger; returns the closed-trades.jsonl path."""
+    monkeypatch.setenv("HERMX_DATA_DIR", str(tmp_path))
+    return tmp_path / "closed-trades.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# Gated paper/sandbox integration helpers (shared by test_paper_integration.py).
+# ---------------------------------------------------------------------------
+
+def load_local_env(repo_root: Path) -> None:
+    """Load repo-root .env into os.environ (setdefault) for gated integration runs."""
+    env_path = repo_root / ".env"
+    if not env_path.exists():
+        return
+    for raw in env_path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
+
+
+def paper_execution_hooks(execution_ledger: Path, order_journal: Path) -> dict:
+    """The full ExecutionService hook surface used by the kill-switch paper proofs."""
+    return {
+        "live_trading_enabled": lambda: (False, "false"),
+        "append_jsonl": lambda path, row: Path(path).open("a").write(json.dumps(row) + "\n"),
+        "execution_ledger": execution_ledger,
+        "order_journal": order_journal,
+        "webhook_auth_config_healthy": lambda: True,
+        "watchdog_submission_state": lambda: (True, None),
+        "symbol_pause_info": lambda symbol: None,
+        "order_intent_from_readiness": lambda readiness: readiness.get("execution_intent") or {},
+        "cl_ord_id_from_readiness": lambda readiness: (readiness.get("execution_intent") or {}).get("client_order_id"),
+        "latest_order_record": lambda client_order_id: None,
+        "record_order_state": lambda *args, **kwargs: None,
+        "fail_closed_state_write": lambda *args, **kwargs: None,
+        "post_submit_reconcile": lambda *args, **kwargs: None,
+        "order_state_planned": lambda: "PLANNED",
+        "order_state_submitted": lambda: "SUBMITTED",
+        "order_state_filled": lambda: "FILLED",
+        "order_state_rejected": lambda: "REJECTED",
+        "order_state_unknown": lambda: "UNKNOWN",
+        "reconcile_post_submit_enabled": lambda: False,
+        "reconciliation_executor": lambda: None,
+        "reconcile_order_with_backoff": lambda *args, **kwargs: None,
+        "order_state_can_transition": lambda old, new: True,
+        "emit_reconcile_alert": lambda *args, **kwargs: None,
+        "reconcile_alert_mismatch": lambda *args, **kwargs: None,
+        "redact_secrets": lambda text: text,
+    }

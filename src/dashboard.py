@@ -263,6 +263,65 @@ def _clear_strategy_override(strategy_id: str) -> bool:
     return True
 
 
+def _set_accounting_start(strategy_id: str, start_ms) -> bool:
+    """Set/clear a per-strategy accounting-window start (ms epoch) in control-state.
+    Mirrors webhook_receiver.set_accounting_start; None/absent clears the window.
+    Additive: touches only the accounting_windows key, never strategy_overrides."""
+    sid = str(strategy_id or "").strip()
+    if not sid:
+        return False
+    if start_ms is None:
+        return _clear_accounting_start(sid)
+    try:
+        ts = int(start_ms)
+    except (TypeError, ValueError):
+        return False
+    if ts < 0:
+        return False
+    now = datetime.now(timezone.utc).isoformat()
+    state = _load_control_state()
+    windows = state.get("accounting_windows") if isinstance(state.get("accounting_windows"), dict) else {}
+    windows[sid] = {"accounting_start_at": ts, "set_at": now}
+    state["accounting_windows"] = windows
+    state["updated_at"] = now
+    _save_control_state(state)
+    return True
+
+
+def _clear_accounting_start(strategy_id: str) -> bool:
+    """Remove a strategy's accounting window (revert to whole-ledger total)."""
+    sid = str(strategy_id or "").strip()
+    if not sid:
+        return False
+    state = _load_control_state()
+    windows = state.get("accounting_windows") if isinstance(state.get("accounting_windows"), dict) else {}
+    if sid not in windows:
+        return False
+    windows.pop(sid)
+    state["accounting_windows"] = windows
+    state["updated_at"] = datetime.now(timezone.utc).isoformat()
+    _save_control_state(state)
+    return True
+
+
+def _accounting_start_for(strategy_id: str, ctrl_state=None):
+    """The strategy's accounting-window start (ms epoch), or None if unset.
+    ``ctrl_state`` may be a pre-loaded control-state dict to avoid re-reading."""
+    sid = str(strategy_id or "").strip()
+    if not sid:
+        return None
+    state = ctrl_state if isinstance(ctrl_state, dict) else _load_control_state()
+    windows = state.get("accounting_windows") if isinstance(state.get("accounting_windows"), dict) else {}
+    entry = windows.get(sid)
+    if isinstance(entry, dict):
+        try:
+            v = entry.get("accounting_start_at")
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def active_strategies(strategies=None):
     rows = strategies if strategies is not None else load_strategy_files()
     return [s for s in rows if is_strategy_active(s)]
@@ -1500,6 +1559,119 @@ def _effective_strategy_mode(strategy: dict, overrides: dict) -> str:
     return str((strategy or {}).get("execution_mode") or "demo").lower()
 
 
+def _strategy_pnl_contract(strategy, accounting_start_at, by_env, by_mode):
+    """Build the per-strategy P&L contract (ledger closed figures + live UPnL).
+
+    Read-only and additive: sums the durable closed-trade ledger scoped to the
+    strategy, its account mode (demo|live), and the ``accounting_start_at`` clean
+    window, then adds the open UPnL from THIS strategy's own (venue, mode) snapshot.
+    A missing ledger yields all-zero closed figures, never an error.
+
+    The returned dict is a *superset*: it carries the Phase-3 ``*_usd`` keys the
+    aggregate produces AND the Phase-4 contract keys (``strategy_id``, ``venue``,
+    ``mode``, ``realized_net``, ``realized_gross``, ``fees``, ``upl``, ``total_net``,
+    ``trade_count``, ``last_close_at_ms``) the React UI consumes. Both name-sets are
+    views onto the same numbers so neither consumer breaks."""
+    sid = strategy.get("strategy_id")
+    venue = _strategy_venue(strategy)
+    mode = (strategy.get("effective_mode") or strategy.get("execution_mode") or "demo").lower()
+    mode_key = "live" if mode == "live" else "demo"  # ledger mode column is demo|live
+    budget = as_float((strategy.get("capital") or {}).get("budget_usd") or strategy.get("budget_usd")) or 0.0
+    # Open UPnL from the strategy's own environment snapshot (Phase 0.5 per-env read).
+    snap = _snapshot_for_env(by_env, by_mode, venue, mode)
+    pos = ((snap or {}).get("positions") or {}).get(strategy.get("asset")) or {}
+    open_upl = as_float(pos.get("upl")) or 0.0
+    try:
+        from pnl_ledger import aggregate_strategy_pnl
+
+        agg = aggregate_strategy_pnl(
+            sid,
+            budget_usd=budget,
+            mode=mode_key,
+            accounting_start_at=accounting_start_at,
+            open_upl_usd=open_upl,
+        )
+    except Exception:
+        # Never let a ledger read break the API payload (fail-safe, like the reconcile
+        # feed). Degrade to budget + open UPnL only.
+        agg = {
+            "budget_usd": budget,
+            "closed_realized_pnl_usd": 0.0,
+            "closed_fees_usd": 0.0,
+            "closed_net_pnl_usd": 0.0,
+            "open_upl_usd": open_upl,
+            "equity_now_usd": budget + open_upl,
+            "closed_order_count": 0,
+            "last_close_at_ms": None,
+            "accounting_start_at": accounting_start_at,
+        }
+    # Phase-4 aliases (React UI contract) layered on top of the Phase-3 aggregate.
+    realized_net = agg.get("closed_net_pnl_usd") or 0.0
+    upl = agg.get("open_upl_usd") or 0.0
+    agg.update({
+        "strategy_id": sid,
+        "venue": venue,
+        "mode": mode_key,
+        "realized_net": realized_net,
+        "realized_gross": agg.get("closed_realized_pnl_usd") or 0.0,
+        "fees": agg.get("closed_fees_usd") or 0.0,
+        "upl": upl,
+        "total_net": realized_net + upl,
+        "trade_count": agg.get("closed_order_count") or 0,
+        "last_close_at_ms": agg.get("last_close_at_ms"),
+    })
+    return agg
+
+
+def _ledger_net_realized(strategy_id, mode, accounting_start_at):
+    """Durable realized-net P&L for a strategy from the closed-trade ledger.
+
+    Fail-safe: any ledger error (missing/corrupt file, import failure) degrades to
+    0.0 so a card / budget computation never breaks on a bad read — mirrors the
+    reconcile-feed and ``_strategy_pnl_contract`` fail-open posture."""
+    if not strategy_id:
+        return 0.0
+    try:
+        from pnl_ledger import net_realized_for_strategy
+
+        return net_realized_for_strategy(
+            strategy_id, mode=mode, accounting_start_at=accounting_start_at
+        )
+    except Exception:
+        return 0.0
+
+
+def portfolio_contract(strategy_pnls):
+    """Aggregate the per-strategy P&L contracts into a single portfolio object.
+
+    ``strategy_pnls`` is the list of dicts produced by :func:`_strategy_pnl_contract`.
+    Sums are additive across strategies; ``strategies`` counts those carrying any P&L
+    data (a ledger row OR a live open position), so a portfolio of untouched demo
+    strategies reports 0 rather than inflating the count. Read-only."""
+    realized_net = realized_gross = fees = upl = 0.0
+    trade_count = 0
+    active = 0
+    for p in strategy_pnls or []:
+        if not isinstance(p, dict):
+            continue
+        realized_net += p.get("realized_net") or 0.0
+        realized_gross += p.get("realized_gross") or 0.0
+        fees += p.get("fees") or 0.0
+        upl += p.get("upl") or 0.0
+        trade_count += int(p.get("trade_count") or 0)
+        if (p.get("trade_count") or 0) or (p.get("upl") or 0.0):
+            active += 1
+    return {
+        "realized_net": realized_net,
+        "realized_gross": realized_gross,
+        "fees": fees,
+        "upl": upl,
+        "total_net": realized_net + upl,
+        "trade_count": trade_count,
+        "strategies": active,
+    }
+
+
 def api_payload():
     """The structured model the ``/api`` route serializes.
 
@@ -1518,6 +1690,9 @@ def api_payload():
     # the file: submit_orders explicitly False -> "pause", else execution_mode (demo/live).
     _ctrl = _load_control_state()
     _overrides = _ctrl.get("strategy_overrides") if isinstance(_ctrl.get("strategy_overrides"), dict) else {}
+    _acct_windows = _ctrl.get("accounting_windows") if isinstance(_ctrl.get("accounting_windows"), dict) else {}
+    _by_env = model.get("okx_live_by_env") or {}
+    _by_mode = model.get("okx_live_by_mode") or {}
     annotated_strategies = []
     for s in model.get("active_strategies") or []:
         s = dict(s)
@@ -1527,14 +1702,25 @@ def api_payload():
         s["venue"] = _strategy_venue(s)
         s["okx_account_source"] = "live" if s["effective_mode"] == "live" else "demo"
         s["env_key"] = f"{s['venue']}:{s['okx_account_source']}"
+        # Phase 3: accounting window + ledger-backed P&L contract (additive; the React
+        # UI adopts it in Phase 4). closed_* come from the durable ledger scoped to the
+        # clean window; open UPnL from this strategy's own (venue, mode) snapshot.
+        _acct_start = _accounting_start_for(s.get("strategy_id"), _ctrl)
+        s["accounting_start_at"] = _acct_start
+        s["strategy_pnl"] = _strategy_pnl_contract(s, _acct_start, _by_env, _by_mode)
         annotated_strategies.append(s)
+
+    # Phase 4: top-level portfolio roll-up across every strategy's durable P&L.
+    portfolio = portfolio_contract([s.get("strategy_pnl") for s in annotated_strategies])
 
     return {
         "generated_at": model["generated_at"],
         "source_counts": {k: loaded[k] for k in ("historical_count", "backfill_count", "live_count")},
         "backfill": loaded["backfill"],
         "strategies": annotated_strategies,
+        "portfolio": portfolio,
         "strategy_overrides": _overrides,
+        "accounting_windows": _acct_windows,
         "strategy_alerts": model.get("strategy_alerts") or [],
         "okx_live": model.get("okx_live"),
         "okx_live_by_mode": model.get("okx_live_by_mode") or {},
@@ -1845,11 +2031,22 @@ def strategy_card(strategy, okx_live, alerts, okx_live_by_mode=None, okx_live_by
     mode_kind = "good" if mode == "live" else "muted" if mode == "pause" else "neutral"
     position = live.get("side") or "FLAT"
     is_live = position != "FLAT"
-    budget = as_float((strategy.get("capital") or {}).get("budget_usd") or strategy.get("budget_usd")) or 0.0
+    # Phase 5 (Decision ⑤A): budget_usd from the strategy JSON stays the *seed*; the
+    # dynamic layer is computed at runtime. effective_budget = seed + durable realized
+    # net P&L (from the ledger, NOT the live position's realized_pnl which resets to 0
+    # on FLAT and is bounded by the exchange's 100-row history). Total equity adds UPnL.
+    budget_seed = as_float((strategy.get("capital") or {}).get("budget_usd") or strategy.get("budget_usd")) or 0.0
     upl = as_float(live.get("upl")) or 0.0
-    realized = as_float(live.get("realized_pnl")) or 0.0
-    pnl_now = realized + upl
-    budget_now = budget + pnl_now
+    mode_key = "live" if mode == "live" else "demo"  # ledger mode column is demo|live
+    accounting_start = strategy.get("accounting_start_at")
+    if accounting_start is None:
+        accounting_start = _accounting_start_for(strategy.get("strategy_id"))
+    realized_net = _ledger_net_realized(strategy.get("strategy_id"), mode_key, accounting_start)
+    effective_budget = budget_seed + realized_net       # tradable capital (seed + realized)
+    total_pnl = realized_net + upl                       # Total P&L (realized + unrealized)
+    total_equity = budget_seed + total_pnl               # full account value
+    pnl_now = total_pnl  # legacy alias
+    budget_now = total_equity  # legacy alias
     live_badge = badge("LIVE", "good") if is_live else badge("FLAT", "muted")
     return f"""
     <section class="asset-card clean-card strategy-card">
@@ -1881,9 +2078,11 @@ def strategy_card(strategy, okx_live, alerts, okx_live_by_mode=None, okx_live_by
         </div>
       </div>
       {metric_cards_colored({
-        "Budget": (money(budget, 0), None),
-        "Equity now": (money(budget_now, 2), "good" if pnl_now > 0 else ("bad" if pnl_now < 0 else None)),
-        "UPnL": (money(pnl_now, 2), "good" if pnl_now > 0 else ("bad" if pnl_now < 0 else None)),
+        "Seed budget": (money(budget_seed, 0), None),
+        "Realized P&L": (money(realized_net, 2), "good" if realized_net > 0 else ("bad" if realized_net < 0 else None)),
+        "UPnL": (money(upl, 2), "good" if upl > 0 else ("bad" if upl < 0 else None)),
+        "Effective budget": (money(effective_budget, 2), None),
+        "Total equity": (money(total_equity, 2), "good" if total_pnl > 0 else ("bad" if total_pnl < 0 else None)),
         "Mark price": (num(live.get("last"), 4), None),
         "Alerts": (str(len(rows)), None),
       })}
@@ -2794,7 +2993,13 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps({"ok": False, "error": message}, ensure_ascii=False).encode("utf-8")
         self.send_bytes(status, body, "application/json; charset=utf-8")
 
-    def _apply_strategy_control(self, sid, mode):
+    def _apply_strategy_control(self, sid, mode, accounting_field=None):
+        """Apply a strategy-mode override and/or an accounting-window change.
+
+        ``accounting_field`` is a 3-state marker for the Phase-3 accounting window:
+        - None  -> body carried no ``accounting_start_at`` key; leave the window alone.
+        - the sentinel ("__clear__", None) or an int -> set/clear the window.
+        At least one of ``mode`` or ``accounting_field`` must be actionable."""
         sid = (sid or "").strip()
         if not sid:
             self._send_control_error(400, "missing strategy_id")
@@ -2803,18 +3008,35 @@ class Handler(BaseHTTPRequestHandler):
         if sid not in known:
             self._send_control_error(404, f"unknown strategy_id: {sid}")
             return
-        mode = _LEGACY_STRATEGY_MODE_ALIASES.get(mode, mode)  # accept legacy shadow->pause, paper->demo
-        if mode not in {"pause", "demo", "live", "clear"}:
-            self._send_control_error(400, "mode must be one of: pause, demo, live, clear")
-            return
-        if mode == "clear":
-            _clear_strategy_override(sid)  # idempotent: no-op if no override existed
-            resp = {"ok": True, "strategy_id": sid, "mode": "clear"}
-        else:
-            if not _set_strategy_override(sid, mode):
-                self._send_control_error(400, "failed to set override")
+        resp = {"ok": True, "strategy_id": sid}
+        # Mode override (optional when only the accounting window is being set).
+        if mode:
+            mode = _LEGACY_STRATEGY_MODE_ALIASES.get(mode, mode)  # accept legacy shadow->pause, paper->demo
+            if mode not in {"pause", "demo", "live", "clear"}:
+                self._send_control_error(400, "mode must be one of: pause, demo, live, clear")
                 return
-            resp = {"ok": True, "strategy_id": sid, "mode": mode}
+            if mode == "clear":
+                _clear_strategy_override(sid)  # idempotent: no-op if no override existed
+                resp["mode"] = "clear"
+            else:
+                if not _set_strategy_override(sid, mode):
+                    self._send_control_error(400, "failed to set override")
+                    return
+                resp["mode"] = mode
+        # Accounting window (Phase 3). accounting_field is (kind, value): "set"/"clear".
+        if accounting_field is not None:
+            kind, value = accounting_field
+            if kind == "invalid":
+                self._send_control_error(400, "accounting_start_at must be an integer ms epoch or null")
+                return
+            start_ms = None if kind == "clear" else value
+            if not _set_accounting_start(sid, start_ms) and kind != "clear":
+                self._send_control_error(400, "failed to set accounting_start_at")
+                return
+            resp["accounting_start_at"] = start_ms
+        if "mode" not in resp and "accounting_start_at" not in resp:
+            self._send_control_error(400, "no actionable field (mode or accounting_start_at)")
+            return
         self.send_bytes(200, json.dumps(resp, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
     def do_POST(self):
@@ -2832,14 +3054,28 @@ class Handler(BaseHTTPRequestHandler):
             length = 0
         raw = self.rfile.read(length) if length > 0 else b""
         mode = ""
+        accounting_field = None
         if raw:
             try:
                 body = json.loads(raw.decode("utf-8"))
             except Exception:
                 self._send_control_error(400, "invalid JSON body")
                 return
-            mode = str((body or {}).get("mode") or "").strip().lower()
-        self._apply_strategy_control(sid, mode)
+            body = body or {}
+            mode = str(body.get("mode") or "").strip().lower()
+            # Phase 3: accounting_start_at is optional. Present-and-null clears the
+            # window; an int (ms epoch) sets it; a non-int/non-null is rejected.
+            if "accounting_start_at" in body:
+                raw_val = body.get("accounting_start_at")
+                if raw_val is None:
+                    accounting_field = ("clear", None)
+                elif isinstance(raw_val, bool):  # bool is an int subclass; reject it
+                    accounting_field = ("invalid", None)
+                elif isinstance(raw_val, int):
+                    accounting_field = ("set", raw_val)
+                else:
+                    accounting_field = ("invalid", None)
+        self._apply_strategy_control(sid, mode, accounting_field)
 
     def do_DELETE(self):
         path = urlparse(self.path).path

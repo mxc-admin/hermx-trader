@@ -12,11 +12,6 @@ from unittest import mock
 import webhook_receiver as wr
 
 
-def _armed_config() -> dict:
-    # Phase A: no config arming flags -- the per-strategy submit flag arms paper submission.
-    return {"execution": {"exchange": "ccxt"}}
-
-
 def _record(*, live_execution_enabled=True, auth_healthy=True):
     return {
         "received_at": "2026-06-25T00:00:00Z",

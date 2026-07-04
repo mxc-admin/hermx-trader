@@ -47,14 +47,6 @@ class StubExecutor:
 
 
 
-def _armed_config() -> dict:
-    return {
-        "execution": {"enabled": True, "submit_orders": True, "simulated_trading": True, "force_ipv4": True},
-        "risk": {"allow_live_execution": True},
-    }
-
-
-
 def _armed_record(cl: str = "mxc-xrpusdt-buy-abc0123456789de") -> dict:
     return {
         "received_at": "2026-06-25T00:00:00Z",

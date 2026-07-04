@@ -19,11 +19,7 @@ import io
 import json
 from unittest import mock
 
-
-def _armed_config() -> dict:
-    # exchange "ccxt" matches the registered adapter backend (mirrors the kill-switch
-    # suite). The executor itself is mocked, so no venue is touched.
-    return {"execution": {"exchange": "ccxt"}}
+from conftest import fake_executor as _fake_executor
 
 
 def _strategy(*, submit_orders: bool = True, execution_mode: str = "live",
@@ -37,23 +33,6 @@ def _strategy(*, submit_orders: bool = True, execution_mode: str = "live",
         "margin_mode": "isolated",
         "asset": "BTCUSDT",
     }
-
-
-def _adapter_ok() -> dict:
-    return {
-        "ok": True,
-        "mode": "submit_enabled",
-        "exchange": "ccxt",
-        "elapsed_ms": 5,
-        "fill_summary": {"status": "submitted", "order_id": "ord-1", "client_order_id": None},
-        "payload": {},
-    }
-
-
-def _fake_executor():
-    fake = mock.Mock()
-    fake.execute = mock.Mock(return_value=_adapter_ok())
-    return fake
 
 
 def _make_handler(wr, *, token=None, body=None, raw=None, content_length=None):

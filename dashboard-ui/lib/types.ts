@@ -25,6 +25,47 @@ export interface Capital {
   reinvest?: boolean
 }
 
+/**
+ * strategy.strategy_pnl — durable per-strategy P&L contract (Phase 4).
+ *
+ * Sums the append-only closed-trade ledger scoped to the strategy, its account
+ * `mode` (demo|live), and the `accounting_start_at` clean window, then folds in the
+ * live open `upl`. The `*_usd` / `closed_*` fields are Phase-3 aliases kept for
+ * back-compat; the flat names below are the Phase-4 contract. `total_net = realized_net + upl`.
+ */
+export interface StrategyPnl {
+  strategy_id?: string
+  venue?: string
+  mode?: string // "demo" | "live"
+  accounting_start_at?: number | null
+  realized_net?: number
+  realized_gross?: number
+  fees?: number
+  upl?: number
+  total_net?: number
+  trade_count?: number
+  last_close_at_ms?: number | null
+  // Phase-3 aggregate aliases (same numbers, legacy names).
+  budget_usd?: number
+  closed_realized_pnl_usd?: number
+  closed_fees_usd?: number
+  closed_net_pnl_usd?: number
+  open_upl_usd?: number
+  equity_now_usd?: number
+  closed_order_count?: number
+}
+
+/** portfolio — durable P&L aggregated across all strategies (Phase 4). */
+export interface Portfolio {
+  realized_net?: number
+  realized_gross?: number
+  fees?: number
+  upl?: number
+  total_net?: number
+  trade_count?: number
+  strategies?: number // count of strategies carrying P&L data
+}
+
 /** A strategy file (strategies/*.json), schema_version 2. */
 export interface Strategy {
   schema_version?: number
@@ -42,6 +83,12 @@ export interface Strategy {
   notes?: string
   /** Derived symbol (strategy_asset) the dashboard keys positions/alerts by. */
   asset?: string
+  /** Durable per-strategy P&L contract, annotated by the backend (Phase 4). */
+  strategy_pnl?: StrategyPnl
+  /** Accounting-window start (ms epoch) the P&L is scoped to, or null. */
+  accounting_start_at?: number | null
+  /** Strategy's own venue (e.g. "okx"), annotated by the backend. */
+  venue?: string
   // Legacy / derived fields tolerated by the renderer.
   budget_usd?: number
   okx_submit_orders?: boolean
@@ -217,6 +264,7 @@ export interface ApiPayload {
   strategy_overrides?: Record<string, unknown>
   backfill?: unknown
   strategies?: Strategy[]
+  portfolio?: Portfolio
   strategy_alerts?: StrategyAlert[]
   okx_live?: OkxLive
   okx_executions?: ExecutionRow[]

@@ -19,9 +19,7 @@ from __future__ import annotations
 
 from unittest import mock
 
-
-def _armed_config() -> dict:
-    return {"execution": {"exchange": "ccxt"}}
+from conftest import fake_executor as _fake_executor
 
 
 def _record(*, execution_mode: str, simulated_trading=None, cl: str = "cid-live") -> dict:
@@ -38,23 +36,6 @@ def _record(*, execution_mode: str, simulated_trading=None, cl: str = "cid-live"
     if simulated_trading is not None:
         readiness["simulated_trading"] = simulated_trading
     return {"received_at": "2026-06-25T00:00:00Z", "execution_readiness": readiness}
-
-
-def _adapter_ok() -> dict:
-    return {
-        "ok": True,
-        "mode": "submit_enabled",
-        "exchange": "ccxt",
-        "elapsed_ms": 5,
-        "fill_summary": {"status": "submitted", "order_id": "ord-1", "client_order_id": None},
-        "payload": {},
-    }
-
-
-def _fake_executor():
-    fake = mock.Mock()
-    fake.execute = mock.Mock(return_value=_adapter_ok())
-    return fake
 
 
 # ---------------------------------------------------------------------------
@@ -198,3 +179,35 @@ def test_demo_mode_ignores_switch_false(wr, monkeypatch):
 
     fake.execute.assert_called_once()
     assert out["mode"] == "submit_enabled"
+
+
+# ---------------------------------------------------------------------------
+# Per-strategy submit flag + the live_trading_enabled helper (merged from the
+# retired test_kill_switch.py -- the two cases not already covered above).
+# ---------------------------------------------------------------------------
+
+def test_per_strategy_submit_flag_blocks(wr):
+    """The per-strategy submit flag is the paper arm: live_execution_enabled=False
+    (strategy.submit_orders=false) => no executor is ever built and nothing submits."""
+    rec = _record(execution_mode="demo", simulated_trading=True)
+    rec["execution_readiness"]["live_execution_enabled"] = False
+
+    with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
+        result = wr.execute_if_enabled(rec)
+
+    create_mock.assert_not_called()
+    assert result["mode"] == "not_submitted"
+
+
+def test_live_trading_enabled_helper(wr, monkeypatch):
+    """HERMX_LIVE_TRADING is a fail-closed positive enable flag (Phase B gate input)."""
+    monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
+    assert wr.live_trading_enabled()[0] is False  # unset => live disabled (fail closed)
+
+    for disabled in ("false", "0", "no", "", "  ", "False", "NO"):
+        monkeypatch.setenv("HERMX_LIVE_TRADING", disabled)
+        assert wr.live_trading_enabled()[0] is False, disabled
+
+    for enabled in ("true", "1", "yes", "TRUE", "Yes"):
+        monkeypatch.setenv("HERMX_LIVE_TRADING", enabled)
+        assert wr.live_trading_enabled()[0] is True, enabled

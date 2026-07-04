@@ -12,23 +12,10 @@ from __future__ import annotations
 
 import json
 import queue
-import threading
 import time
 from http.client import HTTPConnection
-from http.server import HTTPServer
 
-
-def _serve(handler_cls):
-    server = HTTPServer(("127.0.0.1", 0), handler_cls)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, thread
-
-
-def _stop(server, thread):
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=2)
+from conftest import _serve, _stop
 
 
 def _post(port, path, payload, headers=None):

@@ -11,6 +11,9 @@ Covers:
 from __future__ import annotations
 
 import webhook_receiver as wr
+from conftest import load_alert
+
+RECEIVED_AT = "2026-06-22T00:00:00Z"
 
 
 # ---------------------------------------------------------------------------
@@ -88,37 +91,45 @@ def test_armed_and_available_alert_schema_no_alert(wr, monkeypatch):
     assert not [a for a in alerts if a["alert"] == "ALERT_SCHEMA_ENFORCEMENT_UNAVAILABLE"]
 
 
-def test_latest_file_write_uses_atomic_dump(monkeypatch, tmp_path):
+def test_latest_file_write_uses_atomic_dump(wr, monkeypatch):
+    """The real intake path (build_record) must persist latest.json through the
+    atomic writer -- not a bare open()/json.dump. Drive a real alert through
+    production and spy on the actual _atomic_json_dump (delegating to the real
+    implementation so the write still happens)."""
     calls = []
-    monkeypatch.setattr(wr, "_atomic_json_dump", lambda p, d: calls.append((p, d)))
-    monkeypatch.setattr(wr, "LATEST_FILE", tmp_path / "latest.json")
-    record = {"cl_ord_id": "test-atomic-001", "symbol": "XRPUSDT"}
-    wr._atomic_json_dump(wr.LATEST_FILE, record)
-    # If the write was correctly delegated, _atomic_json_dump was called
-    # (the monkeypatch intercepts it — just verify the path matches)
-    assert any(str(c[0]).endswith("latest.json") for c in calls)
+    real_dump = wr._atomic_json_dump
+
+    def _spy(path, obj):
+        calls.append((path, obj))
+        return real_dump(path, obj)
+
+    monkeypatch.setattr(wr, "_atomic_json_dump", _spy)
+
+    status, record = wr.build_record(load_alert("strategy/btcusdt_buy.json"), RECEIVED_AT)
+    assert status == 200
+
+    latest_writes = [c for c in calls if c[0] == wr.LATEST_FILE]
+    assert latest_writes, "build_record did not persist latest.json via _atomic_json_dump"
+    # The outcome record itself is what gets atomically written to LATEST_FILE.
+    assert latest_writes[-1][1] is record
+    assert wr.LATEST_FILE.exists()
 
 
 def test_latest_corrupt_returns_503_not_500(monkeypatch, tmp_path):
+    """A corrupt latest.json must yield 503 (unreadable), never a 500. Drives the
+    REAL production Handler.do_GET, not an inline re-implementation."""
     corrupt = tmp_path / "latest.json"
     corrupt.write_text("{ not : valid json", encoding="utf-8")
     monkeypatch.setattr(wr, "LATEST_FILE", corrupt)
 
     responses = []
+    # Instantiate the real Handler without running BaseHTTPRequestHandler.__init__
+    # (which would drive a socket); capture responses at the _send seam.
+    handler = wr.Handler.__new__(wr.Handler)
+    handler.path = "/latest"
+    handler._send = lambda status, body: responses.append((status, body))
 
-    class FakeHandler:
-        def _send(self, code, body):
-            responses.append((code, body))
-
-    handler = FakeHandler()
-    # Simulate the /latest branch by calling the logic directly
-    if not wr.LATEST_FILE.exists():
-        handler._send(404, {"ok": False, "error": "no_latest_yet"})
-    else:
-        try:
-            handler._send(200, __import__("json").loads(wr.LATEST_FILE.read_text(encoding="utf-8")))
-        except (OSError, ValueError):
-            handler._send(503, {"ok": False, "error": "latest_unreadable"})
+    handler.do_GET()
 
     assert responses[0][0] == 503
     assert responses[0][1]["error"] == "latest_unreadable"

@@ -15,36 +15,14 @@ from pathlib import Path
 
 import pytest
 
+from conftest import _write_strategy
+
 
 # ---------------------------------------------------------------------------
 # Harness: load dashboard_core + dashboard bound to a populated temp HERMX_ROOT.
 # Both modules resolve HERMX_ROOT (ROOT/LOGS/STRATEGIES_DIR) at import time, so
 # we set the env then importlib.reload() — mirroring tests/conftest.py's `wr`.
 # ---------------------------------------------------------------------------
-
-STRATEGY_TEMPLATE = {
-    "schema_version": 2,
-    "name": "Test Strategy",
-    "asset": "BTCUSDT",
-    "instrument": {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap"},
-    "timeframe": "2h",
-    "chart_type": "heikin_ashi",
-    "budget_usd": 1500,
-    "leverage": 2,
-    "margin_mode": "isolated",
-    "execution_mode": "demo",
-    "submit_orders": True,
-    "status": "active_demo",
-}
-
-
-def _write_strategy(strategies_dir: Path, strategy_id: str, **overrides) -> Path:
-    row = dict(STRATEGY_TEMPLATE)
-    row["strategy_id"] = strategy_id
-    row.update(overrides)
-    path = strategies_dir / f"{strategy_id}.json"
-    path.write_text(json.dumps(row), encoding="utf-8")
-    return path
 
 
 @pytest.fixture

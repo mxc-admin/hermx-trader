@@ -15,13 +15,6 @@ import pytest
 import pnl_ledger
 
 
-@pytest.fixture
-def ledger_dir(tmp_path, monkeypatch):
-    """Isolated data dir for the ledger; returns the closed-trades.jsonl path."""
-    monkeypatch.setenv("HERMX_DATA_DIR", str(tmp_path))
-    return tmp_path / "closed-trades.jsonl"
-
-
 # --- path resolution --------------------------------------------------------
 
 def test_ledger_path_resolves_from_hermx_data_dir(tmp_path, monkeypatch):
@@ -49,6 +42,17 @@ def test_is_hermx_cl_ord_id_rejects_external():
     assert pnl_ledger.is_hermx_cl_ord_id("someExternalBot123") is False
     assert pnl_ledger.is_hermx_cl_ord_id("") is False
     assert pnl_ledger.is_hermx_cl_ord_id(None) is False
+
+
+def test_is_hermx_cl_ord_id_hyperliquid_numeric_resolves(ledger_dir, monkeypatch):
+    # A numeric cloid is HermX-issued only if a submit-time mapping exists.
+    import pnl_cloid_map
+    pnl_cloid_map.record_cloid_mapping("mxc-hl-1", "987654321", "hyperliquid")
+    assert pnl_ledger.is_hermx_cl_ord_id("987654321", "hyperliquid") is True
+    # Unmapped numeric cloid -> external.
+    assert pnl_ledger.is_hermx_cl_ord_id("111", "hyperliquid") is False
+    # Numeric cloid without the hyperliquid hint stays external.
+    assert pnl_ledger.is_hermx_cl_ord_id("987654321") is False
 
 
 # --- read -------------------------------------------------------------------
@@ -93,6 +97,79 @@ def test_read_closed_trades_strategy_filter(ledger_dir):
     )
     rows = pnl_ledger.read_closed_trades(strategy_id="beta")
     assert [r["ord_id"] for r in rows] == ["2"]
+
+
+# --- accounting window (Phase 3) --------------------------------------------
+
+def _write_window_rows(ledger_dir):
+    ledger_dir.write_text(
+        json.dumps({"exchange": "okx", "inst_id": "A", "ord_id": "old",
+                    "mode": "demo", "strategy_id": "alpha", "net_realized_pnl": 5.0,
+                    "pnl_gross": 5.0, "fee_cost": 0.0, "closed_at_ms": 100}) + "\n"
+        + json.dumps({"exchange": "okx", "inst_id": "B", "ord_id": "new",
+                      "mode": "demo", "strategy_id": "alpha", "net_realized_pnl": 7.0,
+                      "pnl_gross": 7.0, "fee_cost": 0.0, "closed_at_ms": 300}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_read_accounting_start_drops_older_rows(ledger_dir):
+    _write_window_rows(ledger_dir)
+    rows = pnl_ledger.read_closed_trades(accounting_start_at=200)
+    assert [r["ord_id"] for r in rows] == ["new"]
+
+
+def test_read_accounting_start_none_returns_all(ledger_dir):
+    _write_window_rows(ledger_dir)
+    rows = pnl_ledger.read_closed_trades(accounting_start_at=None)
+    assert [r["ord_id"] for r in rows] == ["old", "new"]
+
+
+def test_read_accounting_start_combines_with_since_ms(ledger_dir):
+    # The stricter (later) of the two floors wins: since_ms=50 + window=250 -> 250.
+    _write_window_rows(ledger_dir)
+    rows = pnl_ledger.read_closed_trades(since_ms=50, accounting_start_at=250)
+    assert [r["ord_id"] for r in rows] == ["new"]
+    # And the reverse ordering: since_ms=250 dominates a looser window.
+    rows2 = pnl_ledger.read_closed_trades(since_ms=250, accounting_start_at=50)
+    assert [r["ord_id"] for r in rows2] == ["new"]
+
+
+def test_net_realized_respects_accounting_start(ledger_dir):
+    _write_window_rows(ledger_dir)
+    assert pnl_ledger.net_realized_for_strategy("alpha") == pytest.approx(12.0)
+    assert pnl_ledger.net_realized_for_strategy(
+        "alpha", accounting_start_at=200
+    ) == pytest.approx(7.0)
+
+
+# --- aggregate_strategy_pnl (Phase 3 contract) ------------------------------
+
+def test_aggregate_respects_accounting_start(ledger_dir):
+    _write_window_rows(ledger_dir)
+    agg = pnl_ledger.aggregate_strategy_pnl(
+        "alpha", budget_usd=1000.0, mode="demo", accounting_start_at=200, open_upl_usd=3.0
+    )
+    assert agg["closed_net_pnl_usd"] == pytest.approx(7.0)
+    assert agg["closed_order_count"] == 1
+    assert agg["open_upl_usd"] == pytest.approx(3.0)
+    assert agg["equity_now_usd"] == pytest.approx(1000.0 + 7.0 + 3.0)
+    assert agg["accounting_start_at"] == 200
+
+
+def test_aggregate_closed_order_count_matches_rows(ledger_dir):
+    _write_window_rows(ledger_dir)
+    agg = pnl_ledger.aggregate_strategy_pnl("alpha", mode="demo")
+    assert agg["closed_order_count"] == 2
+    assert agg["closed_net_pnl_usd"] == pytest.approx(12.0)
+
+
+def test_aggregate_absent_ledger_returns_zeros(ledger_dir):
+    # No ledger file at all -> zeros + budget, never an error.
+    agg = pnl_ledger.aggregate_strategy_pnl("ghost", budget_usd=500.0)
+    assert agg["closed_net_pnl_usd"] == 0.0
+    assert agg["closed_order_count"] == 0
+    assert agg["equity_now_usd"] == pytest.approx(500.0)
 
 
 # --- append / dedupe --------------------------------------------------------
@@ -227,3 +304,30 @@ def test_reconcile_is_idempotent(ledger_dir):
     # Re-running the same snapshot must not double-write.
     assert pnl_ledger.reconcile_from_order_history(rows, "okx", "demo") == 0
     assert len(pnl_ledger.read_closed_trades()) == 1
+
+
+def test_reconcile_attributes_hyperliquid_numeric_cloid(ledger_dir):
+    # Hyperliquid read-back carries a numeric cloid, not the submitted mxc id.
+    # A mapped close is attributed to HermX (and stored with the original mxc id);
+    # an unmapped numeric close is treated as external and skipped.
+    import pnl_cloid_map
+    pnl_cloid_map.record_cloid_mapping("mxc-hl-open", "111000111", "hyperliquid")
+    pnl_cloid_map.record_cloid_mapping("mxc-hl-close", "222000222", "hyperliquid")
+    rows = [
+        {"instId": "BTC", "ordId": "hlOpen", "clOrdId": "111000111",
+         "side": "buy", "accFillSz": 1.0, "reduceOnly": False, "uTime": 100},
+        {"instId": "BTC", "ordId": "hlClose", "clOrdId": "222000222",
+         "side": "sell", "accFillSz": 1.0, "reduceOnly": True,
+         "realized_pnl": 42.0, "uTime": 200},
+        # External close (no submit-time mapping) must be skipped.
+        {"instId": "ETH", "ordId": "extOpen", "clOrdId": "999",
+         "side": "buy", "accFillSz": 1.0, "reduceOnly": False, "uTime": 150},
+        {"instId": "ETH", "ordId": "extClose", "clOrdId": "888",
+         "side": "sell", "accFillSz": 1.0, "reduceOnly": True, "uTime": 250},
+    ]
+    written = pnl_ledger.reconcile_from_order_history(rows, "hyperliquid", "live")
+    assert written == 1
+    ledger = pnl_ledger.read_closed_trades()
+    assert [r["ord_id"] for r in ledger] == ["hlClose"]
+    # The original mxc id is preserved via the submit-time map.
+    assert ledger[0]["cl_ord_id"] == "mxc-hl-close"

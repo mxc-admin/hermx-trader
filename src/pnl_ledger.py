@@ -96,8 +96,14 @@ def _composite_key(row: dict) -> tuple:
     return (row.get("exchange"), row.get("inst_id"), row.get("ord_id"), row.get("mode"))
 
 
-def is_hermx_cl_ord_id(cl_ord_id: str | None) -> bool:
-    """Return True if the client order id was issued by HermX (attribution gate)."""
+def is_hermx_cl_ord_id(cl_ord_id: str | None, exchange_id: str | None = None) -> bool:
+    """Return True if the client order id was issued by HermX (attribution gate).
+
+    Args:
+        cl_ord_id: the client order id from the exchange order history.
+        exchange_id: venue identifier (e.g. "okx", "hyperliquid"); used to enable
+            numeric/hex-cloid resolution on Hyperliquid.
+    """
     if not cl_ord_id:
         return False
     text = str(cl_ord_id)
@@ -107,20 +113,35 @@ def is_hermx_cl_ord_id(cl_ord_id: str | None) -> bool:
     # Operator-initiated close.
     if text.startswith("operator_close_"):
         return True
-    # TODO(Phase 3, Decision 4): Hyperliquid uses numeric cloids — resolve via the
-    # submit-time cloid->clOrdId map instead of a prefix check.
+    # Hyperliquid rewrites the submitted clientOrderId into a numeric/hex cloid, so
+    # the raw ``mxc`` prefix is gone on read-back (Phase 7b). Resolve the cloid
+    # against the submit-time map instead of a prefix check.
+    if str(exchange_id or "").lower() == "hyperliquid" and (text.startswith("0x") or text.isdigit()):
+        from pnl_cloid_map import resolve_cloid
+        return resolve_cloid(text, "hyperliquid") is not None
     return False
 
 
 def read_closed_trades(
-    since_ms: int | None = None, strategy_id: str | None = None
+    since_ms: int | None = None,
+    strategy_id: str | None = None,
+    accounting_start_at: int | None = None,
 ) -> list[dict]:
     """Read ledger entries, oldest-first, tolerant of corrupt/partial lines.
 
     Args:
         since_ms: when set, drop rows whose ``closed_at_ms`` is strictly older.
         strategy_id: when set, keep only rows with a matching ``strategy_id``.
+        accounting_start_at: Phase-3 accounting window (ms). When set, P&L before
+            this instant is "locked" — rows whose ``closed_at_ms`` predates it are
+            dropped so a strategy's clean-window total ignores pre-reset history
+            WITHOUT deleting it from the append-only ledger. Combined with
+            ``since_ms`` by taking the later (stricter) of the two floors.
     """
+    # One lower bound on closed_at_ms: the later of the freshness floor and the
+    # accounting-window floor (both optional). max() of whichever are present.
+    _floors = [v for v in (since_ms, accounting_start_at) if v is not None]
+    effective_since = max(_floors) if _floors else None
     path = _ledger_path()
     if not path.exists():
         return []
@@ -136,9 +157,9 @@ def read_closed_trades(
                 continue  # corrupt-tolerant: skip garbage, never raise
             if not isinstance(row, dict):
                 continue
-            if since_ms is not None:
+            if effective_since is not None:
                 row_ts = row.get("closed_at_ms")
-                if row_ts is not None and row_ts < since_ms:
+                if row_ts is not None and row_ts < effective_since:
                     continue
             if strategy_id is not None and row.get("strategy_id") != strategy_id:
                 continue
@@ -155,15 +176,68 @@ def read_closed_trades(
     return rows
 
 
-def net_realized_for_strategy(strategy_id: str, mode: str | None = None) -> float:
+def net_realized_for_strategy(
+    strategy_id: str,
+    mode: str | None = None,
+    accounting_start_at: int | None = None,
+) -> float:
     """Sum net realized P&L for a strategy (optionally scoped to a mode).
 
     None nets count as zero so a partially-unknown history still sums cleanly.
+    ``accounting_start_at`` (ms) scopes the sum to the clean accounting window
+    (Phase 3): closes before it are excluded but not deleted.
     """
-    rows = read_closed_trades(strategy_id=strategy_id)
+    rows = read_closed_trades(
+        strategy_id=strategy_id, accounting_start_at=accounting_start_at
+    )
     if mode is not None:
         rows = [r for r in rows if r.get("mode") == mode]
     return sum((r.get("net_realized_pnl") or 0.0) for r in rows)
+
+
+def aggregate_strategy_pnl(
+    strategy_id: str,
+    *,
+    budget_usd: float = 0.0,
+    mode: str | None = None,
+    accounting_start_at: int | None = None,
+    open_upl_usd: float = 0.0,
+) -> dict:
+    """The per-strategy P&L contract the API exposes (Phase 3).
+
+    Sums the durable ledger's closed trades — scoped to the strategy, optionally a
+    ``mode`` (demo|live), and the ``accounting_start_at`` clean window — and combines
+    them with the live open UPnL to produce equity. Closed figures survive FLAT and
+    the 100-row exchange history bound (they come from the ledger, not a live read).
+
+    Additive/read-only: never mutates the ledger. Missing ledger -> all-zero, never an
+    error (``test_strategy_pnl_absent_ledger``).
+    """
+    rows = read_closed_trades(
+        strategy_id=strategy_id, accounting_start_at=accounting_start_at
+    )
+    if mode is not None:
+        rows = [r for r in rows if r.get("mode") == mode]
+    closed_net = sum((r.get("net_realized_pnl") or 0.0) for r in rows)
+    closed_realized = sum((_as_float(r.get("pnl_gross")) or 0.0) for r in rows)
+    closed_fees = sum((_as_float(r.get("fee_cost")) or 0.0) for r in rows)
+    # Latest close instant within the window (ms epoch), or None when no rows. The
+    # Phase-4 API contract surfaces it as ``last_close_at_ms`` so the UI can show
+    # "as of" freshness without re-reading the ledger.
+    last_close = max((_row_ts(r) for r in rows), default=0) or None
+    budget = float(budget_usd or 0.0)
+    upl = float(open_upl_usd or 0.0)
+    return {
+        "budget_usd": budget,
+        "closed_realized_pnl_usd": closed_realized,
+        "closed_fees_usd": closed_fees,
+        "closed_net_pnl_usd": closed_net,
+        "open_upl_usd": upl,
+        "equity_now_usd": budget + closed_net + upl,
+        "closed_order_count": len(rows),
+        "last_close_at_ms": last_close,
+        "accounting_start_at": accounting_start_at,
+    }
 
 
 def _load_existing_keys(path: Path) -> set:
@@ -237,6 +311,15 @@ def _build_entry(row: dict, exchange_id: str, mode: str, side: str, filled: floa
         pnl_gross = _as_float(row.get("pnl"))
     fee_cost = _as_float(row.get("fee"))
     cl_ord_id = row.get("clOrdId") or row.get("clientOrderId")
+    # Hyperliquid returns a numeric/hex cloid in place of the submitted mxc id; if
+    # we recorded the mapping at submit time, store the original mxc id (Phase 7b).
+    if str(exchange_id or "").lower() == "hyperliquid" and cl_ord_id:
+        _text = str(cl_ord_id)
+        if _text.startswith("0x") or _text.isdigit():
+            from pnl_cloid_map import resolve_cloid
+            resolved = resolve_cloid(_text, exchange_id)
+            if resolved:
+                cl_ord_id = resolved
     return {
         "schema_version": SCHEMA_VERSION,
         "exchange": exchange_id,
@@ -304,7 +387,7 @@ def reconcile_from_order_history(
             continue
 
         cl_ord_id = row.get("clOrdId") or row.get("clientOrderId")
-        if not is_hermx_cl_ord_id(cl_ord_id):
+        if not is_hermx_cl_ord_id(cl_ord_id, exchange_id):
             continue  # attribution: skip external / venue-native closes
 
         entries.append(_build_entry(row, exchange_id, mode, side, filled))

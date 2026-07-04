@@ -1171,6 +1171,9 @@ def default_control_state() -> dict:
         "pause_reason": "",
         "symbol_pauses": {},
         "strategy_overrides": {},
+        # Phase 3 accounting windows: {strategy_id: {accounting_start_at: ms, set_at}}.
+        # Locks P&L before the timestamp without deleting ledger history.
+        "accounting_windows": {},
         "notes": "Shadow control file. Dashboard/Hermes may read this. Live execution remains disabled here.",
     }
 
@@ -1204,6 +1207,10 @@ def load_control_state() -> dict:
         merged = {k: v for k, v in (default | state).items() if k in default}
         merged["symbol_pauses"] = state.get("symbol_pauses") if isinstance(state.get("symbol_pauses"), dict) else {}
         merged["strategy_overrides"] = state.get("strategy_overrides") if isinstance(state.get("strategy_overrides"), dict) else {}
+        # Phase 3 accounting windows. Preserved explicitly because the ``if k in
+        # default`` merge above would otherwise drop it (same reason symbol_pauses/
+        # strategy_overrides are re-attached from the raw state, not the merge).
+        merged["accounting_windows"] = state.get("accounting_windows") if isinstance(state.get("accounting_windows"), dict) else {}
         # Backward compat: remap legacy override mode labels. "shadow" was the old
         # pause concept (validate+ledger, no orders) -> "pause"; "paper" was the
         # sandbox-submit concept -> "demo"; a stored "pause" stays "pause". Only the
@@ -1298,6 +1305,66 @@ def clear_strategy_override(strategy_id: str) -> bool:
     state["updated_at"] = now_iso()
     save_control_state(state)
     return True
+
+
+def set_accounting_start(strategy_id: str, start_ms: "int | None") -> bool:
+    """Set (or clear) a per-strategy accounting-window start in control-state.json.
+
+    ``start_ms`` is a millisecond epoch: P&L from closes strictly before it is locked
+    out of the strategy's current window (the ledger keeps the rows; the aggregation
+    simply ignores them — see pnl_ledger.read_closed_trades). ``None``/absent clears
+    the window. Additive: mirrors set_strategy_override; leaves strategy_overrides
+    untouched. Returns True on a successful write."""
+    sid = str(strategy_id or "").strip()
+    if not sid:
+        return False
+    if start_ms is None:
+        return clear_accounting_start(sid)
+    try:
+        ts = int(start_ms)
+    except (TypeError, ValueError):
+        return False
+    if ts < 0:
+        return False
+    state = load_control_state()
+    windows = state.get("accounting_windows") if isinstance(state.get("accounting_windows"), dict) else {}
+    windows[sid] = {"accounting_start_at": ts, "set_at": now_iso()}
+    state["accounting_windows"] = windows
+    state["updated_at"] = now_iso()
+    save_control_state(state)
+    return True
+
+
+def clear_accounting_start(strategy_id: str) -> bool:
+    """Remove a strategy's accounting window (revert to the whole-ledger total)."""
+    sid = str(strategy_id or "").strip()
+    if not sid:
+        return False
+    state = load_control_state()
+    windows = state.get("accounting_windows") if isinstance(state.get("accounting_windows"), dict) else {}
+    if sid not in windows:
+        return False
+    windows.pop(sid)
+    state["accounting_windows"] = windows
+    state["updated_at"] = now_iso()
+    save_control_state(state)
+    return True
+
+
+def accounting_start_for(strategy_id: str) -> "int | None":
+    """The strategy's accounting-window start (ms epoch), or None if unset."""
+    sid = str(strategy_id or "").strip()
+    if not sid:
+        return None
+    windows = load_control_state().get("accounting_windows") or {}
+    entry = windows.get(sid)
+    if isinstance(entry, dict):
+        try:
+            v = entry.get("accounting_start_at")
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def _canonical_state_json(state: dict) -> str:
@@ -1805,12 +1872,22 @@ def record_order_state(
 def _order_intent_from_readiness(readiness: dict) -> dict:
     """The minimal, exchange-agnostic intent persisted on each order-journal record."""
     exec_intent = readiness.get("execution_intent") or {}
+    instrument = readiness.get("instrument") or {}
     return {
         "symbol": readiness.get("symbol"),
         "side": readiness.get("signal_side"),
-        "inst_id": readiness.get("inst_id") or (readiness.get("instrument") or {}).get("inst_id"),
+        "inst_id": readiness.get("inst_id") or instrument.get("inst_id"),
         "planned_notional_usd": exec_intent.get("planned_notional_usd"),
         "policy": exec_intent.get("policy"),
+        # Issue #20a: persist the resolved (venue, mode) the order was submitted to so
+        # the order-state reconciler queries the SAME account -- not the global OKX-demo
+        # default. Venue comes from the strategy instrument (strategy_instrument); mode /
+        # simulated_trading are the readiness-resolved effective mode (Phase 0). Orders
+        # journalled before this field existed simply lack it -> reconcile falls back to
+        # the OKX-demo default (unchanged pre-#20a behavior).
+        "venue": instrument.get("exchange"),
+        "mode": readiness.get("execution_mode"),
+        "simulated_trading": readiness.get("simulated_trading"),
     }
 
 
@@ -2125,33 +2202,68 @@ def emit_reconcile_alert(kind: str, detail: dict) -> dict:
     return record
 
 
-def _effective_execution_config() -> dict:
-    """The execution config the write path actually resolves: just the adapter
-    selector (EXEC_BACKEND, which already honors HERMX_EXEC_BACKEND). Submit
-    (ExecutionService via _execution_config) and reconciliation
-    (_reconciliation_executor) BOTH resolve through this, so the backend used to
-    submit an order can never diverge from the backend used to reconcile it. The
-    active CCXT venue + type come from the strategy instrument block at submit time
-    (resolve_execution_config). Reconciliation has no instrument block, so seed the
-    default venue from EXECUTION_DEFAULTS -- otherwise the adapter would see only the
-    "ccxt" backend selector and have no real venue to query."""
-    return {"execution": {"exchange": EXEC_BACKEND, "ccxt_exchange": EXECUTION_DEFAULTS["ccxt_exchange"]}}
+def _effective_execution_config(order_intent: "dict | None" = None) -> dict:
+    """The execution config the write path actually resolves: the adapter selector
+    (EXEC_BACKEND, which already honors HERMX_EXEC_BACKEND) plus the venue+mode to
+    query.
+
+    Issue #20a: the order-state reconciler must query the SAME (venue, mode) the order
+    was submitted to. When an ``order_intent`` (from the order-journal record) is given,
+    its persisted ``venue`` / ``simulated_trading`` override the OKX-demo default so a
+    Bybit-live order is checked on Bybit-live, not OKX-demo. Absent an intent (or a
+    legacy intent without those fields) it falls back to EXECUTION_DEFAULTS'
+    ``ccxt_exchange`` (okx) and leaves ``simulated_trading`` unset -> the adapter
+    defaults to the demo sandbox (the safe pre-#20a fallback)."""
+    exec_cfg = {"exchange": EXEC_BACKEND, "ccxt_exchange": EXECUTION_DEFAULTS["ccxt_exchange"]}
+    if isinstance(order_intent, dict):
+        venue = order_intent.get("venue")
+        if venue:
+            exec_cfg["ccxt_exchange"] = str(venue).strip().lower()
+        simulated = order_intent.get("simulated_trading")
+        if simulated is not None:
+            exec_cfg["simulated_trading"] = bool(simulated)
+    return {"execution": exec_cfg}
 
 
-def _reconciliation_executor():
-    """Build the active venue's read-only query executor, or None if unavailable.
-    Constructed lazily so a missing factory / bad config simply disables
+def _reconciliation_executor(order_intent: "dict | None" = None):
+    """Build the read-only query executor for an order's (venue, mode), or None if
+    unavailable. Constructed lazily so a missing factory / bad config simply disables
     reconciliation rather than crashing the receiver (fail closed to observe-only).
 
-    Uses _effective_execution_config() -- the SAME backend resolution the submit
-    path uses -- so reconcile always queries the venue the order was submitted to."""
+    Uses _effective_execution_config(order_intent) so reconcile always queries the
+    venue+account the order was submitted to (#20a). Called with no argument it yields
+    the OKX-demo default executor -- the pre-#20a global executor and the fallback for
+    orders whose journal record predates venue/mode persistence."""
     if ExecutorFactory is None:
         return None
     try:
-        return ExecutorFactory.create(_effective_execution_config(), ROOT)
+        return ExecutorFactory.create(_effective_execution_config(order_intent), ROOT)
     except Exception as exc:  # pragma: no cover - defensive
         logging.warning("reconciliation executor unavailable: %s", exc)
         return None
+
+
+def _executor_for_order(intent: "dict | None", cache: dict, default_executor):
+    """Resolve the read-only reconcile executor for ONE order from the (venue, mode)
+    persisted on its journal intent (#20a).
+
+    Orders journalled before venue/mode persistence carry neither field -> return the
+    caller's ``default_executor`` (OKX-demo), i.e. unchanged pre-#20a behavior. Built
+    executors are cached by ``(venue, simulated)`` so N orders sharing one account
+    reuse a single authenticated client rather than opening N duplicates."""
+    if not isinstance(intent, dict):
+        return default_executor
+    venue = intent.get("venue")
+    simulated = intent.get("simulated_trading")
+    if not venue and simulated is None:
+        return default_executor  # legacy order: OKX-demo default, unchanged
+    key = (
+        str(venue or EXECUTION_DEFAULTS["ccxt_exchange"]).strip().lower(),
+        True if simulated is None else bool(simulated),
+    )
+    if key not in cache:
+        cache[key] = _reconciliation_executor(intent)
+    return cache[key]
 
 
 def reconcile_startup(executor=None) -> dict:
@@ -2165,11 +2277,17 @@ def reconcile_startup(executor=None) -> dict:
     keeps an (always-empty) ``position_mismatches`` list for backward-compatible shape.
     Returns a summary dict (also useful for tests)."""
     global RECONCILE_STARTUP_COMPLETE, RECONCILE_STARTUP_AT
-    if executor is None:
-        executor = _reconciliation_executor()
-    summary = {"open_orders": [], "position_mismatches": [], "executor_available": executor is not None, "errors": []}
+    # When a caller passes an executor (tests / injected), use it for every order
+    # (unchanged behavior). In production (executor is None) resolve a per-order
+    # executor from each order's persisted (venue, mode) so a Bybit-live order is
+    # checked on Bybit-live, not OKX-demo (#20a). ``default_executor`` is the OKX-demo
+    # fallback for legacy orders that predate venue/mode persistence.
+    explicit_executor = executor is not None
+    default_executor = executor if explicit_executor else _reconciliation_executor()
+    _exec_cache: dict = {}
+    summary = {"open_orders": [], "position_mismatches": [], "executor_available": default_executor is not None, "errors": []}
 
-    if executor is not None:
+    if default_executor is not None:
         try:
             open_orders = load_open_orders()
         except Exception as exc:  # pragma: no cover - tolerant
@@ -2180,8 +2298,12 @@ def reconcile_startup(executor=None) -> dict:
             cur_state = rec.get("state")
             intent = rec.get("intent") or {}
             lookup = {"inst_id": intent.get("inst_id"), "cl_ord_id": cl}
+            order_executor = default_executor if explicit_executor else _executor_for_order(intent, _exec_cache, default_executor)
+            if order_executor is None:
+                summary["errors"].append(f"executor_unavailable[{cl}]")
+                continue
             try:
-                outcome = reconcile_order_once(executor, lookup)
+                outcome = reconcile_order_once(order_executor, lookup)
             except Exception as exc:  # pragma: no cover - tolerant
                 summary["errors"].append(f"reconcile_order_once[{cl}]: {exc}")
                 continue
@@ -2334,8 +2456,12 @@ def resolve_unknown_orders_once(executor=None, *, now_ts: "str | None" = None, m
     Re-runs reconciliation until terminal or per-order timeout budget expiry. On
     budget expiry emits alerts and persists a per-symbol pause artifact.
     """
-    if executor is None:
-        executor = _reconciliation_executor()
+    # Per-order (venue, mode) executor resolution mirrors reconcile_startup (#20a): an
+    # explicitly-passed executor is used for every order; otherwise each order is checked
+    # on the account it was submitted to, with default_executor as the OKX-demo fallback.
+    explicit_executor = executor is not None
+    default_executor = executor if explicit_executor else _reconciliation_executor()
+    _exec_cache: dict = {}
     summary = {
         "checked": 0,
         "resolved": 0,
@@ -2344,9 +2470,9 @@ def resolve_unknown_orders_once(executor=None, *, now_ts: "str | None" = None, m
         "never_submitted": 0,
         "paused_symbols": [],
         "errors": [],
-        "executor_available": executor is not None,
+        "executor_available": default_executor is not None,
     }
-    if executor is None:
+    if default_executor is None:
         return summary
 
     limit = max_orders if max_orders is not None else UNKNOWN_RESOLVER_MAX_ORDERS_PER_TICK
@@ -2366,9 +2492,13 @@ def resolve_unknown_orders_once(executor=None, *, now_ts: "str | None" = None, m
         # reset the lifecycle clock. Falls back to the latest ts if origin is missing.
         age_seconds = _order_age_seconds({"ts": rec.get("origin_ts") or rec.get("ts")}, now_ts=now_ts)
         lookup = {"inst_id": intent.get("inst_id"), "cl_ord_id": cl_ord_id}
+        order_executor = default_executor if explicit_executor else _executor_for_order(intent, _exec_cache, default_executor)
+        if order_executor is None:
+            summary["errors"].append(f"executor_unavailable[{cl_ord_id}]")
+            continue
 
         if cur_state == ORDER_STATE_PLANNED:
-            _resolve_planned_orphan(executor, rec, lookup, age_seconds, summary)
+            _resolve_planned_orphan(order_executor, rec, lookup, age_seconds, summary)
             continue
 
         if age_seconds is not None and age_seconds > UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS:
@@ -2414,7 +2544,7 @@ def resolve_unknown_orders_once(executor=None, *, now_ts: "str | None" = None, m
             continue
 
         try:
-            outcome = reconcile_order_with_backoff(executor, lookup)
+            outcome = reconcile_order_with_backoff(order_executor, lookup)
         except Exception as exc:  # pragma: no cover - defensive
             summary["errors"].append(f"reconcile[{cl_ord_id}]: {exc}")
             emit_operator_alert(

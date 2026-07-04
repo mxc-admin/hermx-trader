@@ -12,11 +12,7 @@ from unittest import mock
 
 import webhook_receiver as wr
 
-
-def _armed_config() -> dict:
-    # Phase A: no config arming flags. The per-strategy submit flag (surfaced as
-    # readiness.live_execution_enabled) plus auth + watchdog health is the whole gate.
-    return {"execution": {"exchange": "ccxt"}}
+from conftest import adapter_result, fake_executor
 
 
 def _record(*, live_execution_enabled=True, auth_healthy=True):
@@ -35,22 +31,8 @@ def _record(*, live_execution_enabled=True, auth_healthy=True):
     }
 
 
-def _adapter_ok() -> dict:
-    """A normalized successful adapter result (BaseExecutor.normalized_result shape)."""
-    return {
-        "ok": True,
-        "mode": "submit_enabled",
-        "exchange": "ccxt",
-        "elapsed_ms": 5,
-        "fill_summary": {"status": "submitted", "order_id": "ord-1", "client_order_id": "cid"},
-        "payload": {"symbol": "XRP/USDT:USDT"},
-    }
-
-
 def _fake_executor():
-    fake = mock.Mock()
-    fake.execute = mock.Mock(return_value=_adapter_ok())
-    return fake
+    return fake_executor(adapter_result(client_order_id="cid", payload={"symbol": "XRP/USDT:USDT"}))
 
 
 def test_any_gate_false_means_not_submitted(monkeypatch):

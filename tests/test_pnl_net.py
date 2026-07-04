@@ -14,12 +14,6 @@ import pytest
 import pnl_ledger
 
 
-@pytest.fixture
-def ledger_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMX_DATA_DIR", str(tmp_path))
-    return tmp_path / "closed-trades.jsonl"
-
-
 # --- _compute_net_realized --------------------------------------------------
 
 def test_compute_net_default_gross():

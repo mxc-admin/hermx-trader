@@ -34,12 +34,11 @@ import http.client
 import importlib
 import json
 import os
-import threading
-from contextlib import contextmanager
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+
+from conftest import serve_dashboard as _serve
 
 
 
@@ -361,20 +360,6 @@ def dash(tmp_path):
             os.environ.pop("HERMX_SECRET", None)
 
 
-@contextmanager
-def _serve(dash_mod):
-    """Run the dashboard Handler on an ephemeral loopback port for one test."""
-    server = ThreadingHTTPServer(("127.0.0.1", 0), dash_mod.Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield server.server_address[1]
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
-
-
 def _request(port, method, path, *, token="test-secret", body=None):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     headers = {}
@@ -516,3 +501,150 @@ def test_api_payload_remaps_legacy_shadow_override_to_pause(dash):
     row = next(s for s in payload["strategies"] if s["strategy_id"] == "dash-demo")
     assert row["effective_mode"] == "pause"
     assert payload["strategy_overrides"]["dash-demo"]["mode"] == "pause"
+
+
+# ===========================================================================
+# Section 4 — Phase 3 accounting windows (receiver storage + helpers)
+# ===========================================================================
+
+def test_set_accounting_start_roundtrip(wr):
+    assert wr.set_accounting_start("strat-A", 1704067200000) is True
+    entry = _read_control_state(wr)["accounting_windows"]["strat-A"]
+    assert entry["accounting_start_at"] == 1704067200000
+    assert "set_at" in entry
+    assert wr.accounting_start_for("strat-A") == 1704067200000
+
+
+def test_set_accounting_start_none_clears(wr):
+    wr.set_accounting_start("strat-A", 1704067200000)
+    # None clears the window (delegates to clear_accounting_start).
+    assert wr.set_accounting_start("strat-A", None) is True
+    assert "strat-A" not in _read_control_state(wr).get("accounting_windows", {})
+    assert wr.accounting_start_for("strat-A") is None
+
+
+def test_clear_accounting_start(wr):
+    wr.set_accounting_start("strat-A", 999)
+    assert wr.clear_accounting_start("strat-A") is True
+    assert wr.clear_accounting_start("strat-A") is False  # idempotent no-op
+    assert wr.accounting_start_for("strat-A") is None
+
+
+def test_set_accounting_start_invalid_rejected(wr):
+    assert wr.set_accounting_start("", 100) is False
+    assert wr.set_accounting_start("strat-A", "not-an-int") is False
+    assert wr.set_accounting_start("strat-A", -5) is False
+    assert not wr.CONTROL_STATE_FILE.exists() or \
+        "strat-A" not in _read_control_state(wr).get("accounting_windows", {})
+
+
+def test_accounting_windows_does_not_disturb_overrides(wr):
+    # Accounting window is additive: setting it leaves strategy_overrides intact.
+    wr.set_strategy_override("strat-A", "live")
+    wr.set_accounting_start("strat-A", 500)
+    state = _read_control_state(wr)
+    assert state["strategy_overrides"]["strat-A"]["mode"] == "live"
+    assert state["accounting_windows"]["strat-A"]["accounting_start_at"] == 500
+
+
+def test_load_control_state_preserves_accounting_windows(wr):
+    # Regression: load_control_state()'s "keep only default keys" merge must NOT drop
+    # accounting_windows (it is re-attached explicitly, like strategy_overrides).
+    state = wr.default_control_state()
+    state["accounting_windows"] = {"strat-A": {"accounting_start_at": 42, "set_at": "x"}}
+    wr.CONTROL_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+    loaded = wr.load_control_state()
+    assert loaded["accounting_windows"]["strat-A"]["accounting_start_at"] == 42
+
+
+def test_load_control_state_coerces_malformed_accounting_windows(wr):
+    state = wr.default_control_state()
+    state["accounting_windows"] = "bad"  # not a dict
+    wr.CONTROL_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+    assert wr.load_control_state()["accounting_windows"] == {}
+
+
+# ===========================================================================
+# Section 5 — Phase 3 accounting windows (dashboard endpoint + api_payload)
+# ===========================================================================
+
+def test_post_sets_accounting_start_at(dash):
+    dash_mod, _strategies_dir, _root = dash
+    with _serve(dash_mod) as port:
+        status, data = _request(port, "POST", "/api/control/strategy/dash-demo",
+                                 body={"accounting_start_at": 1704067200000})
+    assert status == 200
+    assert json.loads(data)["accounting_start_at"] == 1704067200000
+    windows = dash_mod._load_control_state()["accounting_windows"]
+    assert windows["dash-demo"]["accounting_start_at"] == 1704067200000
+
+
+def test_post_accounting_start_null_clears(dash):
+    dash_mod, _strategies_dir, _root = dash
+    dash_mod._set_accounting_start("dash-demo", 500)
+    with _serve(dash_mod) as port:
+        status, data = _request(port, "POST", "/api/control/strategy/dash-demo",
+                                 body={"accounting_start_at": None})
+    assert status == 200
+    assert json.loads(data)["accounting_start_at"] is None
+    assert "dash-demo" not in dash_mod._load_control_state().get("accounting_windows", {})
+
+
+def test_post_mode_and_accounting_together(dash):
+    dash_mod, _strategies_dir, _root = dash
+    with _serve(dash_mod) as port:
+        status, data = _request(port, "POST", "/api/control/strategy/dash-demo",
+                                 body={"mode": "live", "accounting_start_at": 123})
+    assert status == 200
+    resp = json.loads(data)
+    assert resp["mode"] == "live"
+    assert resp["accounting_start_at"] == 123
+    state = dash_mod._load_control_state()
+    assert state["strategy_overrides"]["dash-demo"]["mode"] == "live"
+    assert state["accounting_windows"]["dash-demo"]["accounting_start_at"] == 123
+
+
+def test_post_accounting_start_invalid_returns_400(dash):
+    dash_mod, _strategies_dir, _root = dash
+    with _serve(dash_mod) as port:
+        status, _ = _request(port, "POST", "/api/control/strategy/dash-demo",
+                             body={"accounting_start_at": "nope"})
+    assert status == 400
+    assert dash_mod._load_control_state().get("accounting_windows", {}) == {}
+
+
+def test_post_accounting_start_rejects_bool(dash):
+    # bool is an int subclass; a JSON `true` must not be accepted as an epoch.
+    dash_mod, _strategies_dir, _root = dash
+    with _serve(dash_mod) as port:
+        status, _ = _request(port, "POST", "/api/control/strategy/dash-demo",
+                             body={"accounting_start_at": True})
+    assert status == 400
+
+
+def test_delete_leaves_accounting_window(dash):
+    # DELETE clears the mode override only; the accounting window is orthogonal.
+    dash_mod, _strategies_dir, _root = dash
+    dash_mod._set_strategy_override("dash-demo", "live")
+    dash_mod._set_accounting_start("dash-demo", 777)
+    with _serve(dash_mod) as port:
+        status, _ = _request(port, "DELETE", "/api/control/strategy/dash-demo")
+    assert status == 200
+    state = dash_mod._load_control_state()
+    assert "dash-demo" not in state.get("strategy_overrides", {})
+    assert state["accounting_windows"]["dash-demo"]["accounting_start_at"] == 777
+
+
+def test_api_payload_exposes_accounting_start_and_strategy_pnl(dash):
+    dash_mod, _strategies_dir, _root = dash
+    dash_mod._set_accounting_start("dash-demo", 1704067200000)
+    _bust(dash_mod)
+    payload = dash_mod.api_payload()
+    row = next(s for s in payload["strategies"] if s["strategy_id"] == "dash-demo")
+    assert row["accounting_start_at"] == 1704067200000
+    pnl = row["strategy_pnl"]
+    # No ledger rows in the offline fixture -> zeros, budget passthrough, no error.
+    assert pnl["closed_order_count"] == 0
+    assert pnl["accounting_start_at"] == 1704067200000
+    assert pnl["budget_usd"] == 1500  # from the STRATEGY_TEMPLATE budget
+    assert payload["accounting_windows"]["dash-demo"]["accounting_start_at"] == 1704067200000

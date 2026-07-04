@@ -15,26 +15,13 @@ from __future__ import annotations
 import base64
 import json
 import queue
-import threading
 from http.client import HTTPConnection
-from http.server import HTTPServer
 
 import dashboard as dash
 
+from conftest import _serve, _stop
+
 RECEIVED_AT = "2026-06-22T00:00:00Z"
-
-
-def _serve(handler_cls):
-    server = HTTPServer(("127.0.0.1", 0), handler_cls)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, thread
-
-
-def _stop(server, thread):
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=2)
 
 
 def _post(port: int, path: str, payload: dict, headers: dict | None = None):

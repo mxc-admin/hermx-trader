@@ -1,6 +1,6 @@
 # P&L & Dashboard Accounting — Master Plan
 
-> **Status:** in progress. **Phase 0 (demo/live account separation) is shipped** — `HERMX_LIVE_TRADING` kill-switch gating and mode-aware snapshot resolution are live in `dashboard.py`/`ccxt_adapter.py`. Phases 1–7 are plan-only. Author: accounting-correctness consolidation, 2026-07-03.
+> **Status:** in progress. **Phases 0–2 shipped; Phase 3 shipped (accounting windows + receiver reconciler #20a).** `HERMX_LIVE_TRADING` kill-switch gating and venue×mode-aware snapshot/reconcile resolution are live in `dashboard.py`/`ccxt_adapter.py`/`webhook_receiver.py`; the durable ledger (`pnl_ledger.py`), fee-correct net (Phase 2), per-strategy `accounting_start_at` clean windows, the `strategy_pnl`/`aggregate_strategy_pnl` contract, and the venue/mode-threaded order-state reconciler (#20a) are implemented. Phase 0 shipped the **mode** half of environment separation; the **venue** half (venue-aware executor/snapshot resolution) shipped as **Phase 0.5**. **Phase 4 (React parity) and Phases 5–7 remain plan-only.** Author: accounting-correctness consolidation, 2026-07-03.
 > **Supersedes:** `PNL_ACCOUNTING_EXECUTION_PLAN.md` and `CCXT_VENUE_NEUTRALITY_VALIDATION.md` as the single source of truth. Those remain as source material; this document is authoritative where they disagree.
 > **Scope:** durable closed P&L, fee-correct net, accounting window, demo/live separation, venue-neutral normalization, React↔Python contract, dynamic budget, external-order attribution.
 
@@ -10,7 +10,7 @@ This is the definitive reference for the P&L/dashboard accounting work. All find
 
 ## Section 1 — Issue Registry
 
-19 verified issues, ranked by severity. Each fix references these numbers in Section 4.
+20 verified issues, ranked by severity. Each fix references these numbers in Section 4. (#20 added 2026-07-03: reads/reconcile feed hard-wired to OKX-demo — an **environment collapse** where every read targets a global `(okx, demo)` account instead of each strategy's own `(venue, mode)`. It is the ledger-feed residual of #2 that Phase 0 did **not** close, plus the wrong-venue dimension #2 never covered; its venue half is fixed by the new **Phase 0.5**.)
 
 | # | Severity | Issue | Impact | Current workaround | Reference |
 |---|----------|-------|--------|--------------------|-----------|
@@ -25,12 +25,13 @@ This is the definitive reference for the P&L/dashboard accounting work. All find
 | **15** | **HIGH** | **Hyperliquid `clOrdId` hashing breaks attribution.** Hyperliquid rejects arbitrary client order ids; the adapter hashes HermX `mxc…` into the venue's numeric `cloid`. `startswith("mxc")` attribution fails on the venue-returned order. | HermX closes on Hyperliquid are misclassified as external → excluded from strategy P&L. | OKX-only deployment. | `webhook_receiver.py:707-709`; CCXT `hyperliquid.py` cloid path |
 | **16** | **HIGH** | **Reduce-only gate is derivatives-only.** Coinbase/spot venues return `reduceOnly=None` (CCXT `coinbase.py:3204`), so a reconcile filter of "row is reduce-only" drops **every** spot close. | On any spot venue, no closes are ever reconciled into the ledger. | Derivatives-only deployment. | CCXT `coinbase.py:3204` |
 | **17** | **HIGH** | **No `cl_ord_id`-based P&L attribution.** `enrich_close_rows_with_okx_history` matches by `instId` + `side` + `reduceOnly` + time-delta. An external/manual order coincident in time can be bound to a HermX close. | Manual trades can be miscredited to a strategy, corrupting its P&L. | Don't trade manually on the same symbol. | `enrich_close_rows_with_okx_history`, `dashboard.py:913` |
-| **6** | **MEDIUM** | **No accounting start / clean window.** No `accounting_start_at` anywhere. Old exchange history contaminates new dashboard state. | Numbers include pre-HermX or pre-reset history with no way to zero a strategy. | None. | (absent) |
+| **6** | **MEDIUM** _(RESOLVED 2026-07-03, Phase 3)_ | **No accounting start / clean window.** ~~No `accounting_start_at` anywhere.~~ Now stored per-strategy in `control-state.json` (`accounting_windows`), filtered in `read_closed_trades`/`aggregate_strategy_pnl`, and set via `POST /api/control/strategy/{id}`. | Numbers include pre-HermX or pre-reset history with no way to zero a strategy. | None. | `control-state.json` `accounting_windows`; `pnl_ledger.read_closed_trades` |
 | **9** | **MEDIUM** | **`pipeline.jsonl` bounded to 500 events.** `SIGNALS_MAX_N = 500`. Not a lifetime ledger. | Cannot be used as the durable P&L source; silently truncates. | None. | `SIGNALS_MAX_N` |
 | **12** | **MEDIUM** | **`info.get("reduceOnly")` is OKX-only.** CCXT unifies `reduceOnly` at top-level (`safe_order:4422`), but `ccxt_adapter.py:831` still reads `info.get("reduceOnly")`. Works on OKX only because OKX's raw key coincidentally matches (and is a string `'true'`/`'false'`). | Reduce-only detection is fragile/venue-coincidental; downstream truthiness must handle the `"false"` string. | OKX-only deployment. | `ccxt_adapter.py:831`; CCXT base `4422` |
 | **13** | **MEDIUM** | **Position `realizedPnl` unified only on OKX/Bybit; adapter surfaces only the *raw* OKX value.** Only OKX (`okx.py:5969`) and Bybit (`bybit.py:6493`) set `realizedPnl` in `parse_position`; Binance/Hyperliquid don't. `health()` **does** now surface it, but from the raw OKX blob — `realizedPnl: info.get("realizedPnl")` (`ccxt_adapter.py:925`) — which is OKX-only and not the CCXT-unified `row.get("realizedPnl")`. `get_positions()` still maps only `unrealizedPnl → upl` (`ccxt_adapter.py:872`). | The Phase-2 empirical fee check is executable today on OKX (raw `realizedPnl` is already surfaced) but venue-fragile; a portable check needs the unified read. Phase 1(c) is an **upgrade** (raw→unified + add to `get_positions()`), not net-new. | None. | `ccxt_adapter.py:872` (`get_positions`), `:925` (`health`) |
 | **14** | **MEDIUM** | **`fetch_positions_history` only OKX + Bybit.** Binance/Hyperliquid/Coinbase do not implement it. Not a portable primitive. | Cannot build the ledger's realized-P&L path on it. | N/A (informs design). | CCXT `okx.py`, `bybit.py:8486` |
-| **19** | **MEDIUM** | **Writable-mount + env-driven path requirement.** The ledger and `control-state.json` both resolve under `HERMX_DATA_DIR` (defaults to `HERMX_ROOT`, which itself falls back to `SHADOW_ROOT` then repo root). In production `HERMX_DATA_DIR=/app/data` on the `hermx-state:/app/data` rw mount, which must be writable even with `read_only: true` on root fs; otherwise writes fail silently. New `closed-trades.jsonl` inherits both the path resolution and the mount requirement. | Accounting-window resets and the ledger silently fail to persist if the mount is missing or `HERMX_DATA_DIR` points off the rw mount. | Ensure compose mounts `hermx-state`; leave `HERMX_DATA_DIR` at its `/app/data` default. | code-quality memory; `dashboard.py:56` (`HERMX_DATA_DIR`), `webhook_receiver.py:133,139`, `dashboard.py:2497-2518` |
+| **19** | **MEDIUM** | **Writable-mount + env-driven path requirement.** The ledger and `control-state.json` both resolve under `HERMX_DATA_DIR` (defaults to `HERMX_ROOT`, which itself falls back to the repo root). In production `HERMX_DATA_DIR=/app/data` on the `hermx-state:/app/data` rw mount, which must be writable even with `read_only: true` on root fs; otherwise writes fail silently. New `closed-trades.jsonl` inherits both the path resolution and the mount requirement. | Accounting-window resets and the ledger silently fail to persist if the mount is missing or `HERMX_DATA_DIR` points off the rw mount. | Ensure compose mounts `hermx-state`; leave `HERMX_DATA_DIR` at its `/app/data` default. | code-quality memory; `dashboard.py:56` (`HERMX_DATA_DIR`), `webhook_receiver.py:133,139`, `dashboard.py:2497-2518` |
+| **20** | **HIGH** _(20a RESOLVED 2026-07-03, Phase 3)_ | **Reconcile/read feed is hard-wired to OKX-demo (wrong-account + wrong-venue).** The root cause is an **environment collapse**: every read/reconcile targets a single global `(okx, demo)` account instead of each strategy's own `(venue, mode)`. Three inherit points: **(a)** the receiver's order-state reconciler — `_effective_execution_config()` (`webhook_receiver.py:2128-2138`) seeds `ccxt_exchange = EXECUTION_DEFAULTS["ccxt_exchange"] = "okx"` unconditionally and never sets `simulated_trading`, so the adapter defaults `True` → OKX demo sandbox for **every** order regardless of the strategy's live mode or actual venue (even though the submit path already resolves per-order venue+mode in `build_strategy_execution_readiness`, `:1356-1390`). **(b)** the dashboard executor — `_dashboard_executor()` pins `ccxt_exchange="okx"` unconditionally (`dashboard.py:695-696`), so even the mode-aware positions read is single-venue. **(c)** the P&L-ledger feed — `okx_order_history_snapshot()` calls `_dashboard_executor(config)` (defaults demo) then `reconcile_from_order_history(rows, "okx", "demo")` with **literal** venue/mode (`dashboard.py:819`). Phase 0 made `okx_live_snapshot` (positions) *mode*-aware but neither *venue*-aware nor the order-history feed mode-aware. `pnl_ledger.reconcile_from_order_history` is venue/mode-parametric and its dedupe key already carries `(exchange,…,mode)` — the ledger is correct; the defect is entirely the upstream feeds. **Fix locus:** Phase 0.5 (venue-aware `(venue,mode)` snapshots + the `_dashboard_executor` OKX-pin), Phase 1 (the `dashboard.py:819` literal → the snapshot's actual `(venue,mode)`), Phase 3 (receiver reconciler `_effective_execution_config` per-order venue/mode). | Live OKX closes and all non-OKX (Bybit/Binance/HL) closes are **never** reconciled into the ledger; a Bybit order checked by the receiver reconciler is queried on OKX → not-found → stuck UNKNOWN forever. If the snapshot is later made mode-aware without updating the literals, live rows get stamped `mode="demo"` → mis-attribution. | Demo-only, OKX-only deployment (current posture). | `webhook_receiver.py:2128-2138`, `dashboard.py:695-696,819`; adapter default `ccxt_adapter.py:222,282` |
 | **7** | **LOW** | **`reinvest` flag is dead.** Present in `capital.reinvest: true` and `types.ts:25`, never read in business logic. | Operators may believe reinvestment is on; it does nothing. | None. | `strategies/*.json`, `types.ts:25` |
 | **18** | **LOW** | **`budget_usd` lives in strategy config JSON.** `capital.budget_usd` in `strategies/*.json` mixes accounting state into strategy definition. | Strategy config is polluted with mutable accounting state; hard to reset without editing strategy files. | Edit the strategy JSON. | `strategies/*.json` |
 
@@ -51,7 +52,7 @@ The dashboard was built to **render live venue state, not to keep books.** Every
 Invariants any fix must preserve. The first six were established in review; the last three were discovered during CCXT validation and mount analysis.
 
 1. **Venue neutrality.** The ledger must not depend on OKX-specific `info` blobs. The adapter normalizes each venue's realized-P&L representation into a common field; the ledger consumes only unified/normalized fields. Raw `info.*` is a fallback, never the primary source. (Drives fixes for #11, #12, #13, #14, #16.)
-2. **Mode separation.** Demo and live P&L are tracked separately. A strategy toggled demo→live starts with zero live P&L. The dashboard must read the account that matches the strategy's mode. (Drives #2, #3.)
+2. **Environment separation (venue × mode).** Each strategy has exactly one *environment* = its venue (from the strategy instrument) × its mode (`demo`|`live`). Every read (positions, order history) and every reconcile for a strategy targets **that** environment's account; results are namespaced by `(venue, mode)` and never mixed. A strategy toggled demo→live starts with zero live P&L; a KuCoin strategy never reads OKX. The isolation key is `(venue, mode)`, **not** `strategy_id` — strategies sharing an environment share one account/read. The ledger dedupe key already carries both dimensions: `(exchange, inst_id, ord_id, mode)`. Phase 0 shipped the *mode* half (mode-aware account reads); Phase 0.5 adds the *venue* half (venue-aware executor/snapshot resolution). (Drives #2, #3, #20.)
 3. **Append-only durability.** The ledger is WAL-style, deduped by `ordId`, never rewritten. It mirrors the repo idiom (`raw-webhooks.jsonl`, `signals.jsonl`): durable append, dedupe on a collision-safe key, replay-safe under `Restart=always`. (Drives #10, #8, #9.)
 4. **Backward compatibility.** Existing cards keep working during migration. New fields are additive; no served field changes shape until a renderer is deliberately switched over.
 5. **Fail-closed.** A missing field (e.g. `pnl=None` on an unsupported venue, `reduceOnly=None` on spot) must not crash or produce a wrong number. Log and degrade gracefully; never silently emit $0 as if it were real. (Directly targets the #11 silent-$0 trap and #16 spot drop.)
@@ -65,7 +66,7 @@ Invariants any fix must preserve. The first six were established in review; the 
 
 ## Section 4 — Execution Plan
 
-Revised and re-numbered from the source plan to fold in demo/live separation (now Phase 0, a new prerequisite), venue-neutral adapter normalization, Hyperliquid `closedPnl`, Bybit `fetch_positions_history`, and spot close-detection. Each phase touches ≤3 source files (test files are additive, not counted). Phases 0–4 are the minimal viable path; each is independently committable.
+Revised and re-numbered from the source plan to fold in demo/live separation (Phase 0), **venue-aware read/reconcile resolution (Phase 0.5 — the venue half of environment separation)**, venue-neutral adapter normalization, Hyperliquid `closedPnl`, Bybit `fetch_positions_history`, and spot close-detection. Each phase touches ≤3 source files (test files are additive, not counted). Phases 0–4 are the minimal viable path; each is independently committable.
 
 **Foundations that span phases:**
 - **Attribution key.** Signal closes: `clOrdId = "mxc" + sha256(...)` (`webhook_receiver.py:707-709`). Operator closes: `operator_close_<symbol>_<strategy_id>_<UTCday>` (`webhook_receiver.py:2571-2577`). Anything else = external/manual. `ordId` = durable dedupe key.
@@ -79,7 +80,13 @@ Revised and re-numbered from the source plan to fold in demo/live separation (no
 
 **Goal.** Make the dashboard read the account that matches each strategy's mode, and namespace all P&L state by mode so live and demo never mix. Without this, every later phase records numbers from the wrong account.
 
-**Status.** Shipped. The mode-aware snapshot resolution and the `HERMX_LIVE_TRADING` gate are live: `okx_live_snapshot()` fail-closes to demo unless the global `HERMX_LIVE_TRADING` kill switch is armed (`dashboard.py:729-734`), and the live snapshot is requested only when at least one strategy is effectively live (`dashboard.py:1241-1251`). `ccxt_adapter.py` refuses live submission without `HERMX_LIVE_TRADING=true` (`:264-271`). Paths resolve via `HERMX_ROOT` (→ `SHADOW_ROOT` fallback) and `HERMX_DATA_DIR`.
+**Status.** Shipped. The mode-aware snapshot resolution and the `HERMX_LIVE_TRADING` gate are live: `okx_live_snapshot()` fail-closes to demo unless the global `HERMX_LIVE_TRADING` kill switch is armed (`dashboard.py:729-734`), and the live snapshot is requested only when at least one strategy is effectively live (`dashboard.py:1241-1251`). `ccxt_adapter.py` refuses live submission without `HERMX_LIVE_TRADING=true` (`:264-271`). Paths resolve via `HERMX_ROOT` (→ repo-root fallback) and `HERMX_DATA_DIR`.
+
+**Shipped implementation (verified against code):**
+- `_dashboard_executor(config, simulated_trading=True)` (`dashboard.py:697`) accepts a mode param instead of defaulting the adapter to sandbox; the sandbox flag is resolved from the strategy's effective mode.
+- `okx_live_snapshot()` (`dashboard.py:725`) keys its cache per-mode — `snapshot:demo` / `snapshot:live` via `f"snapshot:{mode_key}"` (`:741`, where `mode_key = "demo" if simulated else "live"`, `:727`) — so demo and live reads never share a cache slot.
+- `strategy_card` (`dashboard.py:1609`) picks the snapshot matching each strategy's `effective_mode` via `_snapshot_for_mode(okx_live_by_mode, mode)` (`:805`, called at `:1620`).
+- `HERMX_LIVE_TRADING` fail-closed gate: a live snapshot requested while the kill switch is disarmed degrades to the demo read with a logged warning (`dashboard.py:732-738`) — never a connect error, never a silent wrong-account read.
 
 **Files changed.**
 - `src/dashboard.py` — `_dashboard_executor()` (`697-716`) resolves `simulated_trading` from the strategy's effective mode (via `strategy_overrides` / `control-state.json`) instead of defaulting to `True`. Snapshot path consults mode so live strategies read the live account; the live read is additionally gated by the global `HERMX_LIVE_TRADING` kill switch (fail-closed to demo when disarmed).
@@ -90,9 +97,37 @@ Revised and re-numbered from the source plan to fold in demo/live separation (no
 
 **Rollback safety.** Revert the resolution logic → adapter falls back to sandbox default (today's behavior). No stored data.
 
-**Known limitations.** Ledger mode-namespacing is fixed as a **mandatory `mode` column** on a single `closed-trades.jsonl` (Foundations; Open Decision 7 resolved), decided at write time from the Phase-0 effective mode and consumed starting Phase 1. Single venue account assumed per mode.
+**Known limitations.** Ledger mode-namespacing is fixed as a **mandatory `mode` column** on a single `closed-trades.jsonl` (Foundations; Open Decision 7 resolved), decided at write time from the Phase-0 effective mode and consumed starting Phase 1. **Venue-deferred:** Phase 0 resolves *mode* only; the executor is still pinned to OKX (`_dashboard_executor` `:695-696`), so reads for a non-OKX strategy would hit the wrong venue. Correct for the current single-venue posture; the venue half is **Phase 0.5** (below). This is the disclosed gap, not a regression.
 
 **Fixes:** #2, #3 (and unblocks correct data for all later phases).
+
+---
+
+### PHASE 0.5 — Venue-aware executor & snapshot resolution (prerequisite; the venue half of Phase 0)
+
+**Goal.** Generalize Phase 0's mode-aware reads to be *venue*-aware, so a strategy on any venue (KuCoin, Bybit, Binance, …) reads **its** venue's account, not a hard-pinned OKX. Phase 0 keyed reads by `mode`; this keys them by the full environment `(venue, mode)` (Principle 2).
+
+**Why a separate phase, not a Phase 0 reopen.** Phase 0 correctly shipped mode separation for the current single-venue posture and *honestly deferred* venue in its own Known Limitations. This phase closes that gap and nothing else. It is a pure read/resolution change — **no ledger/schema change** (the dedupe key `(exchange, inst_id, ord_id, mode)` already carries venue) and **no new state**.
+
+**Executor granularity — global per-`(venue, mode)`, not per-strategy.** An executor is one authenticated CCXT client to one account; the account is identified by `(venue, mode)`, not by strategy. Two strategies both on OKX-live share one account and one positions/order-history read. So: enumerate the **distinct** `(venue, mode)` pairs across the strategy set, build one executor + one snapshot per pair, and have each strategy card pick the snapshot for **its** pair. This is `_snapshot_for_mode` generalized from a 1-D mode key to a 2-D `(venue, mode)` key. Per-strategy executors are **rejected**: they open N duplicate clients to the same account and multiply rate-limit usage.
+
+**Files changed.**
+- `src/dashboard.py` —
+  - `_dashboard_executor(config, simulated_trading=True)`: stop unconditionally pinning `ccxt_exchange="okx"` (`695-696`). Resolve the venue from the (per-strategy) config's instrument; keep `okx` only as the *global default* when no venue is resolvable (matching `HERMX_CCXT_EXCHANGE`).
+  - `okx_live_snapshot` → per-environment read: cache key `f"snapshot:{venue}:{mode}"` (extends the current `snapshot:{mode}`, `:725`). Build the executor for `(venue, mode)`.
+  - `okx_order_history_snapshot` → same generalization (it is **misnamed** — it is the ledger feed for whatever venue/mode is queried, not an OKX-specific read).
+  - `_snapshot_for_mode` → `_snapshot_for_env(by_env, venue, mode)`: pick by `(venue, mode)`, fall back to demo-of-same-venue, then empty (never raise).
+  - `dashboard_model()`: enumerate distinct `(venue, mode)` pairs from the strategy set and build one snapshot per pair (replacing the fixed `okx_live_demo` / `okx_live_live` pair at `1243-1244`); each `strategy_card` selects its own pair.
+
+**Rename note.** `okx_live_snapshot` / `okx_order_history_snapshot` are OKX-shaped names for now-venue-generic functions → `venue_live_snapshot` / `venue_order_history_snapshot` (keep old names as thin aliases for one release to avoid a wide rename in one commit).
+
+**Tests.** `test_snapshot_keyed_by_venue_and_mode`; `test_kucoin_strategy_reads_kucoin_not_okx`; `test_two_strategies_same_venue_mode_share_one_executor`; `test_unresolvable_venue_falls_back_to_default`; `test_okx_only_deployment_unchanged` (byte-for-byte regression guard for the current posture).
+
+**Rollback safety.** Revert the resolution/keying change → single global OKX executor (today's behavior). No stored data; the cache is in-memory.
+
+**Known limitations.** Assumes one account per `(venue, mode)` — multi-subaccount per venue is out of scope. Venue resolved from the strategy instrument; a strategy with no instrument falls back to `HERMX_CCXT_EXCHANGE` (`okx`). The live read stays gated by `HERMX_LIVE_TRADING` (Phase 0), orthogonal to venue.
+
+**Fixes:** #20 (venue half — the OKX-pin in `_dashboard_executor`); completes #2/#3 for multi-venue. Unblocks a correct per-`(venue, mode)` reconcile feed in Phase 1.
 
 ---
 
@@ -103,7 +138,7 @@ Revised and re-numbered from the source plan to fold in demo/live separation (no
 **Files changed.**
 - `src/pnl_ledger.py` **(new).** Resolves its file as `Path(os.environ.get("HERMX_DATA_DIR", ROOT)) / "closed-trades.jsonl"` — the same expression `dashboard.py:56` uses for `control-state.json`, so receiver and dashboard agree. `is_hermx_cl_ord_id()`; `read_closed_trades()` (reverse-tail, corrupt-line tolerant); `reconcile_from_order_history(history_rows, config)` (append normalized row per reduce-only, terminal, HermX-attributed row whose `ordId` is new; returns count) — a **distinct** function from the receiver's `reconcile_post_submit_enabled()`/`HERMX_RECONCILE_ENABLED` submit-path reconcile, which it must not be confused with or gated by; `append_closed_trades()` (atomic + fsync, **append-only, no size-pruning** per Principle 10). Row schema v1 is snake_case with OKX-only raw fields under a `venue_meta` sub-dict; the mandatory `mode` column is recorded per row.
 - `src/executors/ccxt_adapter.py` — **(a)** reduce-only via `order.get("reduceOnly")` + `info.reduceOnly` fallback, handling the OKX `"false"` string (fixes #12, line 831); **(b)** populate a normalized `realized_pnl` per venue in `get_order_history_raw`: OKX `info.pnl`, **Hyperliquid `info.closedPnl`**, Binance `trade.info.realizedPnl`, Bybit via `fetch_positions_history` closed-pnl (fixes #11, #14); **(c)** upgrade position-`realizedPnl` surfacing from raw→unified: `health()` already emits the raw OKX value (`info.get("realizedPnl")`, `ccxt_adapter.py:925`), so this switches it to the CCXT-unified `row.get("realizedPnl")` and adds the same field to `get_positions()` (which today surfaces only `upl`) — an upgrade, not net-new (fixes #13, unblocks Phase 2).
-- `src/dashboard.py` — in `okx_order_history_snapshot()` (`816`), after the raw read succeeds, call `reconcile_from_order_history(...)` inside a `try/except` that never fails the snapshot.
+- `src/dashboard.py` — in the (Phase-0.5) venue/mode-aware order-history snapshot, after the raw read succeeds, call `reconcile_from_order_history(rows, venue, mode)` with the snapshot's **actual** `(venue, mode)` — **never** the literal `("okx", "demo")` currently at `dashboard.py:819` — inside a `try/except` that never fails the (read-only) snapshot. The ledger dedupe key `(exchange, inst_id, ord_id, mode)` already isolates venues and modes, so the only change is the call site. **Depends on Phase 0.5**: without venue-aware snapshots the feed still reads one venue, and stamping live rows with a literal `"demo"` would mis-attribute them.
 
 **Deletion.** Remove dead `position_pnl()` (`dashboard.py:671-684`) — zero callers, misleading second implementation (fixes #4's dead-code half).
 
@@ -134,6 +169,14 @@ Revised and re-numbered from the source plan to fold in demo/live separation (no
 
 **Known limitations.** Funding fees not modeled. Assumes `feeCcy == USDT` (non-USDT logged, not FX-converted). The empirical check is per-venue and OKX/Bybit-only (only they expose position `realizedPnl`).
 
+**Status (2026-07-03) — IMPLEMENTED, gross still displayed.**
+- `src/pnl_ledger.py` ships `net_realized_pnl` (schema v2), `SCHEMA_VERSION = 2`, `_compute_net_realized(gross, fee, exchange_id)`, and `net_realized_for_strategy(strategy_id, mode=None)`. `read_closed_trades` back-fills net for v1 rows on read (no file mutation).
+- `ORDER_PNL_IS_NET` per-venue config exists; **all venues default to `False` (gross)** pending empirical verification — including OKX.
+- `ccxt_adapter.get_order_history_raw` already populates `fee` from CCXT-unified `order['fee'].cost` (signed negative for paid fees), so no adapter change was needed.
+- Display is unchanged (Decision ②: gross first, verify net later). `dashboard.py` carries a `TODO(Phase 2+)` at the strategy-card P&L computation to switch to `net_realized_for_strategy` once verified.
+- **Next (empirical, not code):** run the per-venue close test above. If OKX's `pnl` turns out already fee-inclusive, set `ORDER_PNL_IS_NET["okx"] = True`; otherwise the default `False` is correct.
+- Tests: `tests/test_pnl_net.py` (net math, fee signs, per-venue params, v1 back-fill, strategy sums/mode filter).
+
 **Fixes:** #4 (fee math).
 
 ---
@@ -143,11 +186,13 @@ Revised and re-numbered from the source plan to fold in demo/live separation (no
 **Goal.** Produce a `strategy_pnl` object from the ledger, scoped by per-strategy `accounting_start_at`, correctly attributed (including Hyperliquid), and expose it in the API. First phase that changes served data.
 
 **Files changed.**
-- `src/webhook_receiver.py` **(explicit confirmation required — shared file).** Accounting-window storage in `control-state.json` under a new `accounting_windows[strategy_id]` key. Helpers `set_accounting_start()` / `accounting_start_for()` mirroring `set_strategy_override` (`1259`). No change to `strategy_overrides`.
+- `src/webhook_receiver.py` **(explicit confirmation required — shared file).** Two additive changes in the one file:
+  - **Accounting window.** Storage in `control-state.json` under a new `accounting_windows[strategy_id]` key. Helpers `set_accounting_start()` / `accounting_start_for()` mirroring `set_strategy_override` (`1259`). No change to `strategy_overrides`.
+  - **Order-state reconciler venue/mode threading (#20a).** `_effective_execution_config()` (`2128-2138`) currently seeds one global `ccxt_exchange = EXECUTION_DEFAULTS["ccxt_exchange"]` and no `simulated_trading`, so every order reconciles against OKX-demo. The submit path **already** resolves per-order venue+mode in `build_strategy_execution_readiness` (`execution_mode`/`simulated_trading` `:1356-1369`, instrument/venue `:1388-1390`); the reconciler must resolve the **same** `(venue, mode)` from the order's journal row / strategy — so a Bybit-live order is checked on Bybit-live, not OKX-demo — reusing the exact environment key the ledger and dashboard use. Still 3 files total (all changes in-file).
 - `src/pnl_ledger.py` — `aggregate_strategy_pnl(strategy_id, budget_usd, since_iso, cl_ord_id_to_strategy) -> dict` returning `{budget_usd, closed_realized_pnl_usd, closed_fees_usd, closed_net_pnl_usd, open_upl_usd, equity_now_usd, closed_order_count, accounting_start_at}`. Attribution resolves `mxc` via the cl_ord_id→strategy map (with **Hyperliquid cloid reverse-map / side-map**, fixing #15) and operator ids via embedded id.
 - `src/dashboard.py` — build `strategy_pnl` in API assembly, attach per strategy; provide the cl_ord_id→strategy map from the strategy set; flag `strategy_ambiguous` where a symbol is traded by >1 strategy.
 
-**Also.** Add a non-LLM Hermes cron safety net calling the **ledger** `reconcile_from_order_history` on a fixed cadence (captures closes even when the dashboard is idle). This is the P&L-ledger reconcile — **not** the receiver's `HERMX_RECONCILE_ENABLED` submit-path reconcile — and is unaffected by that flag. Per monitor-pivot memory; no `--provider/--model` pin needed (not an LLM job).
+**Also.** Add a non-LLM Hermes cron safety net calling the **ledger** `reconcile_from_order_history` on a fixed cadence (captures closes even when the dashboard is idle). It iterates the **distinct `(venue, mode)` pairs** in the strategy set (Phase 0.5) — one reconcile per pair — so it covers live and non-OKX environments, not just OKX-demo. This is the P&L-ledger reconcile — **not** the receiver's `HERMX_RECONCILE_ENABLED` submit-path reconcile — and is unaffected by that flag. Per monitor-pivot memory; no `--provider/--model` pin needed (not an LLM job).
 
 **Tests.** `test_aggregate_respects_accounting_start`; `test_equity_now_formula`; `test_closed_order_count_matches_rows`; `test_accounting_start_roundtrip` (writable-mount path); `test_strategy_pnl_absent_ledger` (zeros, not errors); `test_ambiguous_symbol_falls_back_to_inst_level`; `test_hyperliquid_close_attributes_to_strategy`.
 
@@ -155,7 +200,16 @@ Revised and re-numbered from the source plan to fold in demo/live separation (no
 
 **Known limitations.** Multi-strategy-per-symbol resolution is heuristic (flagged, not solved). Window set via API only (no UI control until Phase 4). Portfolio/global equity in Phase 5.
 
-**Fixes:** #6, #15, #17 (via clOrdId-first attribution); establishes the contract that closes #5.
+**Status (2026-07-03) — IMPLEMENTED (accounting windows + receiver reconciler #20a).**
+- **Accounting windows.** `control-state.json` gained an additive `accounting_windows[strategy_id] = {accounting_start_at: ms, set_at}` key (in `default_control_state()`, re-attached in `load_control_state()` so the "keep only default keys" merge can't drop it). Receiver helpers `set_accounting_start()` / `clear_accounting_start()` / `accounting_start_for()` mirror `set_strategy_override`; `None` clears. Dashboard mirrors them (`_set_accounting_start` / `_clear_accounting_start` / `_accounting_start_for`).
+- **Ledger filter + contract.** `pnl_ledger.read_closed_trades(..., accounting_start_at)` drops rows older than the later of `since_ms`/`accounting_start_at`. `net_realized_for_strategy(..., accounting_start_at)` and new `aggregate_strategy_pnl(strategy_id, *, budget_usd, mode, accounting_start_at, open_upl_usd) -> {budget_usd, closed_realized_pnl_usd, closed_fees_usd, closed_net_pnl_usd, open_upl_usd, equity_now_usd, closed_order_count, accounting_start_at}` are window-aware. Absent ledger → zeros, never an error.
+- **API.** `POST /api/control/strategy/{id}` now accepts an optional `accounting_start_at` (int ms sets; JSON `null` clears; bool/non-int → 400) alongside/independent of `mode`; `DELETE` still clears only the mode override, leaving the window. `/api` exposes per-strategy `accounting_start_at` + a `strategy_pnl` object and a top-level `accounting_windows` map (all additive; React adopts in Phase 4).
+- **#20a receiver reconciler.** The order-journal intent (`_order_intent_from_readiness`) now persists the resolved `venue` / `mode` / `simulated_trading`. `_effective_execution_config(order_intent)` and `_reconciliation_executor(order_intent)` build the query executor from that `(venue, mode)`; `reconcile_startup` / `resolve_unknown_orders_once` resolve a **per-order** executor (cached by env) so a Bybit-live order is checked on Bybit-live — not OKX-demo. Explicitly-passed executors are unchanged (backward compatible); orders journalled before the field fall back to the OKX-demo default. The post-submit reconcile (`HERMX_RECONCILE_ENABLED`, default OFF) is deliberately left OKX-demo-default here to keep the phase to its files and not break its zero-arg test stubs — a documented follow-up, not a #20a regression.
+- **Cron safety net.** `deploy/hermes-scripts/hermx-ledger-reconcile.py` (non-LLM, `--no-agent`, every 10m) GETs the dashboard `/api`, which drives `dashboard_model()`'s per-`(venue,mode)` `reconcile_from_order_history` feed — reusing the shipped feed rather than duplicating executor/credential handling. Registered in `install-cron-monitors.sh`. Not gated by `HERMX_RECONCILE_ENABLED`.
+- **Deferred to a later pass:** Hyperliquid cloid attribution (#15) and the `strategy_ambiguous` multi-strategy-per-symbol flag — the aggregation ships without them; attribution stays best-effort as in Phase 1/2.
+- Tests: `tests/test_receiver_reconcile_venue.py` (new); `tests/test_pnl_ledger.py` (window + `aggregate_strategy_pnl`); `tests/test_phase3_strategy_overrides.py` (receiver storage + dashboard endpoint/api_payload).
+
+**Fixes:** #6, #20a (receiver reconciler venue/mode); establishes the contract that closes #5. (#15/#17 attribution hardening deferred within this phase.)
 
 ---
 
@@ -240,9 +294,10 @@ Revised and re-numbered from the source plan to fold in demo/live separation (no
 | Phase | Source files | ≤3? | Fixes |
 |-------|--------------|-----|-------|
 | 0 | dashboard.py, ccxt_adapter.py, webhook_receiver.py* | ✅ (3) | #2, #3 |
-| 1 | pnl_ledger.py (new), ccxt_adapter.py, dashboard.py | ✅ (3) | #10, #1, #4, #11, #12, #13, #14 |
+| 0.5 | dashboard.py | ✅ (1) | #20 (venue half) |
+| 1 | pnl_ledger.py (new), ccxt_adapter.py, dashboard.py | ✅ (3) | #10, #1, #4, #11, #12, #13, #14, #20 (feed literal) |
 | 2 | pnl_ledger.py (+doc) | ✅ | #4 |
-| 3 | webhook_receiver.py*, pnl_ledger.py, dashboard.py | ✅ (3) | #6, #15, #17 |
+| 3 | webhook_receiver.py*, pnl_ledger.py, dashboard.py | ✅ (3) | #6, #15, #17, #20a |
 | 4 | dashboard.py, StrategyCard.tsx, types.ts | ✅ (3) | #5, #1, #4 |
 | 5 | dashboard.py, types.ts, page.tsx | ✅ (3) | (portfolio) |
 | 6 | pnl_ledger.py, types.ts, strategies loader | ✅ (3) | #7, #18 |
@@ -259,7 +314,7 @@ Reconciled against the full environment-flag catalog. **The P&L work introduces 
 | Mechanism | Kind | Default | Role in the P&L plan |
 |-----------|------|---------|----------------------|
 | `HERMX_DATA_DIR` | env-facing | `HERMX_ROOT` | Directory for `closed-trades.jsonl` and `control-state.json`. Same resolution across receiver + dashboard (`dashboard.py:56`, `webhook_receiver.py:139`). |
-| `HERMX_ROOT` | env-facing | `SHADOW_ROOT` → repo root | Base path; `HERMX_DATA_DIR` falls back to it. Replaces the legacy `SHADOW_ROOT`, which is still honored as a fallback — so no test-isolation regression (both vars work; the new canonical name is additive). |
+| `HERMX_ROOT` | env-facing | repo root | Base path; `HERMX_DATA_DIR` falls back to it. Sole root variable — the legacy `SHADOW_ROOT` fallback was removed (no `or SHADOW_ROOT` anywhere); tests bind `HERMX_ROOT` directly. |
 | `HERMX_LIVE_TRADING` | core, fail-closed | disarmed | Global kill switch. Gates the Phase-0 live-account read (`dashboard.py:729-734`) and live submission (`ccxt_adapter.py:264-271`). No live P&L is read when disarmed. |
 | `HERMX_CCXT_EXCHANGE` | core | `okx` | Default venue when a strategy instrument is empty (`ccxt_adapter.py:176`). Determines which venue's raw `realized_pnl` normalization applies. |
 | `HERMX_LEDGER_ROTATE_MAX_BYTES` / `_RETENTION` | module-level constant | 64 MB / 5 | Governs **WAL** ledger rotation, **not** the P&L ledger. Called out so the P&L ledger is deliberately excluded from pruning (Principle 10). Not env-facing. |
@@ -269,7 +324,7 @@ Reconciled against the full environment-flag catalog. **The P&L work introduces 
 - `HERMX_RECONCILE_ENABLED` (default OFF) — gates the receiver's **post-submit** reconcile (`reconcile_post_submit_enabled`, `webhook_receiver.py:1899`). This is a different mechanism from the plan's `reconcile_from_order_history` ledger reconcile; the ledger path and the Phase-3 cron are neither gated by nor confused with it. Naming-collision hazard only — documented in Phase 1 and Phase 3.
 - `HERMX_ADVISOR_ENABLED` (default from advisor cfg) — gates the Hermes LLM advisor (`webhook_receiver.py:305`, `dashboard.py:49`). No P&L accounting impact.
 
-**Net effect on breakers:** none introduced. The only newly-surfaced hazard is a *design constraint*, not a code breaker — the P&L ledger must not inherit the WAL's size-pruning (Principle 10). The `HERMX_ROOT`/`SHADOW_ROOT` dual-read makes test isolation slightly **better**, not worse.
+**Net effect on breakers:** none introduced. The only newly-surfaced hazard is a *design constraint*, not a code breaker — the P&L ledger must not inherit the WAL's size-pruning (Principle 10). Tests bind `HERMX_ROOT` directly (the `SHADOW_ROOT` fallback was removed), so test isolation is unchanged.
 
 ---
 
