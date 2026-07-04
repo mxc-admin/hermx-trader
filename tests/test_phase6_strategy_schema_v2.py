@@ -229,3 +229,216 @@ def test_v2_strategy_file_loads_and_is_money_ready(tmp_path):
     finally:
         os.environ["HERMX_ROOT"] = orig_root if orig_root is not None else str(_HERMX_ROOT)
         _load_module_at(Path(os.environ["HERMX_ROOT"]))
+
+
+# --------------------------------------------------------------------------- #
+# Live v2 corpus is money-path safe (merged from test_phase6_strategy_migration).#
+# Each production strategy file is canonical v2, validates, has a sane instrument #
+# block, no legacy keys, and yields a stable/consistent readiness end-to-end.     #
+# --------------------------------------------------------------------------- #
+
+# Each live strategy file paired with the alert fixture that matches it.
+MIGRATED = [
+    ("btcusdt_duo_base_dev_2h", "strategy/btcusdt_buy.json"),
+    ("ethusdt_duo_base_dev_2h", "strategy/ethusdt_buy.json"),
+    ("solusdt_duo_base_dev_3h", "strategy/solusdt_sell.json"),
+    ("xrpusdt_duo_base_dev_4h", "strategy/xrpusdt_buy.json"),
+]
+
+
+def _matches_branch(payload: dict, branch: str) -> bool:
+    """True iff ``payload`` validates against exactly the named ($defs) branch."""
+    schema = _schema()
+    branch_schema = dict(schema)
+    branch_schema["oneOf"] = [{"$ref": f"#/$defs/{branch}"}]
+    return not list(jsonschema.Draft202012Validator(branch_schema).iter_errors(payload))
+
+
+def _readiness(module, strategy_id: str, alert_rel: str) -> dict:
+    payload = load_alert(alert_rel)
+    normalized = module.normalize(payload)
+    ok, strategy, error = module.validate_strategy_alert(normalized)
+    assert ok is True, error
+    record = {"normalized": normalized, "strategy_config": strategy}
+    return module.build_strategy_execution_readiness(record)
+
+
+@pytest.mark.parametrize("strategy_id,alert_rel", MIGRATED, ids=[m[0] for m in MIGRATED])
+def test_live_file_is_canonical_v2(strategy_id, alert_rel):
+    """The on-disk file is canonical v2 with a sane instrument block and no
+    leftover legacy keys."""
+    v2 = json.loads((LIVE_STRATEGIES_DIR / f"{strategy_id}.json").read_text(encoding="utf-8"))
+    assert v2["schema_version"] == 2
+    assert v2["instrument"] == {
+        "exchange": "okx",
+        "inst_id": v2["instrument"]["inst_id"],
+        "type": "swap",
+    }
+    assert v2["instrument"]["inst_id"].endswith("-USDT-SWAP")
+    assert "okx_inst_id" not in v2 and "okx_submit_orders" not in v2
+    assert _is_valid(v2) and _matches_branch(v2, "strategy_v2")
+
+
+@pytest.mark.parametrize("strategy_id,alert_rel", MIGRATED, ids=[m[0] for m in MIGRATED])
+def test_live_v2_readiness_stable_and_consistent(strategy_id, alert_rel, tmp_path):
+    """End-to-end: the live v2 file produces an internally-consistent execution
+    readiness that is stable (deterministic) across two isolated loads."""
+    v2 = json.loads((LIVE_STRATEGIES_DIR / f"{strategy_id}.json").read_text(encoding="utf-8"))
+
+    orig_root = os.environ.get("HERMX_ROOT")
+    try:
+        a_root = tmp_path / "v2-root-a"
+        _build_root_with_strategy(a_root, v2)
+        m = _load_module_at(a_root)
+        loaded = m.STRATEGIES[strategy_id]
+        # Layer C: resolves via the canonical instrument block; bridge preserved.
+        assert loaded["instrument"]["inst_id"] == v2["instrument"]["inst_id"]
+        assert "okx_inst_id" not in loaded
+        assert loaded["okx_submit_orders"] is bool(v2.get("submit_orders", False))
+        readiness_a = _readiness(m, strategy_id, alert_rel)
+
+        b_root = tmp_path / "v2-root-b"
+        _build_root_with_strategy(b_root, v2)
+        m = _load_module_at(b_root)
+        readiness_b = _readiness(m, strategy_id, alert_rel)
+
+        # Deterministic across loads -- the corpus is reproducible.
+        assert readiness_a == readiness_b
+
+        # Money-critical readiness fields are present and internally consistent.
+        assert readiness_a["inst_id"] == v2["instrument"]["inst_id"]
+        assert readiness_a["instrument"] == v2["instrument"]  # M3 agnostic block
+        assert readiness_a["instrument"]["inst_id"] == readiness_a["inst_id"]
+        assert readiness_a["td_mode"] == v2["margin_mode"]
+        assert readiness_a["expected_leverage"] == v2["leverage"]
+        assert readiness_a["signal_side"] in {"buy", "sell"}
+        intent = readiness_a["execution_intent"]
+        budget = float((v2.get("capital") or {}).get("budget_usd"))
+        assert intent["planned_notional_usd"] == budget * float(v2["leverage"])
+        assert intent["client_order_id"]
+        assert intent["actions"]
+    finally:
+        os.environ["HERMX_ROOT"] = orig_root if orig_root is not None else str(_HERMX_ROOT)
+        _load_module_at(Path(os.environ["HERMX_ROOT"]))
+
+
+# --------------------------------------------------------------------------- #
+# M3 generic instruction/readiness wire format (merged from                     #
+# test_phase6_readiness_m3). Readiness exposes the exchange-agnostic instruction #
+# shape AND the translated execution keys, and the twin relationship is stable.  #
+# --------------------------------------------------------------------------- #
+
+AGNOSTIC_FIELDS = (
+    "instrument",
+    "strategy_id",
+    "asset",
+    "target_side",
+    "target_notional_usd",
+    "margin_mode",
+    "leverage",
+)
+
+# Translated execution keys downstream (CCXT adapter, dashboard, ledgers) read.
+EXEC_FIELDS = ("inst_id", "td_mode", "expected_leverage", "symbol", "signal_side")
+
+
+def test_readiness_exposes_agnostic_and_execution_fields(tmp_path):
+    """Readiness carries the generic instruction shape AND translated execution keys."""
+    orig_root = os.environ.get("HERMX_ROOT")
+    try:
+        root = tmp_path / "v2-root"
+        _build_root_with_strategy(root, V2_TWIN)
+        m = _load_module_at(root)
+        strategy, readiness = _readiness_for_btc_buy(m)
+
+        # Agnostic instruction contract present (ARCHITECTURE.md shape).
+        for key in AGNOSTIC_FIELDS:
+            assert key in readiness, f"missing agnostic field {key!r}"
+        # Translated execution keys still present and unchanged for adapter/dashboard.
+        for key in EXEC_FIELDS:
+            assert key in readiness, f"missing execution field {key!r}"
+
+        # The generic instrument block resolves the same instrument as inst_id.
+        assert readiness["instrument"] == {
+            "exchange": "okx",
+            "inst_id": "BTC-USDT-SWAP",
+            "type": "swap",
+        }
+        assert readiness["instrument"]["inst_id"] == readiness["inst_id"]
+
+        # Agnostic values match the strategy intent from ARCHITECTURE.md.
+        assert readiness["strategy_id"] == "btcusdt_duo_base_dev_2h"
+        assert readiness["asset"] == "BTCUSDT"
+        assert readiness["target_side"] == "long"  # buy alert -> long
+        assert readiness["margin_mode"] == "isolated"
+        assert readiness["leverage"] == 2
+        # budget 1500 * leverage 2 = 3000 notional.
+        assert readiness["target_notional_usd"] == 3000.0
+    finally:
+        if orig_root is not None:
+            os.environ["HERMX_ROOT"] = orig_root
+
+
+def test_agnostic_fields_are_byte_identical_to_execution_twins(tmp_path):
+    """Order-equivalence: each agnostic field equals its translated twin / the
+    execution_intent value the executor already consumes. M3 is representation
+    only -- nothing the adapter reads to build the order changed."""
+    orig_root = os.environ.get("HERMX_ROOT")
+    try:
+        root = tmp_path / "v2-root"
+        _build_root_with_strategy(root, V2_TWIN)
+        m = _load_module_at(root)
+        _, r = _readiness_for_btc_buy(m)
+
+        intent = r["execution_intent"]
+        # leverage / margin_mode are the SAME object the translated keys carry.
+        assert r["leverage"] == r["expected_leverage"]
+        assert r["margin_mode"] == r["td_mode"]
+        # target_notional_usd is the exact planned_notional the executor sizes from.
+        assert r["target_notional_usd"] == intent["planned_notional_usd"]
+        # target_side is the agnostic view of the same signal_side the order uses.
+        assert r["target_side"] == ("long" if r["signal_side"] == "buy" else "short")
+        # instrument.inst_id is the agnostic view of inst_id the adapter translates.
+        assert r["instrument"]["inst_id"] == r["inst_id"]
+
+        # The exchange-agnostic order intent persisted to the journal is unchanged:
+        # it still resolves inst_id from readiness and notional from the intent.
+        order_intent = m._order_intent_from_readiness(r)
+        assert order_intent["inst_id"] == r["inst_id"]
+        assert order_intent["planned_notional_usd"] == r["target_notional_usd"]
+    finally:
+        if orig_root is not None:
+            os.environ["HERMX_ROOT"] = orig_root
+
+
+def test_v2_readiness_is_deterministic_across_loads(tmp_path):
+    """Loader invariance: the SAME canonical v2 strategy loaded into two isolated
+    roots emits an identical agnostic AND execution readiness shape. This proves
+    the agnostic+execution twin relationship is stable through the loader shim
+    without depending on a v1 twin (Layer C removed the v1 bridge)."""
+    orig_root = os.environ.get("HERMX_ROOT")
+    try:
+        a_root = tmp_path / "v2-root-a"
+        _build_root_with_strategy(a_root, V2_TWIN)
+        m = _load_module_at(a_root)
+        # Layer C: the loaded v2 strategy resolves via the canonical instrument block.
+        assert m.STRATEGIES["btcusdt_duo_base_dev_2h"]["instrument"]["inst_id"] == "BTC-USDT-SWAP"
+        _, a = _readiness_for_btc_buy(m)
+
+        b_root = tmp_path / "v2-root-b"
+        _build_root_with_strategy(b_root, V2_TWIN)
+        m = _load_module_at(b_root)
+        _, b = _readiness_for_btc_buy(m)
+
+        for key in AGNOSTIC_FIELDS:
+            assert a[key] == b[key], f"agnostic field {key!r} is not deterministic"
+        # And the translated twins are stable too (no divergence introduced).
+        for key in EXEC_FIELDS:
+            assert a[key] == b[key]
+        # The agnostic/execution twin relationship holds within a single load.
+        assert a["instrument"]["inst_id"] == a["inst_id"]
+        assert a["leverage"] == a["expected_leverage"]
+        assert a["margin_mode"] == a["td_mode"]
+    finally:
+        if orig_root is not None:
+            os.environ["HERMX_ROOT"] = orig_root

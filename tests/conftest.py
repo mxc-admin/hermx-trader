@@ -75,8 +75,8 @@ def fixtures_dir() -> Path:
 # runtime state and never interfere with each other.
 #
 # On teardown we restore HERMX_ROOT to the session temp root and reload again, so
-# tests that import webhook_receiver WITHOUT this fixture (e.g. test_kill_switch)
-# keep a module bound to a live (non-deleted) directory.
+# tests that import webhook_receiver WITHOUT this fixture (e.g.
+# test_phase5_exec_routing) keep a module bound to a live (non-deleted) directory.
 # ---------------------------------------------------------------------------
 
 CORPUS_STRATEGIES_DIR = FIXTURES_DIR / "strategies"

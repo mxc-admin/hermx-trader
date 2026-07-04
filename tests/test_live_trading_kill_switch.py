@@ -1,7 +1,8 @@
 """C1 -- HERMX_LIVE_TRADING kill switch wired into the live-mode submission gate.
 
-These assert the wired behavior (vs ``test_kill_switch.py`` which covers the pure
-``live_trading_enabled`` helper and the Phase A demo-mode posture):
+These assert the wired behavior plus the pure ``live_trading_enabled`` helper and
+the per-strategy submit-flag posture (the latter two merged from the retired
+``test_kill_switch.py``):
 
   * An ``execution_mode == "live"`` strategy submits ONLY when the global
     ``HERMX_LIVE_TRADING`` switch is explicitly armed AND the readiness agrees the
