@@ -37,6 +37,38 @@ def _to_float(value, default: float | None = None) -> float | None:
         return default
 
 
+def _normalized_realized_pnl(order: dict, info: dict, exchange_id: str) -> float | None:
+    """Extract a venue-normalized realized P&L for an order-history row.
+
+    The field name differs per venue; None when the venue does not expose realized
+    P&L in order history (Phase 1 accepts None — Phase 2 backfills via positions
+    history for those venues).
+    """
+    venue = str(exchange_id or "").lower()
+    if venue == "okx":
+        return _to_float(info.get("pnl"), None)
+    if venue == "hyperliquid":
+        return _to_float(info.get("closedPnl"), None)
+    if venue == "binance":
+        # Realized P&L lives on trades, not orders; may be absent on the order row.
+        return _to_float(info.get("realizedPnl"), None)
+    # bybit + others: not available in order history.
+    return None
+
+
+def _normalize_reduce_only(order: dict, info: dict) -> bool | None:
+    """Prefer the unified CCXT top-level ``reduceOnly``; fall back to the venue info
+    blob (OKX returns the string "true"/"false"). Returns None when unknown."""
+    raw = order.get("reduceOnly")
+    if raw is None:
+        raw = info.get("reduceOnly")
+    if isinstance(raw, str):
+        return raw.strip().lower() == "true"
+    if raw is None:
+        return None
+    return bool(raw)
+
+
 def _decimal_floor(value: float | Decimal, step: float | Decimal) -> float:
     d_value = Decimal(str(value or 0.0))
     d_step = Decimal(str(step or 0.0))
@@ -812,6 +844,7 @@ class CcxtExecutor(BaseExecutor):
                     closed = client.fetch_closed_orders(symbol=symbol, limit=max(1, int(limit))) or []
                 except Exception:
                     closed = []
+                venue = self._exchange_id()
                 for order in closed:
                     info = order.get("info") or {}
                     fee = order.get("fee") or {}
@@ -830,7 +863,8 @@ class CcxtExecutor(BaseExecutor):
                             "fee": fee.get("cost") if isinstance(fee, dict) else None,
                             "feeCcy": fee.get("currency") if isinstance(fee, dict) else None,
                             "pnl": info.get("pnl"),
-                            "reduceOnly": info.get("reduceOnly"),
+                            "realized_pnl": _normalized_realized_pnl(order, info, venue),
+                            "reduceOnly": _normalize_reduce_only(order, info),
                             "state": self._state_from_ccxt(order),
                             "lever": info.get("lever"),
                             "cTime": order.get("timestamp"),
@@ -870,6 +904,7 @@ class CcxtExecutor(BaseExecutor):
                         "pos_side": side or "net",
                         "avg_px": _to_float(row.get("entryPrice"), None),
                         "upl": _to_float(row.get("unrealizedPnl"), None),
+                        "realized_pnl": _to_float(row.get("realizedPnl"), None),
                         "raw": row,
                     }
                 )
@@ -922,7 +957,7 @@ class CcxtExecutor(BaseExecutor):
                         "avgPx": _to_float(row.get("entryPrice"), None),
                         "notionalUsd": _to_float(row.get("notional"), None),
                         "upl": _to_float(row.get("unrealizedPnl"), None),
-                        "realizedPnl": _to_float(info.get("realizedPnl"), None),
+                        "realizedPnl": _to_float(row.get("realizedPnl"), _to_float(info.get("realizedPnl"), None)),
                         "lever": row.get("leverage") or info.get("lever"),
                         "mgnMode": row.get("marginMode") or info.get("mgnMode"),
                         "imr": info.get("imr"),

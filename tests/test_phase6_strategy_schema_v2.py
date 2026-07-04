@@ -15,7 +15,7 @@ canonical v2 on disk. The transitional v1 schema branch is intentionally still
 present in strategy.schema.json (deferred), but no test depends on a v1 twin.
 
 No network, no OKX subprocess: schema checks are pure jsonschema; the end-to-end
-load test reloads webhook_receiver against an isolated temp SHADOW_ROOT (mirrors
+load test reloads webhook_receiver against an isolated temp HERMX_ROOT (mirrors
 the conftest harness) with execution hard-disabled by the dry-run corpus config.
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ from pathlib import Path
 import jsonschema
 import pytest
 
-from conftest import _SHADOW_ROOT, load_alert, write_engine_config
+from conftest import _HERMX_ROOT, load_alert, write_engine_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = REPO_ROOT / "schemas" / "strategy.schema.json"
@@ -185,7 +185,7 @@ def _build_root_with_strategy(root: Path, strategy: dict) -> None:
 def _load_module_at(root: Path):
     import webhook_receiver as module  # noqa: WPS433
 
-    os.environ["SHADOW_ROOT"] = str(root)
+    os.environ["HERMX_ROOT"] = str(root)
     os.environ.pop("HERMX_LIVE_TRADING", None)
     importlib.reload(module)
     return module
@@ -204,7 +204,7 @@ def test_v2_strategy_file_loads_and_is_money_ready(tmp_path):
     """A v2 strategy file routed through the real module load + matching +
     readiness path resolves via the canonical instrument block and carries the
     money-path execution fields."""
-    orig_root = os.environ.get("SHADOW_ROOT")
+    orig_root = os.environ.get("HERMX_ROOT")
     try:
         v2_root = tmp_path / "v2-root"
         _build_root_with_strategy(v2_root, V2_TWIN)
@@ -227,5 +227,5 @@ def test_v2_strategy_file_loads_and_is_money_ready(tmp_path):
         assert intent["planned_notional_usd"] == 3000.0  # budget 1500 * leverage 2
         assert intent["actions"]
     finally:
-        os.environ["SHADOW_ROOT"] = orig_root if orig_root is not None else str(_SHADOW_ROOT)
-        _load_module_at(Path(os.environ["SHADOW_ROOT"]))
+        os.environ["HERMX_ROOT"] = orig_root if orig_root is not None else str(_HERMX_ROOT)
+        _load_module_at(Path(os.environ["HERMX_ROOT"]))

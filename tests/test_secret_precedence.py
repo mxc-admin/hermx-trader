@@ -23,10 +23,10 @@ def _reload_with(module_name: str, env: dict, shadow_root) -> tuple:
     """Reload ``module_name`` with ``env`` applied (None => unset). Returns
     ``(module, restore_callable)``; ``restore`` puts every touched env var back and
     reloads the module so later tests see the conftest defaults again."""
-    keys = list(env) + ["SHADOW_ROOT"]
+    keys = list(env) + ["HERMX_ROOT"]
     saved = {k: os.environ.get(k) for k in keys}
 
-    os.environ["SHADOW_ROOT"] = str(shadow_root)
+    os.environ["HERMX_ROOT"] = str(shadow_root)
     for key, value in env.items():
         if value is None:
             os.environ.pop(key, None)

@@ -8,7 +8,7 @@ Proves, against the REAL production build_record (not an inline re-implementatio
   * a repeated close signal is deduplicated.
 
 Reuses the `wr` characterization harness (webhook_receiver reloaded against an
-isolated temp SHADOW_ROOT with the execution surface forced unavailable). No
+isolated temp HERMX_ROOT with the execution surface forced unavailable). No
 network, no OKX.
 """
 from __future__ import annotations

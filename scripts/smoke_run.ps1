@@ -93,7 +93,7 @@ if (-not (Test-Path "engine-config.json")) {
   Write-Host "Created engine-config.json from config/runtime.demo.json"
 }
 
-$env:SHADOW_ROOT = $Root
+$env:HERMX_ROOT = $Root
 $env:HERMX_ROOT = $Root
 $env:HERMX_RECEIVER_PORT = $env:SHADOW_PORT
 $env:HERMX_DASHBOARD_PORT = $env:CLEAN_DASHBOARD_PORT

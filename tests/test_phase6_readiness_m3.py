@@ -17,7 +17,7 @@ Proves:
 
 Layer C: the runtime v1 (`okx_inst_id`) bridge is gone, so the readiness is
 exercised with the canonical v2 strategy only. Reuses the isolated-temp-
-SHADOW_ROOT reload harness from the schema-v2 test module so the readiness is
+HERMX_ROOT reload harness from the schema-v2 test module so the readiness is
 built by the REAL module load + matching path, execution hard-disabled by the
 dry-run corpus config (no network, no OKX subprocess).
 """
@@ -45,7 +45,7 @@ def _build_root_with_strategy(root: Path, strategy: dict) -> None:
 def _load_module_at(root: Path):
     import webhook_receiver as module  # noqa: WPS433
 
-    os.environ["SHADOW_ROOT"] = str(root)
+    os.environ["HERMX_ROOT"] = str(root)
     os.environ.pop("HERMX_LIVE_TRADING", None)
     importlib.reload(module)
     return module
@@ -76,7 +76,7 @@ EXEC_FIELDS = ("inst_id", "td_mode", "expected_leverage", "symbol", "signal_side
 
 def test_readiness_exposes_agnostic_and_execution_fields(tmp_path):
     """Readiness carries the generic instruction shape AND translated execution keys."""
-    orig_root = os.environ.get("SHADOW_ROOT")
+    orig_root = os.environ.get("HERMX_ROOT")
     try:
         root = tmp_path / "v2-root"
         _build_root_with_strategy(root, V2_TWIN)
@@ -108,14 +108,14 @@ def test_readiness_exposes_agnostic_and_execution_fields(tmp_path):
         assert readiness["target_notional_usd"] == 3000.0
     finally:
         if orig_root is not None:
-            os.environ["SHADOW_ROOT"] = orig_root
+            os.environ["HERMX_ROOT"] = orig_root
 
 
 def test_agnostic_fields_are_byte_identical_to_execution_twins(tmp_path):
     """Order-equivalence: each agnostic field equals its translated twin / the
     execution_intent value the executor already consumes. M3 is representation
     only -- nothing the adapter reads to build the order changed."""
-    orig_root = os.environ.get("SHADOW_ROOT")
+    orig_root = os.environ.get("HERMX_ROOT")
     try:
         root = tmp_path / "v2-root"
         _build_root_with_strategy(root, V2_TWIN)
@@ -140,7 +140,7 @@ def test_agnostic_fields_are_byte_identical_to_execution_twins(tmp_path):
         assert order_intent["planned_notional_usd"] == r["target_notional_usd"]
     finally:
         if orig_root is not None:
-            os.environ["SHADOW_ROOT"] = orig_root
+            os.environ["HERMX_ROOT"] = orig_root
 
 
 def test_v2_readiness_is_deterministic_across_loads(tmp_path):
@@ -148,7 +148,7 @@ def test_v2_readiness_is_deterministic_across_loads(tmp_path):
     roots emits an identical agnostic AND execution readiness shape. This proves
     the agnostic+execution twin relationship is stable through the loader shim
     without depending on a v1 twin (Layer C removed the v1 bridge)."""
-    orig_root = os.environ.get("SHADOW_ROOT")
+    orig_root = os.environ.get("HERMX_ROOT")
     try:
         a_root = tmp_path / "v2-root-a"
         _build_root_with_strategy(a_root, V2_TWIN)
@@ -173,4 +173,4 @@ def test_v2_readiness_is_deterministic_across_loads(tmp_path):
         assert a["margin_mode"] == a["td_mode"]
     finally:
         if orig_root is not None:
-            os.environ["SHADOW_ROOT"] = orig_root
+            os.environ["HERMX_ROOT"] = orig_root

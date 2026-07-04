@@ -1,7 +1,7 @@
 """Phase 4 — Dashboard Reliability tests (REFACTOR_PLAN.md:353-374, fixes D1-D8).
 
 Offline and deterministic: no network, no real OKX. The dashboard is exercised
-as a READ-ONLY consumer — every test points SHADOW_ROOT at an isolated temp dir
+as a READ-ONLY consumer — every test points HERMX_ROOT at an isolated temp dir
 (honoring the conftest harness conventions) and monkeypatches the executor seam /
 the network ticker helper. Nothing here can place an order or arm submission.
 """
@@ -17,8 +17,8 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# Harness: load dashboard_core + dashboard bound to a populated temp SHADOW_ROOT.
-# Both modules resolve SHADOW_ROOT (ROOT/LOGS/STRATEGIES_DIR) at import time, so
+# Harness: load dashboard_core + dashboard bound to a populated temp HERMX_ROOT.
+# Both modules resolve HERMX_ROOT (ROOT/LOGS/STRATEGIES_DIR) at import time, so
 # we set the env then importlib.reload() — mirroring tests/conftest.py's `wr`.
 # ---------------------------------------------------------------------------
 
@@ -49,13 +49,13 @@ def _write_strategy(strategies_dir: Path, strategy_id: str, **overrides) -> Path
 
 @pytest.fixture
 def dash(tmp_path):
-    """dashboard + dashboard_core reloaded against a fresh temp SHADOW_ROOT."""
+    """dashboard + dashboard_core reloaded against a fresh temp HERMX_ROOT."""
     root = tmp_path / "shadow-root"
     (root / "logs").mkdir(parents=True, exist_ok=True)
     (root / "strategies").mkdir(parents=True, exist_ok=True)
 
-    orig_root = os.environ.get("SHADOW_ROOT")
-    os.environ["SHADOW_ROOT"] = str(root)
+    orig_root = os.environ.get("HERMX_ROOT")
+    os.environ["HERMX_ROOT"] = str(root)
 
     import dashboard_core as core
     importlib.reload(core)
@@ -81,9 +81,9 @@ def dash(tmp_path):
         yield dash_mod, core, root
     finally:
         if orig_root is not None:
-            os.environ["SHADOW_ROOT"] = orig_root
+            os.environ["HERMX_ROOT"] = orig_root
         else:
-            os.environ.pop("SHADOW_ROOT", None)
+            os.environ.pop("HERMX_ROOT", None)
         os.environ.pop("HERMX_DASH_TZ", None)
         os.environ.pop("HERMX_DASH_TZ_OFFSET_HOURS", None)
 

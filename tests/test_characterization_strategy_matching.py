@@ -6,7 +6,7 @@ unknown id, malformed (bad side), and duplicate. This is part of the regression
 oracle for P1/P3 -- if matching/quarantine behavior changes, these fail.
 
 Harness: the `wr` fixture reloads webhook_receiver bound to a populated temp
-SHADOW_ROOT (4 corpus strategies + dry-run config). No MXC, no network, no OKX
+HERMX_ROOT (4 corpus strategies + dry-run config). No MXC, no network, no OKX
 subprocess (execution hard-disabled by the corpus config).
 """
 from __future__ import annotations

@@ -11,7 +11,7 @@ Covers the new override path end to end:
     api_payload()'s effective_mode derivation.
 
 Offline and deterministic. The receiver tests use the conftest ``wr`` fixture
-(webhook_receiver reloaded against an isolated temp SHADOW_ROOT, so
+(webhook_receiver reloaded against an isolated temp HERMX_ROOT, so
 CONTROL_STATE_FILE lands in tmp and never touches real runtime state). The
 dashboard tests reload dashboard/dashboard_core against their own temp root and
 exercise the real Handler over a loopback ThreadingHTTPServer on an ephemeral
@@ -316,7 +316,7 @@ def _write_strategy(strategies_dir: Path, strategy_id: str, **overrides) -> None
 
 @pytest.fixture
 def dash(tmp_path):
-    """dashboard + dashboard_core reloaded against a fresh temp SHADOW_ROOT, with
+    """dashboard + dashboard_core reloaded against a fresh temp HERMX_ROOT, with
     one active demo strategy on disk and the executor stubbed offline."""
     root = tmp_path / "shadow-root"
     (root / "logs").mkdir(parents=True, exist_ok=True)
@@ -324,8 +324,8 @@ def dash(tmp_path):
     strategies_dir.mkdir(parents=True, exist_ok=True)
     _write_strategy(strategies_dir, "dash-demo", execution_mode="demo", submit_orders=True)
 
-    orig_root = os.environ.get("SHADOW_ROOT")
-    os.environ["SHADOW_ROOT"] = str(root)
+    orig_root = os.environ.get("HERMX_ROOT")
+    os.environ["HERMX_ROOT"] = str(root)
 
     # dashboard_core/dashboard read DASH_AUTH_TOKEN from HERMX_SECRET at import
     # time. run.sh exports a real secret before pytest, so force the test value
@@ -352,9 +352,9 @@ def dash(tmp_path):
         yield dash_mod, strategies_dir, root
     finally:
         if orig_root is not None:
-            os.environ["SHADOW_ROOT"] = orig_root
+            os.environ["HERMX_ROOT"] = orig_root
         else:
-            os.environ.pop("SHADOW_ROOT", None)
+            os.environ.pop("HERMX_ROOT", None)
         if orig_secret is not None:
             os.environ["HERMX_SECRET"] = orig_secret
         else:

@@ -1,7 +1,7 @@
 """Shared pytest fixtures for the HermX test harness (Phase 0 setup).
 
 Safety-critical invariant: tests must NEVER read or write the real runtime
-logs/state. ``webhook_receiver`` resolves ``SHADOW_ROOT`` at *import* time, so we
+logs/state. ``webhook_receiver`` resolves ``HERMX_ROOT`` at *import* time, so we
 redirect it to an isolated temp directory BEFORE the module is ever imported.
 """
 from __future__ import annotations
@@ -21,16 +21,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
-# Redirect SHADOW_ROOT to an isolated temp dir up front, so merely importing
+# Redirect HERMX_ROOT to an isolated temp dir up front, so merely importing
 # webhook_receiver (which calls mkdir / load_engine_config at module scope)
 # cannot touch the real repo logs/ or paper-state.json.
-_SHADOW_ROOT = Path(tempfile.mkdtemp(prefix="hermx-test-shadow-root-"))
-(_SHADOW_ROOT / "logs").mkdir(parents=True, exist_ok=True)
-# NOTE: bind via SHADOW_ROOT only. Production reads `HERMX_ROOT or SHADOW_ROOT`,
-# so SHADOW_ROOT alone still works via fallback. We deliberately do NOT set
-# HERMX_ROOT here: it has read-precedence, so a stale env value would silently
-# override per-test fixtures that bind a fresh root via SHADOW_ROOT only.
-os.environ["SHADOW_ROOT"] = str(_SHADOW_ROOT)
+_HERMX_ROOT = Path(tempfile.mkdtemp(prefix="hermx-test-shadow-root-"))
+(_HERMX_ROOT / "logs").mkdir(parents=True, exist_ok=True)
+# Production resolves the root solely from HERMX_ROOT (the legacy SHADOW_ROOT
+# fallback was removed), so binding it here fully isolates the test process.
+os.environ["HERMX_ROOT"] = str(_HERMX_ROOT)
 # HERMX_SECRET is the sole source authenticating both the webhook and the dashboard.
 os.environ.setdefault("HERMX_SECRET", "test-secret")
 
@@ -45,8 +43,8 @@ if str(SRC_DIR) not in sys.path:
 
 @pytest.fixture
 def shadow_root() -> Path:
-    """The isolated temp SHADOW_ROOT the receiver module was bound to."""
-    return _SHADOW_ROOT
+    """The isolated temp HERMX_ROOT the receiver module was bound to."""
+    return _HERMX_ROOT
 
 
 @pytest.fixture
@@ -63,20 +61,20 @@ def fixtures_dir() -> Path:
 # Characterization harness (REFACTOR_PLAN.md:160 task 3, :167, :179).
 #
 # webhook_receiver binds STRATEGIES / ALLOWED_SYMBOLS / STRATEGY_ENGINE and every
-# LOG_DIR/state path from SHADOW_ROOT *at import time*. The default conftest
-# SHADOW_ROOT above is an empty dir (STRATEGIES={}), so strategy alerts would be
+# LOG_DIR/state path from HERMX_ROOT *at import time*. The default conftest
+# HERMX_ROOT above is an empty dir (STRATEGIES={}), so strategy alerts would be
 # rejected unknown_strategy_id and no corpus config would apply.
 #
-# Chosen approach: build a fresh, *populated* temp SHADOW_ROOT per test (copy the
+# Chosen approach: build a fresh, *populated* temp HERMX_ROOT per test (copy the
 # 4 corpus strategy files + write a synthetic engine-config.json), point
-# SHADOW_ROOT at it, and importlib.reload(webhook_receiver) so its globals rebind
+# HERMX_ROOT at it, and importlib.reload(webhook_receiver) so its globals rebind
 # to that populated root. This is the faithful approach -- it exercises the real
 # module-load binding (load_engine_config / load_strategy_files) rather than
 # monkeypatching globals after the fact. Per-test reload also gives full isolation
 # (fresh paper-state.json, seen-signals.json, logs/) so tests never touch the real
 # runtime state and never interfere with each other.
 #
-# On teardown we restore SHADOW_ROOT to the session temp root and reload again, so
+# On teardown we restore HERMX_ROOT to the session temp root and reload again, so
 # tests that import webhook_receiver WITHOUT this fixture (e.g. test_kill_switch)
 # keep a module bound to a live (non-deleted) directory.
 # ---------------------------------------------------------------------------
@@ -104,14 +102,14 @@ CORPUS_ENGINE_CONFIG = {
 
 
 def write_engine_config(root: Path) -> None:
-    """Write the corpus engine-config.json into a test SHADOW_ROOT."""
+    """Write the corpus engine-config.json into a test HERMX_ROOT."""
     (root / "engine-config.json").write_text(
         json.dumps(CORPUS_ENGINE_CONFIG, indent=2), encoding="utf-8"
     )
 
 
 def _build_populated_root(root: Path) -> None:
-    """Lay out a SHADOW_ROOT the receiver can bind to: logs/, strategies/, config."""
+    """Lay out a HERMX_ROOT the receiver can bind to: logs/, strategies/, config."""
     (root / "logs").mkdir(parents=True, exist_ok=True)
     strategies_dir = root / "strategies"
     strategies_dir.mkdir(parents=True, exist_ok=True)
@@ -122,7 +120,7 @@ def _build_populated_root(root: Path) -> None:
 
 @pytest.fixture
 def wr_root(tmp_path) -> Path:
-    """A fresh populated SHADOW_ROOT for one test."""
+    """A fresh populated HERMX_ROOT for one test."""
     root = tmp_path / "shadow-root"
     _build_populated_root(root)
     return root
@@ -130,15 +128,15 @@ def wr_root(tmp_path) -> Path:
 
 @pytest.fixture
 def wr(wr_root, monkeypatch):
-    """webhook_receiver reloaded with globals bound to a populated SHADOW_ROOT.
+    """webhook_receiver reloaded with globals bound to a populated HERMX_ROOT.
 
     Kill switch starts unset (inert/armed). Execution is hard-disabled via the
     corpus config, so no OKX subprocess is ever armed regardless.
     """
     import webhook_receiver as module  # noqa: WPS433 (import inside fixture is intentional)
 
-    orig_shadow_root = os.environ.get("SHADOW_ROOT")
-    os.environ["SHADOW_ROOT"] = str(wr_root)
+    orig_shadow_root = os.environ.get("HERMX_ROOT")
+    os.environ["HERMX_ROOT"] = str(wr_root)
     os.environ.pop("HERMX_LIVE_TRADING", None)
     importlib.reload(module)
     try:
@@ -147,30 +145,30 @@ def wr(wr_root, monkeypatch):
         # Rebind to a live directory so unrelated tests don't import a module
         # whose LOG_DIR points at this now-vanishing tmp_path.
         if orig_shadow_root is not None:
-            os.environ["SHADOW_ROOT"] = orig_shadow_root
+            os.environ["HERMX_ROOT"] = orig_shadow_root
         else:
-            os.environ["SHADOW_ROOT"] = str(_SHADOW_ROOT)
+            os.environ["HERMX_ROOT"] = str(_HERMX_ROOT)
         importlib.reload(module)
 
 
 @pytest.fixture
 def reload_wr():
-    """Loader for webhook_receiver bound to an arbitrary populated SHADOW_ROOT.
+    """Loader for webhook_receiver bound to an arbitrary populated HERMX_ROOT.
     Unlike `wr`, the returned callable can be invoked multiple times in one test to
     bind different roots (e.g. a "crash" reload of the same root).
 
-    webhook_receiver resolves SHADOW_ROOT at import time, so each call sets the env
-    then importlib.reload()s the module. Teardown restores SHADOW_ROOT to the live
+    webhook_receiver resolves HERMX_ROOT at import time, so each call sets the env
+    then importlib.reload()s the module. Teardown restores HERMX_ROOT to the live
     session root so unrelated tests keep a module bound to a non-deleted directory.
     """
     import webhook_receiver as module  # noqa: WPS433
 
-    orig_root = os.environ.get("SHADOW_ROOT")
+    orig_root = os.environ.get("HERMX_ROOT")
 
     def _load(root):
         root = Path(root)
         _build_populated_root(root)
-        os.environ["SHADOW_ROOT"] = str(root)
+        os.environ["HERMX_ROOT"] = str(root)
         os.environ.pop("HERMX_LIVE_TRADING", None)
         importlib.reload(module)
         return module
@@ -178,7 +176,7 @@ def reload_wr():
     try:
         yield _load
     finally:
-        os.environ["SHADOW_ROOT"] = orig_root if orig_root is not None else str(_SHADOW_ROOT)
+        os.environ["HERMX_ROOT"] = orig_root if orig_root is not None else str(_HERMX_ROOT)
         importlib.reload(module)
 
 
@@ -192,7 +190,7 @@ def reload_wr():
 # filesystem paths (e.g. strategy_config["_path"] = "<tmp>/strategies/x.json").
 # normalize_snapshot() therefore:
 #   1. drops any dict key named "_path",
-#   2. replaces any string containing the active SHADOW_ROOT path with "<ROOT>".
+#   2. replaces any string containing the active HERMX_ROOT path with "<ROOT>".
 # Set SNAPSHOT_UPDATE=1 to (re)generate goldens.
 # ---------------------------------------------------------------------------
 

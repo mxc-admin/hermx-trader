@@ -14,7 +14,7 @@ LOCKS the live v2 corpus as money-path safe:
     the M3 exchange-agnostic instrument/intent fields).
 
 No network, no OKX subprocess: each file is loaded into an isolated temp
-SHADOW_ROOT with execution hard-disabled by the dry-run corpus config (mirrors
+HERMX_ROOT with execution hard-disabled by the dry-run corpus config (mirrors
 the conftest harness + tests/test_phase6_strategy_schema_v2.py).
 """
 from __future__ import annotations
@@ -27,7 +27,7 @@ from pathlib import Path
 import jsonschema
 import pytest
 
-from conftest import _SHADOW_ROOT, load_alert, write_engine_config
+from conftest import _HERMX_ROOT, load_alert, write_engine_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = REPO_ROOT / "schemas" / "strategy.schema.json"
@@ -77,7 +77,7 @@ def _build_root_with_strategy(root: Path, strategy: dict) -> None:
 def _load_module_at(root: Path):
     import webhook_receiver as module  # noqa: WPS433
 
-    os.environ["SHADOW_ROOT"] = str(root)
+    os.environ["HERMX_ROOT"] = str(root)
     os.environ.pop("HERMX_LIVE_TRADING", None)
     importlib.reload(module)
     return module
@@ -114,7 +114,7 @@ def test_live_v2_readiness_stable_and_consistent(strategy_id, alert_rel, tmp_pat
     readiness that is stable (deterministic) across two isolated loads."""
     v2 = json.loads((LIVE_STRATEGIES_DIR / f"{strategy_id}.json").read_text(encoding="utf-8"))
 
-    orig_root = os.environ.get("SHADOW_ROOT")
+    orig_root = os.environ.get("HERMX_ROOT")
     try:
         a_root = tmp_path / "v2-root-a"
         _build_root_with_strategy(a_root, v2)
@@ -147,5 +147,5 @@ def test_live_v2_readiness_stable_and_consistent(strategy_id, alert_rel, tmp_pat
         assert intent["client_order_id"]
         assert intent["actions"]
     finally:
-        os.environ["SHADOW_ROOT"] = orig_root if orig_root is not None else str(_SHADOW_ROOT)
-        _load_module_at(Path(os.environ["SHADOW_ROOT"]))
+        os.environ["HERMX_ROOT"] = orig_root if orig_root is not None else str(_HERMX_ROOT)
+        _load_module_at(Path(os.environ["HERMX_ROOT"]))

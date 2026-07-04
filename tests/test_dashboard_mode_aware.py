@@ -58,14 +58,17 @@ class _FakeExecutor:
 
 @pytest.fixture
 def dash(tmp_path):
-    """dashboard reloaded against a fresh temp SHADOW_ROOT (mirrors test_phase4)."""
+    """dashboard reloaded against a fresh temp HERMX_ROOT (mirrors test_phase4)."""
     root = tmp_path / "shadow-root"
     (root / "logs").mkdir(parents=True, exist_ok=True)
     (root / "strategies").mkdir(parents=True, exist_ok=True)
 
-    orig_root = os.environ.get("SHADOW_ROOT")
+    orig_hermx_root = os.environ.get("HERMX_ROOT")
     orig_live = os.environ.get("HERMX_LIVE_TRADING")
-    os.environ["SHADOW_ROOT"] = str(root)
+    # ROOT resolves solely from HERMX_ROOT (dashboard.py:38, dashboard_core.py:11,
+    # webhook_receiver.py:131). Pin it to the temp root so a HERMX_ROOT already in
+    # the environment can't win and break isolation.
+    os.environ["HERMX_ROOT"] = str(root)
     os.environ.pop("HERMX_LIVE_TRADING", None)  # disarmed by default (fail-closed)
 
     import dashboard_core as core  # noqa: WPS433
@@ -76,10 +79,10 @@ def dash(tmp_path):
     try:
         yield dash_mod, core, root
     finally:
-        if orig_root is not None:
-            os.environ["SHADOW_ROOT"] = orig_root
+        if orig_hermx_root is not None:
+            os.environ["HERMX_ROOT"] = orig_hermx_root
         else:
-            os.environ.pop("SHADOW_ROOT", None)
+            os.environ.pop("HERMX_ROOT", None)
         if orig_live is not None:
             os.environ["HERMX_LIVE_TRADING"] = orig_live
         else:
@@ -257,3 +260,183 @@ def test_control_state_override_changes_snapshot_source(dash):
     mode_after = dash_mod._effective_strategy_mode(strat, overrides)
     assert mode_after == "live"
     assert dash_mod._snapshot_for_mode(by_mode, mode_after) is by_mode["live"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 0.5 — per-strategy (venue, mode) environment resolution.
+# Each strategy is independent: its venue comes from its own instrument block and
+# its account (demo/live) from its effective mode. No cross-contamination.
+# ---------------------------------------------------------------------------
+
+def _env_recorder(dash_mod, monkeypatch):
+    """Stub _dashboard_executor recording (venue, simulated_trading) per build."""
+    calls: list[tuple] = []
+
+    def fake(config, simulated_trading=True):
+        venue = ((config or {}).get("execution") or {}).get("ccxt_exchange")
+        calls.append((venue, bool(simulated_trading)))
+        return _FakeExecutor(bool(simulated_trading)), None
+
+    monkeypatch.setattr(dash_mod, "_dashboard_executor", fake)
+    return calls
+
+
+def test_strategy_venue_resolution(dash):
+    dash_mod, _core, _root = dash
+    # Missing venue -> okx default (legacy behavior preserved).
+    assert dash_mod._strategy_venue({}) == "okx"
+    # Case-insensitive, from instrument.exchange.
+    assert dash_mod._strategy_venue({"instrument": {"exchange": "KuCoin"}}) == "kucoin"
+    # execution.ccxt_exchange overrides instrument.exchange.
+    assert dash_mod._strategy_venue(
+        {"execution": {"ccxt_exchange": "bybit"}, "instrument": {"exchange": "okx"}}
+    ) == "bybit"
+    # "ccxt" is a backend name, not a venue -> falls back to okx.
+    assert dash_mod._strategy_venue({"instrument": {"exchange": "ccxt"}}) == "okx"
+
+
+def test_strategy_executor_kucoin_demo(dash):
+    """A KuCoin demo strategy gets a KuCoin demo executor (venue + sandbox)."""
+    dash_mod, _core, _root = dash
+    strat = {"instrument": {"exchange": "kucoin", "inst_id": "BTC/USDT:USDT"}}
+    ex, err = dash_mod._strategy_executor(strat, "demo")
+    assert err is None, err
+    assert ex.execution_cfg["ccxt_exchange"] == "kucoin"
+    assert ex.execution_cfg["simulated_trading"] is True
+
+
+def test_strategy_executor_okx_live(dash):
+    """An OKX live strategy gets an OKX live executor (venue + real account)."""
+    dash_mod, _core, _root = dash
+    strat = {"instrument": {"exchange": "okx", "inst_id": "BTC-USDT-SWAP"}}
+    ex, err = dash_mod._strategy_executor(strat, "live")
+    assert err is None, err
+    assert ex.execution_cfg["ccxt_exchange"] == "okx"
+    assert ex.execution_cfg["simulated_trading"] is False
+
+
+def test_strategy_live_snapshot_tags_venue_and_caches_per_env(dash, monkeypatch):
+    dash_mod, _core, _root = dash
+    calls = _env_recorder(dash_mod, monkeypatch)
+    _bust_caches(dash_mod)
+
+    snap = dash_mod.strategy_live_snapshot({"instrument": {"exchange": "kucoin"}}, "demo")
+
+    assert snap["venue"] == "kucoin"
+    assert snap["mode"] == "demo"
+    assert snap["simulated_trading"] is True
+    assert ("kucoin", True) in calls
+    # Cache key is namespaced by (venue, mode) so venues never share a slot.
+    assert "snapshot:kucoin:demo" in dash_mod._OKX_LIVE_CACHE
+
+
+def test_strategy_live_snapshot_fail_closed_when_not_armed(dash, monkeypatch, capsys):
+    dash_mod, _core, _root = dash
+    monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)  # disarmed
+    calls = _env_recorder(dash_mod, monkeypatch)
+    _bust_caches(dash_mod)
+
+    snap = dash_mod.strategy_live_snapshot({"instrument": {"exchange": "kucoin"}}, "live")
+
+    # Degraded to the demo account; never built a live executor for kucoin.
+    assert snap["venue"] == "kucoin"
+    assert snap["mode"] == "demo"
+    assert snap["simulated_trading"] is True
+    assert calls == [("kucoin", True)]
+    assert "HERMX_LIVE_TRADING" in capsys.readouterr().err
+
+
+def test_order_history_reconcile_uses_strategy_venue_and_mode(dash, monkeypatch):
+    """Ledger reconcile is fed the strategy's OWN (venue, mode), never okx/demo."""
+    dash_mod, _core, _root = dash
+    import pnl_ledger  # noqa: WPS433
+
+    recorded: list[tuple] = []
+
+    def fake_reconcile(rows, exchange_id, mode):
+        recorded.append((exchange_id, mode))
+        return 0
+
+    monkeypatch.setattr(pnl_ledger, "reconcile_from_order_history", fake_reconcile)
+
+    class _HistExecutor:
+        def get_order_history_raw(self, inst_ids, limit=100):
+            return [{"instId": "BTC/USDT:USDT"}]
+
+    monkeypatch.setattr(dash_mod, "_strategy_executor", lambda sc, mode: (_HistExecutor(), None))
+    dash_mod._OKX_ORDER_HISTORY_CACHE.clear()
+
+    snap = dash_mod.strategy_order_history_snapshot({"instrument": {"exchange": "kucoin"}}, "live")
+
+    assert snap["ok"] is True
+    assert snap["venue"] == "kucoin"
+    assert snap["mode"] == "live"
+    assert recorded == [("kucoin", "live")]
+
+
+def test_snapshot_for_env_prefers_venue_mode_then_falls_back(dash):
+    dash_mod, _core, _root = dash
+    by_env = {"okx:demo": {"tag": "okx-demo"}, "kucoin:live": {"tag": "kc-live"}}
+    assert dash_mod._snapshot_for_env(by_env, {}, "okx", "demo")["tag"] == "okx-demo"
+    assert dash_mod._snapshot_for_env(by_env, {}, "kucoin", "live")["tag"] == "kc-live"
+    # No per-env hit -> fall back to the legacy mode-only map.
+    by_mode = {"demo": {"tag": "legacy-demo"}, "live": {"tag": "legacy-live"}}
+    assert dash_mod._snapshot_for_env({}, by_mode, "okx", "live")["tag"] == "legacy-live"
+
+
+def test_dashboard_model_builds_per_env_map_no_cross_contamination(dash, monkeypatch):
+    """Two strategies on different venues each resolve their own (venue, mode) env."""
+    dash_mod, _core, root = dash
+    _write_strategy(
+        root / "strategies", "okxs", asset="BTCUSDT",
+        instrument={"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap"},
+        execution_mode="demo",
+    )
+    _write_strategy(
+        root / "strategies", "kcs", asset="ETHUSDT",
+        instrument={"exchange": "kucoin", "inst_id": "ETH/USDT:USDT", "type": "swap"},
+        execution_mode="demo",
+    )
+    calls = _env_recorder(dash_mod, monkeypatch)
+    _bust_caches(dash_mod)
+
+    model = dash_mod.dashboard_model()
+
+    by_env = model["okx_live_by_env"]
+    assert "okx:demo" in by_env
+    assert "kucoin:demo" in by_env
+    assert by_env["okx:demo"]["venue"] == "okx"
+    assert by_env["kucoin:demo"]["venue"] == "kucoin"
+    # Both venues' demo (sandbox) accounts were built; no live executor was ever made.
+    venues_built = {venue for venue, _sim in calls}
+    assert "okx" in venues_built and "kucoin" in venues_built
+    assert False not in {sim for _venue, sim in calls}
+
+
+def test_toggle_switches_venue_and_mode(dash):
+    """Toggling a strategy demo->live flips which (venue, mode) snapshot it reads."""
+    dash_mod, _core, root = dash
+    _write_strategy(
+        root / "strategies", "s1",
+        instrument={"exchange": "kucoin", "inst_id": "ETH/USDT:USDT"},
+        execution_mode="demo",
+    )
+    by_env = {
+        "kucoin:demo": {"tag": "kc-demo"},
+        "kucoin:live": {"tag": "kc-live"},
+    }
+    strat = {"strategy_id": "s1", "execution_mode": "demo",
+             "instrument": {"exchange": "kucoin"}}
+
+    mode_before = dash_mod._effective_strategy_mode(strat, {})
+    assert dash_mod._snapshot_for_env(
+        by_env, {}, dash_mod._strategy_venue(strat), mode_before
+    )["tag"] == "kc-demo"
+
+    assert dash_mod._set_strategy_override("s1", "live") is True
+    overrides = dash_mod._load_control_state().get("strategy_overrides") or {}
+    mode_after = dash_mod._effective_strategy_mode(strat, overrides)
+    assert mode_after == "live"
+    assert dash_mod._snapshot_for_env(
+        by_env, {}, dash_mod._strategy_venue(strat), mode_after
+    )["tag"] == "kc-live"

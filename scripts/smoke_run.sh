@@ -7,7 +7,7 @@
 # dashboard against the demo profile locally for manual smoke testing."
 #
 # SAFETY: the real submit gate is the per-strategy submit_orders flag. This
-# script seeds a throwaway SHADOW_ROOT with a demo engine-config.json and a
+# script seeds a throwaway HERMX_ROOT with a demo engine-config.json and a
 # strategies/ copy whose every submit_orders is false, then exports
 # HERMX_LIVE_TRADING=false. No strategy can submit orders. It is a smoke-test
 # harness, never a live launcher.
@@ -65,7 +65,7 @@ load_env() {
   fi
 }
 
-# --- seed a throwaway dry-run SHADOW_ROOT (no strategy can submit orders) ----
+# --- seed a throwaway dry-run HERMX_ROOT (no strategy can submit orders) ----
 # Copies config/runtime.demo.json -> $TMP_SHADOW/engine-config.json and copies
 # strategies/*.json -> $TMP_SHADOW/strategies/ with every submit_orders forced
 # false. The originals under the repo are never modified.
@@ -87,7 +87,7 @@ for path in sorted(src.glob("*.json")):
     data["submit_orders"] = False
     (dst / path.name).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 PY
-  echo "Seeded dry-run SHADOW_ROOT: $TMP_SHADOW (submit_orders forced false)"
+  echo "Seeded dry-run HERMX_ROOT: $TMP_SHADOW (submit_orders forced false)"
 }
 
 # --- prerequisite / sanity check (no servers launched) ----------------------
@@ -144,7 +144,7 @@ seed_shadow_root
 
 # Run from the repo root (so src/ resolves) but point every config/strategy/
 # ledger lookup at the throwaway dry-run shadow root seeded above.
-export SHADOW_ROOT="$TMP_SHADOW"
+export HERMX_ROOT="$TMP_SHADOW"
 export HERMX_ROOT="$TMP_SHADOW"
 export SHADOW_PORT
 export CLEAN_DASHBOARD_PORT

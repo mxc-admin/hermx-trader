@@ -15,7 +15,7 @@ Proves:
         quarantine path (STRATEGY_QUARANTINE_LEDGER) and never processed.
 
 Schema checks are pure jsonschema; the intake tests reuse the `wr` characterization
-harness (webhook_receiver reloaded against an isolated temp SHADOW_ROOT with
+harness (webhook_receiver reloaded against an isolated temp HERMX_ROOT with
 execution hard-disabled by the dry-run corpus config). No network, no OKX.
 """
 from __future__ import annotations

@@ -19,7 +19,7 @@ Get-Content ".env" | ForEach-Object {
   [Environment]::SetEnvironmentVariable($parts[0].Trim(), $parts[1].Trim(), "Process")
 }
 
-$env:SHADOW_ROOT = $Root
+$env:HERMX_ROOT = $Root
 $env:HERMX_ROOT = $Root
 if (-not $env:HERMX_RECEIVER_PORT) {
     if ($env:SHADOW_PORT) { $env:HERMX_RECEIVER_PORT = $env:SHADOW_PORT }

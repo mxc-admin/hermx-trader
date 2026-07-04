@@ -11,7 +11,7 @@ These guard the two import-time knobs the Docker bridge compose relies on:
 
 Both ``webhook_receiver`` and ``dashboard`` resolve these at *import* time, so each
 case is exercised in a fresh subprocess with a controlled environment. That keeps
-the parent process's module globals (bound by conftest to the session SHADOW_ROOT)
+the parent process's module globals (bound by conftest to the session HERMX_ROOT)
 completely untouched — no reload side effects leak into other tests.
 """
 from __future__ import annotations
@@ -45,7 +45,7 @@ def _resolve(module: str, attrs: list[str], env_overrides: dict[str, str], root:
     # Drop anything that would perturb a clean import, then apply the case's env.
     for key in ("HERMX_BIND_HOST", "HERMX_DATA_DIR"):
         env.pop(key, None)
-    env["SHADOW_ROOT"] = str(root)
+    env["HERMX_ROOT"] = str(root)
     env["PYTHONPATH"] = str(SRC_DIR) + os.pathsep + env.get("PYTHONPATH", "")
     env.update(env_overrides)
 

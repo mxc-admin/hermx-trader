@@ -706,6 +706,206 @@ def _dashboard_executor(config, simulated_trading=True):
         return None, str(exc)
 
 
+def _strategy_venue(strategy_config) -> str:
+    """Resolve the venue a strategy trades on (its own environment).
+
+    Source of truth is the strategy's ``instrument.exchange``; an explicit
+    ``execution.ccxt_exchange`` override wins. Defaults to "okx" so a legacy
+    strategy file with no venue keeps today's behavior. "ccxt" is a backend name,
+    not a venue, so it is treated as unset."""
+    strategy_config = strategy_config or {}
+    inst = strategy_config.get("instrument") or {}
+    exec_blk = strategy_config.get("execution") or {}
+    venue = str(exec_blk.get("ccxt_exchange") or inst.get("exchange") or "").strip().lower()
+    if venue in ("", "ccxt"):
+        venue = "okx"
+    return venue
+
+
+def _venue_symbols(venue) -> list:
+    """Assets of active strategies whose venue matches ``venue`` (dedup, ordered).
+
+    Falls back to all trial symbols when no active strategy declares that venue, so
+    a legacy/empty deploy still resolves the OKX default instead of an empty read."""
+    want = str(venue or "").strip().lower()
+    out = []
+    for strategy in active_strategies():
+        if _strategy_venue(strategy) != want:
+            continue
+        sym = strategy.get("asset")
+        if sym and sym not in out:
+            out.append(sym)
+    return out or trial_symbols()
+
+
+def _strategy_executor(strategy_config, mode):
+    """Build a CCXT executor for a strategy's specific ``(venue, mode)`` environment.
+
+    Delegates to :func:`_dashboard_executor` (the single executor seam tests stub)
+    after pinning the strategy's own venue and mapping mode -> ``simulated_trading``
+    ("demo"/"pause" -> sandbox, "live" -> real venue). Returns ``(executor, err)``."""
+    venue = _strategy_venue(strategy_config)
+    simulated = str(mode or "").lower() != "live"
+    cfg = {
+        "execution": {
+            "exchange": "ccxt",  # backend name; venue is ccxt_exchange
+            "ccxt_exchange": venue,
+            "simulated_trading": simulated,
+        },
+        "instrument": (strategy_config or {}).get("instrument") or {},
+    }
+    return _dashboard_executor(cfg, simulated_trading=simulated)
+
+
+def strategy_live_snapshot(strategy_config, mode):
+    """Live position snapshot for a strategy's specific ``(venue, mode)`` environment.
+
+    Same read path as :func:`okx_live_snapshot` but venue-aware: builds the executor
+    for the strategy's own venue, iterates only that venue's symbols, caches under
+    ``snapshot:{venue}:{mode}`` (venue+mode share one exchange account), and tags the
+    result with ``venue``. Fail-closed: a live read with HERMX_LIVE_TRADING disarmed
+    degrades to the demo snapshot with a logged warning (Principle 5)."""
+    venue = _strategy_venue(strategy_config)
+    simulated = str(mode or "").lower() != "live"
+    mode_key = "demo" if simulated else "live"
+    if not simulated and not live_trading_enabled()[0]:
+        print(
+            f"[dashboard] live positions snapshot requested for {venue} but "
+            "HERMX_LIVE_TRADING is disarmed; falling back to demo read (fail-closed).",
+            file=sys.stderr,
+        )
+        return strategy_live_snapshot(strategy_config, "demo")
+
+    now = time.time()
+    snap_cache_key = f"snapshot:{venue}:{mode_key}"
+    expiry_cache_key = f"expires_at:{venue}:{mode_key}"
+    cached = _OKX_LIVE_CACHE.get(snap_cache_key)
+    if cached is not None and now < float(_OKX_LIVE_CACHE.get(expiry_cache_key) or 0):
+        return cached
+    snapshot = {
+        "ok": False,
+        "positions": {},
+        "error": None,
+        "generated_at": None,
+        "venue": venue,
+        "mode": mode_key,
+        "simulated_trading": simulated,
+    }
+    executor, exec_err = _strategy_executor(strategy_config, mode_key)
+    if executor is None:
+        snapshot["error"] = exec_err or "dashboard_executor_unavailable"
+        return snapshot
+    config = {"instrument": (strategy_config or {}).get("instrument") or {}}
+    try:
+        payload = executor.health() or {}
+        if not bool(payload.get("ok")):
+            snapshot["error"] = str(payload.get("error") or "executor_health_failed")
+        else:
+            by_inst = {row.get("instId"): row for row in (payload.get("positions") or [])}
+            public_marks = mark_prices(config)
+            positions = {}
+            for sym in _venue_symbols(venue):
+                inst = strategy_inst_id(config, sym)
+                row = by_inst.get(inst) or {}
+                pos_qty = as_float(row.get("pos")) or 0.0
+                side = "FLAT"
+                if pos_qty > 0:
+                    side = "LONG"
+                elif pos_qty < 0:
+                    side = "SHORT"
+                positions[sym] = {
+                    "inst_id": inst,
+                    "side": side,
+                    "pos": pos_qty,
+                    "avg_px": as_float(row.get("avgPx")),
+                    "notional_usd": as_float(row.get("notionalUsd")),
+                    "upl": as_float(row.get("upl")),
+                    "realized_pnl": as_float(row.get("realizedPnl")),
+                    "leverage": row.get("lever"),
+                    "margin_mode": row.get("mgnMode"),
+                    "mark_px": as_float(row.get("markPx")),
+                    "last": as_float(row.get("last")) or public_marks.get(sym),
+                    "imr": as_float(row.get("imr")),
+                }
+            snapshot = {
+                "ok": True,
+                "generated_at": payload.get("generated_at"),
+                "account": payload.get("account") or {},
+                "positions": positions,
+                "error": None,
+                "venue": venue,
+                "mode": mode_key,
+                "simulated_trading": simulated,
+            }
+    except Exception as exc:
+        snapshot["error"] = str(exc)
+    _OKX_LIVE_CACHE[snap_cache_key] = snapshot
+    _OKX_LIVE_CACHE[expiry_cache_key] = now + OKX_LIVE_CACHE_TTL_SECONDS
+    return snapshot
+
+
+def strategy_order_history_snapshot(strategy_config, mode):
+    """Order-history snapshot + ledger reconcile for a strategy's ``(venue, mode)``.
+
+    The reconcile is fed the strategy's OWN venue and mode -- never the hardcoded
+    ("okx", "demo") literals -- so a KuCoin-live strategy's closes land in the ledger
+    tagged kucoin/live, not misattributed to okx/demo."""
+    venue = _strategy_venue(strategy_config)
+    simulated = str(mode or "").lower() != "live"
+    mode_key = "demo" if simulated else "live"
+    now = time.time()
+    snap_cache_key = f"snapshot:{venue}:{mode_key}"
+    expiry_cache_key = f"expires_at:{venue}:{mode_key}"
+    cached = _OKX_ORDER_HISTORY_CACHE.get(snap_cache_key)
+    if cached is not None and now < float(_OKX_ORDER_HISTORY_CACHE.get(expiry_cache_key) or 0):
+        return cached
+    snapshot = {"ok": False, "rows": [], "error": None, "generated_at": None,
+                "venue": venue, "mode": mode_key}
+    executor, exec_err = _strategy_executor(strategy_config, mode_key)
+    if executor is None:
+        snapshot["error"] = exec_err or "dashboard_executor_unavailable"
+        return snapshot
+    config = {"instrument": (strategy_config or {}).get("instrument") or {}}
+    try:
+        inst_ids = [strategy_inst_id(config, sym) for sym in _venue_symbols(venue)]
+        rows = executor.get_order_history_raw(inst_ids, limit=100)
+        # Fold HermX close rows into the durable ledger with THIS strategy's venue+mode.
+        # Wrapped so a reconcile failure can never fail the (read-only) snapshot.
+        try:
+            from pnl_ledger import reconcile_from_order_history
+
+            reconcile_from_order_history(rows or [], venue, mode_key)
+        except Exception:
+            pass
+        snapshot = {
+            "ok": True,
+            "generated_at": now,
+            "rows": rows or [],
+            "error": None,
+            "venue": venue,
+            "mode": mode_key,
+        }
+    except Exception as exc:
+        snapshot["error"] = str(exc)
+    _OKX_ORDER_HISTORY_CACHE[snap_cache_key] = snapshot
+    _OKX_ORDER_HISTORY_CACHE[expiry_cache_key] = now + OKX_ORDER_HISTORY_CACHE_TTL_SECONDS
+    return snapshot
+
+
+def _snapshot_for_env(okx_live_by_env, okx_live_by_mode, venue, mode):
+    """Pick the positions snapshot matching a strategy's ``(venue, mode)`` environment.
+
+    Prefers the per-``{venue}:{mode}`` map; falls back to the legacy mode-only map
+    (:func:`_snapshot_for_mode`) so a caller that only has the demo/live snapshots
+    still resolves, then to an empty snapshot so a missing entry never raises."""
+    by_env = okx_live_by_env or {}
+    key = f"{str(venue or 'okx').strip().lower()}:{'live' if str(mode or '').lower() == 'live' else 'demo'}"
+    hit = by_env.get(key)
+    if hit is not None:
+        return hit
+    return _snapshot_for_mode(okx_live_by_mode, mode)
+
+
 def okx_live_snapshot(config, simulated_trading=True):
     simulated = bool(simulated_trading)
     mode_key = "demo" if simulated else "live"
@@ -810,6 +1010,15 @@ def okx_order_history_snapshot(config):
     try:
         inst_ids = [strategy_inst_id(config, sym) for sym in trial_symbols(config)]
         rows = executor.get_order_history_raw(inst_ids, limit=100)
+        # Fold any HermX close rows into the durable closed-trade ledger. Deduped
+        # by composite key, so re-running the snapshot is idempotent. Wrapped so a
+        # reconcile failure can never fail the (read-only) snapshot.
+        try:
+            from pnl_ledger import reconcile_from_order_history
+
+            reconcile_from_order_history(rows or [], "okx", "demo")
+        except Exception:
+            pass
         snapshot = {
             "ok": True,
             "generated_at": now,
@@ -1234,6 +1443,26 @@ def dashboard_model():
     okx_live_demo = okx_live_snapshot(cfg)
     okx_live_live = okx_live_snapshot(cfg, simulated_trading=False) if _any_live else okx_live_demo
     okx_live_by_mode = {"demo": okx_live_demo, "live": okx_live_live}
+    # Phase 0.5 (per-strategy venue+mode): each strategy is an independent
+    # (asset, venue, mode) environment. Group active strategies by (venue, mode) so
+    # one executor per account serves every strategy on it, and fetch that account's
+    # positions + order history from the strategy's OWN venue -- a KuCoin strategy
+    # reads KuCoin, an OKX-live strategy reads OKX live. The per-env map is keyed
+    # "{venue}:{mode}"; the legacy okx_live_by_mode above is retained for callers that
+    # only distinguish demo/live (executor_health_summary, freshness).
+    okx_live_by_env = {}
+    seen_envs = {}  # (venue, mode) -> representative strategy_config
+    for s in strategies:
+        venue = _strategy_venue(s)
+        mode = _effective_strategy_mode(s, _overrides)
+        mode_key = "live" if mode == "live" else "demo"
+        seen_envs.setdefault((venue, mode_key), s)
+    for (venue, mode_key), rep in seen_envs.items():
+        env_key = f"{venue}:{mode_key}"
+        okx_live_by_env[env_key] = strategy_live_snapshot(rep, mode_key)
+        # Reconcile that account's order history into the durable ledger (venue+mode
+        # correct, never hardcoded). Read-only; failures are swallowed inside.
+        strategy_order_history_snapshot(rep, mode_key)
     # Singular okx_live stays the demo snapshot for backward-compatible consumers
     # (executor_health_summary, freshness, the demo ledger section).
     okx_live = okx_live_demo
@@ -1242,6 +1471,7 @@ def dashboard_model():
         "loaded": loaded,
         "okx_live": okx_live,
         "okx_live_by_mode": okx_live_by_mode,
+        "okx_live_by_env": okx_live_by_env,
         "okx_executions": okx_execution_records(cfg),
         "strategies": strategies,
         "active_strategies": active_strategies(strategies),
@@ -1292,8 +1522,11 @@ def api_payload():
     for s in model.get("active_strategies") or []:
         s = dict(s)
         s["effective_mode"] = _effective_strategy_mode(s, _overrides)
-        # Phase 0: which OKX account this strategy's positions are read from.
+        # Phase 0.5: this strategy's own environment -- venue + which account (demo/live)
+        # its positions are read from. The React UI keys per-strategy reads off these.
+        s["venue"] = _strategy_venue(s)
         s["okx_account_source"] = "live" if s["effective_mode"] == "live" else "demo"
+        s["env_key"] = f"{s['venue']}:{s['okx_account_source']}"
         annotated_strategies.append(s)
 
     return {
@@ -1305,6 +1538,7 @@ def api_payload():
         "strategy_alerts": model.get("strategy_alerts") or [],
         "okx_live": model.get("okx_live"),
         "okx_live_by_mode": model.get("okx_live_by_mode") or {},
+        "okx_live_by_env": model.get("okx_live_by_env") or {},
         "okx_executions": model.get("okx_executions") or [],
         "executor": model.get("executor") or {},
         "hermes": {
@@ -1438,6 +1672,8 @@ def okx_live_card(config, okx_live, sym, first_trade_time=None):
     live_price = first_present(pos.get("mark_px"), pos.get("last"))
     budget = as_float(asset_cfg.get("budget_usd")) or 0.0
     realized = as_float(pos.get("realized_pnl")) or 0.0
+    # TODO(Phase 2+): read net_realized_pnl from the ledger when verified
+    # (pnl_ledger.net_realized_for_strategy). Gross stays displayed for now.
     upl = as_float(pos.get("upl")) or 0.0
     total_pnl = realized + upl
     budget_now = budget + total_pnl
@@ -1590,18 +1826,19 @@ def metric_cards_colored(items):
     return f'<div class="metrics">{"".join(cells)}</div>'
 
 
-def strategy_card(strategy, okx_live, alerts, okx_live_by_mode=None):
+def strategy_card(strategy, okx_live, alerts, okx_live_by_mode=None, okx_live_by_env=None):
     sym = strategy.get("asset")
     meta = ASSET_META.get(sym, {"name": sym, "logo": ""})
     rows = [row for row in alerts if row.get("strategy_id") == strategy.get("strategy_id")]
     # effective_mode (pause/demo/live) is annotated upstream in render(); fall back to
     # the file's execution_mode if a caller passes an un-annotated strategy.
     mode = (strategy.get("effective_mode") or strategy.get("execution_mode") or "demo").lower()
-    # Phase 0: read positions from the account matching this strategy's mode. A live
-    # strategy reads the live snapshot; demo/pause read demo. When no per-mode map is
-    # supplied (legacy callers), fall back to the single snapshot passed in.
-    if okx_live_by_mode:
-        okx_live = _snapshot_for_mode(okx_live_by_mode, mode)
+    # Phase 0.5: read positions from THIS strategy's own (venue, mode) account. Prefer
+    # the per-env map; fall back to the legacy mode-only map, then to the single
+    # snapshot passed in (legacy callers). A live strategy reads its venue's live
+    # account; demo/pause read that venue's demo sandbox.
+    if okx_live_by_env or okx_live_by_mode:
+        okx_live = _snapshot_for_env(okx_live_by_env, okx_live_by_mode, _strategy_venue(strategy), mode)
     live = (okx_live.get("positions") or {}).get(sym) or {}
     _mode_labels = {"pause": "Pause", "demo": "Demo", "live": "Live"}
     mode_label = _mode_labels.get(mode, mode.title())
@@ -1913,8 +2150,11 @@ def order_state_section():
     """
 
 
-def strategy_trial_tab(strategies, alerts, okx_live, okx_executions, okx_live_by_mode=None):
-    cards = ''.join(strategy_card(strategy, okx_live, alerts, okx_live_by_mode) for strategy in strategies)
+def strategy_trial_tab(strategies, alerts, okx_live, okx_executions, okx_live_by_mode=None, okx_live_by_env=None):
+    cards = ''.join(
+        strategy_card(strategy, okx_live, alerts, okx_live_by_mode, okx_live_by_env)
+        for strategy in strategies
+    )
     strategy_rows = []
     for strategy in strategies:
         strategy_rows.extend(strategy_execution_rows(strategy, okx_executions))
@@ -2057,6 +2297,7 @@ def render():
     for _s in model.get("active_strategies") or []:
         _s = dict(_s)
         _s["effective_mode"] = _effective_strategy_mode(_s, _overrides)
+        _s["venue"] = _strategy_venue(_s)
         _s["okx_account_source"] = "live" if _s["effective_mode"] == "live" else "demo"
         strategies.append(_s)
     strategy_alerts = model.get("strategy_alerts") or []
@@ -2075,7 +2316,11 @@ def render():
     updated_badge = badge(updated_text, "warn" if fresh.get("stale") else "neutral")
     stale_badge = badge("STALE", "bad") if fresh.get("stale") else ""
     tabs = f'<button class="tab-btn" data-target="{TRIAL_TAB_ID}">Duo Base Dev Trial</button>'
-    panels = strategy_trial_tab(strategies, strategy_alerts, okx_live, okx_executions)
+    panels = strategy_trial_tab(
+        strategies, strategy_alerts, okx_live, okx_executions,
+        okx_live_by_mode=model.get("okx_live_by_mode"),
+        okx_live_by_env=model.get("okx_live_by_env"),
+    )
     return f"""<!doctype html>
 <html>
 <head>
