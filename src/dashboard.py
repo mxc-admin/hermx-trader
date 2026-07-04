@@ -2167,8 +2167,6 @@ def strategy_card(strategy, okx_live, alerts, okx_live_by_mode=None, okx_live_by
     effective_budget = budget_seed + realized_net       # tradable capital (seed + realized)
     total_pnl = realized_net + upl                       # Total P&L (realized + unrealized)
     total_equity = budget_seed + total_pnl               # full account value
-    pnl_now = total_pnl  # legacy alias
-    budget_now = total_equity  # legacy alias
     live_badge = badge("LIVE", "good") if is_live else badge("FLAT", "muted")
     return f"""
     <section class="asset-card clean-card strategy-card">

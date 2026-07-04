@@ -196,7 +196,6 @@ def read_state(dashboard_base=DASHBOARD_BASE, secret=None):
     """
     if secret is None:
         secret = _load_secret()  # auto-resolve from env/.env when caller omitted it
-    receiver_secret = secret  # receiver /health is unauthenticated; kept for symmetry
     api, api_err = _get_json(dashboard_base, "/api", secret=secret)
     health, health_err = _get_json(dashboard_base, "/health", secret=secret)
     rhealth, rhealth_err = _get_json(RECEIVER_BASE, "/health")
