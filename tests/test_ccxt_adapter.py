@@ -4,6 +4,8 @@ import re
 import types
 from pathlib import Path
 
+import pytest
+
 import executors.ccxt_adapter as ccxt_adapter
 from executors.ccxt_adapter import (
     CcxtExecutor,
@@ -504,6 +506,53 @@ def test_ccxt_adapter_gate_auth_kwargs(monkeypatch):
     assert client.captured_kwargs["secret"] == "gate-live-secret"
     # live mode never enables sandbox.
     assert "_sandbox" not in client.captured_kwargs
+
+
+def test_ccxt_adapter_bybit_auth_kwargs(monkeypatch):
+    _install_fake_ccxt(monkeypatch, bybit=_FakeAuthExchange)
+    # demo mode -> testnet creds preferred over plain.
+    monkeypatch.setenv("BYBIT_TESTNET_API_KEY", "bybit-testnet-key")
+    monkeypatch.setenv("BYBIT_TESTNET_SECRET_KEY", "bybit-testnet-secret")
+    monkeypatch.setenv("BYBIT_API_KEY", "bybit-live-key")
+    monkeypatch.setenv("BYBIT_SECRET_KEY", "bybit-live-secret")
+
+    ex = _auth_executor("bybit", simulated=True)
+    client = ex._client()
+
+    assert client.captured_kwargs["apiKey"] == "bybit-testnet-key"
+    assert client.captured_kwargs["secret"] == "bybit-testnet-secret"
+    # Bybit has no passphrase.
+    assert "password" not in client.captured_kwargs
+
+
+def test_ccxt_adapter_coinbase_auth_kwargs(monkeypatch):
+    _install_fake_ccxt(monkeypatch, coinbase=_FakeAuthExchange)
+    # demo mode -> sandbox creds preferred over plain.
+    monkeypatch.setenv("COINBASE_SANDBOX_API_KEY", "coinbase-sandbox-key")
+    monkeypatch.setenv("COINBASE_SANDBOX_SECRET_KEY", "coinbase-sandbox-secret")
+    monkeypatch.setenv("COINBASE_API_KEY", "coinbase-live-key")
+    monkeypatch.setenv("COINBASE_SECRET_KEY", "coinbase-live-secret")
+
+    ex = _auth_executor("coinbase", simulated=True)
+    client = ex._client()
+
+    assert client.captured_kwargs["apiKey"] == "coinbase-sandbox-key"
+    assert client.captured_kwargs["secret"] == "coinbase-sandbox-secret"
+
+
+def test_ccxt_adapter_coinbase_demo_fails_closed_without_sandbox(monkeypatch):
+    # ccxt's coinbase adapter has no sandbox URL; a demo request must fail closed.
+    class _NoSandboxExchange:
+        def __init__(self, kwargs):
+            self.captured_kwargs = dict(kwargs)
+
+    _install_fake_ccxt(monkeypatch, coinbase=_NoSandboxExchange)
+    monkeypatch.setenv("COINBASE_SANDBOX_API_KEY", "coinbase-sandbox-key")
+    monkeypatch.setenv("COINBASE_SANDBOX_SECRET_KEY", "coinbase-sandbox-secret")
+
+    ex = _auth_executor("coinbase", simulated=True)
+    with pytest.raises(RuntimeError, match="no sandbox support"):
+        ex._client()
 
 
 def test_symbol_mapping_usdc_suffix():

@@ -13,6 +13,10 @@ its credentials, and Hyperliquid additionally skips cleanly when the optional
     HERMX_RUN_OKX_PAPER_TESTS=true          HERMX_RUN_OKX_WRITE_TESTS=true
     HERMX_RUN_KUCOIN_PAPER_TESTS=true       HERMX_RUN_KUCOIN_WRITE_TESTS=true
     HERMX_RUN_HYPERLIQUID_PAPER_TESTS=true  HERMX_RUN_HYPERLIQUID_WRITE_TESTS=true
+    HERMX_RUN_BYBIT_PAPER_TESTS=true        HERMX_RUN_BYBIT_WRITE_TESTS=true
+    HERMX_RUN_BINANCE_PAPER_TESTS=true      HERMX_RUN_BINANCE_WRITE_TESTS=true
+    HERMX_RUN_BITGET_PAPER_TESTS=true       HERMX_RUN_BITGET_WRITE_TESTS=true
+    HERMX_RUN_GATE_PAPER_TESTS=true         HERMX_RUN_GATE_WRITE_TESTS=true
 """
 from __future__ import annotations
 
@@ -122,6 +126,18 @@ def _health_kucoin(executor) -> None:
 
 def _health_hyperliquid(executor) -> None:
     assert executor._exchange_id() == "hyperliquid"
+    snap = executor.health()
+    assert snap["exchange"] == "ccxt"
+    assert isinstance(snap.get("ok"), bool)
+
+
+def _read_only_markets(client) -> None:
+    assert client.fetch_time()
+    markets = client.load_markets()
+    assert markets
+
+
+def _health_generic(executor) -> None:
     snap = executor.health()
     assert snap["exchange"] == "ccxt"
     assert isinstance(snap.get("ok"), bool)
@@ -242,6 +258,155 @@ HYPERLIQUID = {
 }
 
 
+BYBIT = {
+    "id": "bybit",
+    "paper_flag": "HERMX_RUN_BYBIT_PAPER_TESTS",
+    "write_flag": "HERMX_RUN_BYBIT_WRITE_TESTS",
+    "config_file": "runtime.bybit.demo.json",
+    "ccxt_exchange": "bybit",
+    "cred_venue": "bybit",
+    "cred_keys": ("BYBIT_API_KEY", "BYBIT_SECRET_KEY"),
+    "cred_label": "Bybit testnet",
+    "guard": _no_guard,
+    "read_only": _read_only_markets,
+    "health": _health_generic,
+    "signal": {
+        "strategy_id": "bybit-paper-integration",
+        "symbol": "BTCUSDT",
+        "side": "buy",
+        "timeframe": "2h",
+        "tv_time": "2026-06-27T00:00:00Z",
+        "signal_id": "bybit-paper-kill-switch-proof",
+    },
+    "strategy": {
+        "strategy_id": "bybit-paper-integration",
+        "asset": "BTCUSDT",
+        "inst_id": "BTC-USDT-SWAP",
+        "instrument": {"exchange": "bybit", "inst_id": "BTC-USDT-SWAP", "type": "swap"},
+        "budget_usd": 10,
+        "leverage": 1,
+        "td_mode": "isolated",
+        "execution_mode": "live",
+    },
+    "symbol_key": "inst_id",
+    "symbol_env": "HERMX_BYBIT_TEST_INST_ID",
+    "symbol_default": "BTC-USDT-SWAP",
+    "cl_prefix": "hermxby",
+    "amount": 1,
+}
+
+BINANCE = {
+    "id": "binance",
+    "paper_flag": "HERMX_RUN_BINANCE_PAPER_TESTS",
+    "write_flag": "HERMX_RUN_BINANCE_WRITE_TESTS",
+    "config_file": "runtime.binance.demo.json",
+    "ccxt_exchange": "binance",
+    "cred_venue": "binance",
+    "cred_keys": ("BINANCE_API_KEY", "BINANCE_SECRET_KEY"),
+    "cred_label": "Binance testnet",
+    "guard": _no_guard,
+    "read_only": _read_only_markets,
+    "health": _health_generic,
+    "signal": {
+        "strategy_id": "binance-paper-integration",
+        "symbol": "BTCUSDT",
+        "side": "buy",
+        "timeframe": "2h",
+        "tv_time": "2026-06-27T00:00:00Z",
+        "signal_id": "binance-paper-kill-switch-proof",
+    },
+    "strategy": {
+        "strategy_id": "binance-paper-integration",
+        "asset": "BTCUSDT",
+        "inst_id": "BTC-USDT-SWAP",
+        "instrument": {"exchange": "binance", "inst_id": "BTC-USDT-SWAP", "type": "swap"},
+        "budget_usd": 10,
+        "leverage": 1,
+        "td_mode": "isolated",
+        "execution_mode": "live",
+    },
+    "symbol_key": "inst_id",
+    "symbol_env": "HERMX_BINANCE_TEST_INST_ID",
+    "symbol_default": "BTC-USDT-SWAP",
+    "cl_prefix": "hermxbn",
+    "amount": 1,
+}
+
+BITGET = {
+    "id": "bitget",
+    "paper_flag": "HERMX_RUN_BITGET_PAPER_TESTS",
+    "write_flag": "HERMX_RUN_BITGET_WRITE_TESTS",
+    "config_file": "runtime.bitget.demo.json",
+    "ccxt_exchange": "bitget",
+    "cred_venue": "bitget",
+    "cred_keys": ("BITGET_API_KEY", "BITGET_SECRET_KEY", "BITGET_PASSPHRASE"),
+    "cred_label": "Bitget demo",
+    "guard": _no_guard,
+    "read_only": _read_only_markets,
+    "health": _health_generic,
+    "signal": {
+        "strategy_id": "bitget-paper-integration",
+        "symbol": "BTCUSDT",
+        "side": "buy",
+        "timeframe": "2h",
+        "tv_time": "2026-06-27T00:00:00Z",
+        "signal_id": "bitget-paper-kill-switch-proof",
+    },
+    "strategy": {
+        "strategy_id": "bitget-paper-integration",
+        "asset": "BTCUSDT",
+        "inst_id": "BTC-USDT-SWAP",
+        "instrument": {"exchange": "bitget", "inst_id": "BTC-USDT-SWAP", "type": "swap"},
+        "budget_usd": 10,
+        "leverage": 1,
+        "td_mode": "isolated",
+        "execution_mode": "live",
+    },
+    "symbol_key": "inst_id",
+    "symbol_env": "HERMX_BITGET_TEST_INST_ID",
+    "symbol_default": "BTC-USDT-SWAP",
+    "cl_prefix": "hermxbg",
+    "amount": 1,
+}
+
+GATE = {
+    "id": "gate",
+    "paper_flag": "HERMX_RUN_GATE_PAPER_TESTS",
+    "write_flag": "HERMX_RUN_GATE_WRITE_TESTS",
+    "config_file": "runtime.gate.demo.json",
+    "ccxt_exchange": "gate",
+    "cred_venue": "gate",
+    "cred_keys": ("GATE_API_KEY", "GATE_SECRET_KEY"),
+    "cred_label": "Gate.io testnet",
+    "guard": _no_guard,
+    "read_only": _read_only_markets,
+    "health": _health_generic,
+    "signal": {
+        "strategy_id": "gate-paper-integration",
+        "symbol": "BTCUSDT",
+        "side": "buy",
+        "timeframe": "2h",
+        "tv_time": "2026-06-27T00:00:00Z",
+        "signal_id": "gate-paper-kill-switch-proof",
+    },
+    "strategy": {
+        "strategy_id": "gate-paper-integration",
+        "asset": "BTCUSDT",
+        "inst_id": "BTC-USDT-SWAP",
+        "instrument": {"exchange": "gate", "inst_id": "BTC-USDT-SWAP", "type": "swap"},
+        "budget_usd": 10,
+        "leverage": 1,
+        "td_mode": "isolated",
+        "execution_mode": "live",
+    },
+    "symbol_key": "inst_id",
+    "symbol_env": "HERMX_GATE_TEST_INST_ID",
+    "symbol_default": "BTC-USDT-SWAP",
+    "cl_prefix": "hermxgt",
+    "amount": 1,
+}
+
+
 def _venue_param(venue: dict):
     return pytest.param(
         venue,
@@ -257,7 +422,15 @@ def _venue_param(venue: dict):
     )
 
 
-VENUES = [_venue_param(OKX), _venue_param(KUCOIN), _venue_param(HYPERLIQUID)]
+VENUES = [
+    _venue_param(OKX),
+    _venue_param(KUCOIN),
+    _venue_param(HYPERLIQUID),
+    _venue_param(BYBIT),
+    _venue_param(BINANCE),
+    _venue_param(BITGET),
+    _venue_param(GATE),
+]
 
 
 @pytest.mark.parametrize("venue", VENUES)

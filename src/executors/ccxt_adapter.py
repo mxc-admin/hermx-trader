@@ -393,8 +393,11 @@ class CcxtExecutor(BaseExecutor):
         elif exchange_id in ("gate", "gateio"):
             kwargs["apiKey"] = creds.get("GATE_API_KEY", "")
             kwargs["secret"] = creds.get("GATE_SECRET_KEY", "")
-        # coinbase: set_sandbox_mode() raises in ccxt 4.5.61 (no test URL). Live/spot only.
-        # Credentials resolved but not wired — add elif when ccxt adds coinbase sandbox support.
+        elif exchange_id in ("coinbase", "coinbaseadvanced"):
+            # Credentials applied; a demo request still fails closed below via the
+            # set_sandbox_mode() guard if ccxt's coinbase adapter has no sandbox URL.
+            kwargs["apiKey"] = creds.get("COINBASE_API_KEY", "")
+            kwargs["secret"] = creds.get("COINBASE_SECRET_KEY", "")
 
         client = exchange_cls(kwargs)
 
