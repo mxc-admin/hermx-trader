@@ -30,7 +30,10 @@ _HERMX_ROOT = Path(tempfile.mkdtemp(prefix="hermx-test-shadow-root-"))
 # fallback was removed), so binding it here fully isolates the test process.
 os.environ["HERMX_ROOT"] = str(_HERMX_ROOT)
 # HERMX_SECRET is the sole source authenticating both the webhook and the dashboard.
-os.environ.setdefault("HERMX_SECRET", "test-secret")
+# Force-set (not setdefault): a real launcher (e.g. run.sh) may have already exported
+# a random production secret into this process's environment before pytest starts,
+# which would silently break every test that asserts against "test-secret".
+os.environ["HERMX_SECRET"] = "test-secret"
 
 # Ensure the live-trading kill switch starts disabled (fail-closed) for every test
 # process, unless an individual test opts in via monkeypatch.
