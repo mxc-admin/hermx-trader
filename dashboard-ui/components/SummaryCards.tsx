@@ -31,7 +31,7 @@ export function SummaryCards() {
 
   const strategies = data?.strategies ?? []
   const positions = data?.okx_live?.positions ?? {}
-  const executor = data?.executor ?? {}
+  const executor = data?.executor
   const arm = health?.arm ?? {}
 
   // Card 1 — system status.
@@ -69,7 +69,11 @@ export function SummaryCards() {
   // Card 4 — executor health.
   let execLabel: string
   let execKind: Kind
-  if (executor.stale) {
+  if (!executor) {
+    // No data yet (null/cold load) — distinct from an engine that errored.
+    execLabel = '—'
+    execKind = 'muted'
+  } else if (executor.stale) {
     execLabel = 'STALE'
     execKind = 'warn'
   } else if (!executor.ok) {

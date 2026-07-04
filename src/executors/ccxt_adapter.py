@@ -198,6 +198,118 @@ def _order_fully_filled(order: dict, requested_amount: float | None) -> bool:
     return filled >= req - 1e-9
 
 
+# B2 -- venue equity/balance drift threshold (percent). Read at CALL time (not module
+# load) so a test / operator can retune it without a reload. Default 5.0%.
+HERMX_BALANCE_DRIFT_THRESHOLD_PCT_DEFAULT = 5.0
+
+# B1 -- float epsilon for the venue-vs-journal position comparison. A drift smaller
+# than this is treated as no drift (float add/subtract residue, not a real divergence).
+POSITION_DRIFT_EPS = 1e-8
+
+
+def detect_position_drift(executor, journal_positions: dict, venue: str, mode: str) -> list:
+    """OBSERVE-ONLY (B1): compare HermX's journal view of open positions against what
+    the venue actually reports. NEVER auto-corrects, never submits.
+
+    Args:
+        executor: an adapter exposing ``get_positions()`` (the read-only query verb).
+        journal_positions: ``{inst_id: signed_qty}`` -- HermX's believed net position.
+        venue / mode: tags echoed into each drift row (e.g. "okx", "demo").
+
+    Returns a list of ``{inst_id, journal_qty, venue_qty, drift, venue, mode}`` for
+    every instrument (in either set) where ``abs(venue_qty - journal_qty) >
+    POSITION_DRIFT_EPS``. A venue read that raises degrades to ``[]`` (logs a warning) so
+    a drift check can NEVER crash startup or a render cycle.
+    """
+    try:
+        venue_rows = executor.get_positions() or []
+    except Exception as exc:  # never crash the caller on an observe-only read
+        logger.warning(
+            "detect_position_drift: venue read failed venue=%s mode=%s: %s",
+            venue, mode, redact_secrets(str(exc)),
+        )
+        return []
+    venue_view: dict = {}
+    for row in venue_rows:
+        inst = (row or {}).get("inst_id")
+        if inst is None:
+            continue
+        venue_view[inst] = _to_float(row.get("pos"), 0.0) or 0.0
+    journal_view = {k: (_to_float(v, 0.0) or 0.0) for k, v in (journal_positions or {}).items()}
+    drifts: list = []
+    for inst in set(venue_view) | set(journal_view):
+        jq = journal_view.get(inst, 0.0)
+        vq = venue_view.get(inst, 0.0)
+        drift = vq - jq
+        if abs(drift) > POSITION_DRIFT_EPS:
+            drifts.append({
+                "inst_id": inst,
+                "journal_qty": jq,
+                "venue_qty": vq,
+                "drift": drift,
+                "venue": venue,
+                "mode": mode,
+            })
+    return drifts
+
+
+def check_balance_drift(executor, hermx_equity_usd: float, venue: str, mode: str,
+                        currency: str = "USDT") -> dict | None:
+    """OBSERVE-ONLY (B2): reconcile the venue's real total balance against HermX's
+    computed equity. Live-mode only. NEVER auto-corrects, never blocks.
+
+    Returns ``None`` for a demo/pause account (sandbox balance is fake) or when the
+    venue balance read fails. Otherwise returns
+    ``{venue_balance, hermx_equity, drift_usd, drift_pct, alerted}``. When
+    ``drift_pct`` exceeds ``HERMX_BALANCE_DRIFT_THRESHOLD_PCT`` (env, default 5.0) it
+    logs a WARNING and emits a RECONCILE_MISMATCH (best-effort).
+    """
+    if str(mode or "").lower() != "live":
+        return None  # demo/pause sandbox balance is arbitrary -> meaningless to compare
+    bal = executor.get_balance_summary(currency)
+    if bal is None:
+        return None  # venue call failed -> degrade silently, no false alert
+    venue_balance = float(bal.get("total") or 0.0)
+    equity = float(hermx_equity_usd or 0.0)
+    drift = abs(venue_balance - equity)
+    drift_pct = drift / max(equity, 1.0) * 100.0
+    try:
+        threshold = float(os.environ.get(
+            "HERMX_BALANCE_DRIFT_THRESHOLD_PCT",
+            HERMX_BALANCE_DRIFT_THRESHOLD_PCT_DEFAULT,
+        ))
+    except (TypeError, ValueError):
+        threshold = HERMX_BALANCE_DRIFT_THRESHOLD_PCT_DEFAULT
+    alerted = drift_pct > threshold
+    if alerted:
+        logger.warning(
+            "balance_drift venue=%s mode=%s venue_balance=%.2f hermx_equity=%.2f "
+            "drift_usd=%.2f drift_pct=%.2f threshold=%.2f",
+            venue, mode, venue_balance, equity, drift, drift_pct, threshold,
+        )
+        try:  # lazy import avoids a receiver<->adapter import cycle at load time
+            import webhook_receiver as _wr
+            _wr.emit_reconcile_alert(_wr.RECONCILE_ALERT_MISMATCH, {
+                "stage": "balance_drift",
+                "type": "balance_drift",
+                "venue": venue,
+                "mode": mode,
+                "venue_balance": venue_balance,
+                "hermx_equity": equity,
+                "drift_usd": drift,
+                "drift_pct": drift_pct,
+            })
+        except Exception:  # an alert-transport failure must never break the check
+            pass
+    return {
+        "venue_balance": venue_balance,
+        "hermx_equity": equity,
+        "drift_usd": drift,
+        "drift_pct": drift_pct,
+        "alerted": alerted,
+    }
+
+
 class CcxtExecutor(BaseExecutor):
     key = "ccxt"
 
@@ -962,6 +1074,30 @@ class CcxtExecutor(BaseExecutor):
             return rows
         except Exception:
             return []
+
+    def get_balance_summary(self, currency: str = "USDT") -> dict | None:
+        """Single-currency ``{free, used, total, currency}`` equity as a dict, or None.
+
+        DISTINCT from :meth:`get_balance` (the observe-only per-currency LIST query
+        contract, unchanged): this returns ONE currency's unified figures for the B2
+        equity-drift check (``check_balance_drift``). Only meaningful in LIVE mode -- a
+        demo sandbox balance is arbitrary. Never raises: a failed venue read returns
+        None so the drift check degrades instead of crashing."""
+        try:
+            client = self._client()
+            bal = client.fetch_balance() or {}
+            total = (bal.get("total") or {}).get(currency)
+            free = (bal.get("free") or {}).get(currency)
+            used = (bal.get("used") or {}).get(currency)
+            return {
+                "free": _to_float(free, 0.0) or 0.0,
+                "used": _to_float(used, 0.0) or 0.0,
+                "total": _to_float(total, 0.0) or 0.0,
+                "currency": currency,
+            }
+        except Exception as exc:
+            logger.warning("get_balance_summary failed for %s: %s", currency, redact_secrets(str(exc)))
+            return None
 
     def health(self) -> dict:
         try:

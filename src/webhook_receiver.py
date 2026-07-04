@@ -119,6 +119,10 @@ REPLAY_LOOKBACK_SECONDS = 300.0
 REPLAY_MAX_TV_AGE_SECONDS = 120.0
 HERMX_SUBMIT_TIMEOUT_SECONDS = 45.0
 HERMX_WORKER_POOL_SIZE = 1
+# B1 -- venue position-drift detection (observe-only). Default OFF: the receiver only
+# runs the startup journal-vs-venue position audit when explicitly armed. Detection +
+# alerting never auto-correct (reconcile_position_drift).
+HERMX_POSITION_DRIFT_ENABLED = (os.environ.get("HERMX_POSITION_DRIFT_ENABLED") or "false").strip().lower() in {"1", "true", "yes"}
 HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS = 86400.0
 # Liveness watchdog: STALE_SECONDS is the single knob. <= 0 disables the watchdog
 # entirely (merged the former HERMX_WATCHDOG_ENABLED bool into this per the flag audit).
@@ -2250,6 +2254,34 @@ def emit_reconcile_alert(kind: str, detail: dict) -> dict:
         logging.error("failed to write reconcile alert %s: %s", kind, exc)
     emit_operator_alert(kind, detail or {}, severity="warning")
     return record
+
+
+def reconcile_position_drift(executor, journal_positions: dict, venue: str, mode: str) -> list:
+    """OBSERVE-ONLY (B1): detect journal-vs-venue position drift and alert. NEVER
+    auto-corrects, cancels, or submits.
+
+    Delegates detection to the adapter's pure ``detect_position_drift`` (which reads
+    ``executor.get_positions()`` and degrades to ``[]`` on any venue error), then logs
+    each drift as a WARNING and emits a ``RECONCILE_MISMATCH`` (type=position_drift).
+    Returns the drift list (also useful for tests / the dashboard snapshot)."""
+    from executors.ccxt_adapter import detect_position_drift
+    drifts = detect_position_drift(executor, journal_positions, venue, mode)
+    for d in drifts:
+        logging.warning(
+            "position_drift inst_id=%s journal_qty=%s venue_qty=%s drift=%s venue=%s mode=%s",
+            d.get("inst_id"), d.get("journal_qty"), d.get("venue_qty"), d.get("drift"), venue, mode,
+        )
+        emit_reconcile_alert(RECONCILE_ALERT_MISMATCH, {
+            "stage": "position_drift",
+            "type": "position_drift",
+            "inst_id": d.get("inst_id"),
+            "journal_qty": d.get("journal_qty"),
+            "venue_qty": d.get("venue_qty"),
+            "drift": d.get("drift"),
+            "venue": venue,
+            "mode": mode,
+        })
+    return drifts
 
 
 def _effective_execution_config(order_intent: "dict | None" = None) -> dict:

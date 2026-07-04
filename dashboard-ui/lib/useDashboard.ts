@@ -26,6 +26,9 @@ export function useDashboard(): DashboardState {
 
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mounted = useRef(true)
+  // Monotonic request-generation guard: a stale (e.g. timed-out) request must
+  // not overwrite the state written by a newer one that already completed.
+  const reqId = useRef(0)
 
   const clearTimer = useCallback(() => {
     if (timer.current !== null) {
@@ -37,21 +40,22 @@ export function useDashboard(): DashboardState {
   // Uses setTimeout (not setInterval) so the next poll only starts after the
   // current fetch fully completes — prevents overlapping requests on slow responses.
   const loadOnce = useCallback(async (reschedule: boolean) => {
+    const myId = ++reqId.current
     try {
       const [api, hp] = await Promise.all([fetchApi(), fetchHealth()])
-      if (!mounted.current) return
+      if (!mounted.current || myId !== reqId.current) return
       setData(api)
       setHealth(hp)
       setError(null)
       setLastUpdated(new Date())
     } catch (err) {
-      if (!mounted.current) return
+      if (!mounted.current || myId !== reqId.current) return
       // Keep the last good data visible; only update the error string.
       setError((err as Error).message)
     } finally {
-      if (mounted.current) setLoading(false)
+      if (mounted.current && myId === reqId.current) setLoading(false)
     }
-    if (reschedule && mounted.current) {
+    if (reschedule && mounted.current && myId === reqId.current) {
       clearTimer()
       timer.current = setTimeout(() => { void loadOnce(true) }, REFRESH_INTERVAL)
     }

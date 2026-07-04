@@ -102,6 +102,30 @@ def _compute_net_realized(
     return pnl_gross + fee_cost
 
 
+def _ledger_external_fills_enabled() -> bool:
+    """B3 flag (read at CALL time): when armed, reconcile ledgers external/manual
+    closes (no HermX cl_ord_id) with ``strategy_id=None, source="external"`` instead of
+    dropping them. Default OFF preserves today's attribution-only semantics."""
+    return str(os.environ.get("HERMX_LEDGER_EXTERNAL_FILLS", "")).strip().lower() in {"1", "true", "yes"}
+
+
+def check_overfill(inst_id, filled_qty, ordered_qty, tolerance: float = 1.01) -> bool:
+    """OBSERVE-ONLY invariant (Opp 10, folded into B1): a close fill must not exceed the
+    ordered size beyond a small tolerance.
+
+    Logs a WARNING and returns True when ``filled_qty > ordered_qty * tolerance`` (1%
+    by default). NEVER blocks reconcile or execution -- pure observation. An
+    unknown/non-positive ordered size is a no-op (can't judge)."""
+    f = _as_float(filled_qty)
+    o = _as_float(ordered_qty)
+    if f is None or o is None or o <= 0:
+        return False
+    if f > o * tolerance:
+        logger.warning("overfill detected: %s filled=%.8g ordered=%.8g", inst_id, f, o)
+        return True
+    return False
+
+
 def _data_dir() -> Path:
     """Resolve the writable data dir the ledger lives under (call-time env read)."""
     return Path(
@@ -267,6 +291,11 @@ def read_closed_trades(
             # read-only, never-persisted pattern as the net back-fill above (v3).
             if "recorded_at_ms" not in row:
                 row["recorded_at_ms"] = None
+            # Back-fill B3 attribution ``source`` for v1/v2/v3 rows written before the
+            # field existed: every such close is a HermX-attributed one (externals were
+            # dropped pre-B3), so it reads back as "hermx". Read-only, never persisted.
+            if "source" not in row:
+                row["source"] = "hermx"
             rows.append(row)
     # Read-side dedupe by composite key (last occurrence wins). Backstop against
     # any duplicate that reached disk — legacy data or a pre-fix TOCTOU race. The
@@ -339,6 +368,18 @@ def reconcile_health_stats() -> dict:
         "reconcile_lag_ms": (now_ms - best) if best is not None else None,
         "recorded_at_rows_pct": recorded_count / len(rows),
     }
+
+
+def external_fills_count(mode: str | None = None) -> int:
+    """B3: count ledgered external / manual closes (``source == "external"``).
+
+    These carry ``strategy_id=None`` so they are excluded from per-strategy sums; this
+    account-level count lets the portfolio view surface how many out-of-band closes
+    landed in the ledger. Read-only; optionally scoped to a ``mode`` (demo|live)."""
+    rows = read_closed_trades()
+    if mode is not None:
+        rows = [r for r in rows if r.get("mode") == mode]
+    return sum(1 for r in rows if r.get("source") == "external")
 
 
 def net_realized_for_strategy(
@@ -550,6 +591,10 @@ def _build_entry(row: dict, exchange_id: str, mode: str, side: str, filled: floa
         "closed_at_ms": _row_ts(row),
         "recorded_at_ms": int(time.time() * 1000),
         "cl_ord_id": cl_ord_id,
+        # B3 attribution tag: a HermX-issued close is "hermx"; an external/manual close
+        # (ledgered only when HERMX_LEDGER_EXTERNAL_FILLS is armed) is overwritten to
+        # "external" by the caller. Legacy rows without this key read back as "hermx".
+        "source": "hermx",
     }
 
 
@@ -609,6 +654,11 @@ def reconcile_from_order_history(
         if not is_close:
             continue
 
+        # Opp 10 (folded into B1): observe-only overfill invariant. A close whose filled
+        # size exceeds the ordered size (beyond tolerance) logs a WARNING but is never
+        # blocked. Runs for every close (HermX + external) before attribution.
+        check_overfill(inst_id, filled, row.get("sz"))
+
         # Terminal-only ledgering: skip an in-flight partial/resting fill whose state
         # is not yet terminal, UNLESS reduceOnly says the venue explicitly marked it a
         # close (an explicit close is processed regardless of state). A missing/None
@@ -625,7 +675,17 @@ def reconcile_from_order_history(
 
         cl_ord_id = row.get("clOrdId") or row.get("clientOrderId")
         if not is_hermx_cl_ord_id(cl_ord_id, exchange_id):
-            continue  # attribution: skip external / venue-native closes
+            # B3: an external / venue-native close. Default -> dropped (unchanged). When
+            # HERMX_LEDGER_EXTERNAL_FILLS is armed, ledger it explicitly with
+            # strategy_id=None + source="external" so lifetime realized P&L reconciles to
+            # the account after out-of-band operator action. Composite-key dedup keeps
+            # re-runs idempotent; strategy_id=None keeps it out of per-strategy sums.
+            if _ledger_external_fills_enabled():
+                external = _build_entry(row, exchange_id, mode, side, filled)
+                external["strategy_id"] = None
+                external["source"] = "external"
+                entries.append(external)
+            continue
 
         entries.append(_build_entry(row, exchange_id, mode, side, filled))
 

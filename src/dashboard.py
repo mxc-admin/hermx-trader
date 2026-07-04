@@ -78,8 +78,11 @@ POLICIES = ()
 # this is considered stale for the freshness badge / executor banner (D7).
 REFRESH_INTERVAL_SECONDS = 20
 
-MODEL_CACHE_TTL_SECONDS = 10
+MODEL_CACHE_TTL_SECONDS = 30
 _MODEL_CACHE = {"expires_at": 0.0, "model": None}
+# Single-flight lock: serializes cold synchronous builds (first /api request)
+# with the background refresh loop so only one thread pays the ~15s build cost.
+_MODEL_BUILD_LOCK = threading.Lock()
 OKX_LIVE_CACHE_TTL_SECONDS = 5
 _OKX_LIVE_CACHE = {"expires_at": 0.0, "snapshot": None}
 OKX_ORDER_HISTORY_CACHE_TTL_SECONDS = 15
@@ -1564,10 +1567,29 @@ def freshness_summary(model, now=None):
 
 
 def dashboard_model():
-    now = time.time()
+    # Stale-while-revalidate: once the cache holds ANY model, return it
+    # immediately -- even if past its TTL. Freshness is the background refresh
+    # loop's job (_refresh_dashboard_cache_loop), so /api never blocks on a
+    # rebuild in steady state. A genuinely empty cache (model is None, e.g.
+    # first boot or a test that reset it) still does one synchronous build,
+    # single-flighted under _MODEL_BUILD_LOCK so a concurrent cold /api request
+    # and the loop's first pass don't both pay the ~15s cost.
     cached = _MODEL_CACHE.get("model")
-    if cached is not None and now < float(_MODEL_CACHE.get("expires_at") or 0):
+    if cached is not None:
         return cached
+    with _MODEL_BUILD_LOCK:
+        # Re-check under the lock: another thread may have built while we waited.
+        cached = _MODEL_CACHE.get("model")
+        if cached is not None:
+            return cached
+        return _build_dashboard_model()
+
+
+def _build_dashboard_model():
+    """Build the dashboard model and refresh _MODEL_CACHE. Always does the full
+    work -- callers decide when a rebuild is warranted (cold cache in
+    dashboard_model(), or the periodic background loop)."""
+    now = time.time()
     # Clear per-read ledger stats so ledger_health reflects THIS build only (D1/D2).
     LEDGER_READ_STATS.clear()
     cfg = shadow_config()
@@ -1626,7 +1648,11 @@ def dashboard_model():
     model["ledger_health"] = ledger_health_summary()
     model["freshness"] = freshness_summary(model, now)
     _MODEL_CACHE["model"] = model
-    _MODEL_CACHE["expires_at"] = now + MODEL_CACHE_TTL_SECONDS
+    # Stamp expiry from build-completion time, not the build-start `now`. A slow
+    # (~15s) build previously produced a cache that was already expired the
+    # instant it was stored (born-expired), forcing a rebuild on the very next
+    # request.
+    _MODEL_CACHE["expires_at"] = time.time() + MODEL_CACHE_TTL_SECONDS
     return model
 
 
@@ -3235,24 +3261,33 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
-def _warm_dashboard_cache():
-    """Best-effort pre-warm of _MODEL_CACHE so the first /api request doesn't
-    pay the cold-start model-build latency (and risk a client timeout).
+DASHBOARD_REFRESH_INTERVAL_SECONDS = 15
 
-    Runs in a daemon thread from __main__ only — never at import time — so unit
-    tests importing this module don't trigger network calls.
+
+def _refresh_dashboard_cache_loop(interval=DASHBOARD_REFRESH_INTERVAL_SECONDS):
+    """Periodic background rebuild of _MODEL_CACHE so /api always has a recent
+    snapshot without ever blocking on the ~15s build in steady state.
+
+    Each pass rebuilds under _MODEL_BUILD_LOCK (single-flighted with a cold
+    synchronous /api build) and swallows failures: if a build throws, the last
+    good model stays served and the exception is logged to stderr. Runs in a
+    daemon thread from __main__ only — never at import time — so unit tests
+    importing this module don't trigger network calls.
     """
-    try:
-        dashboard_model()
-    except Exception as exc:  # noqa: BLE001 — warming is best-effort
-        print(f"[dashboard] cache pre-warm failed (non-fatal): {exc}", file=sys.stderr)
+    while True:
+        try:
+            with _MODEL_BUILD_LOCK:
+                _build_dashboard_model()
+        except Exception as exc:  # noqa: BLE001 — refresh is best-effort; keep last good model
+            print(f"[dashboard] cache refresh failed (non-fatal): {exc}", file=sys.stderr)
+        time.sleep(interval)
 
 
 if __name__ == "__main__":
     if DASH_AUTH_ENABLED and not DASH_AUTH_TOKEN:
         print("[dashboard] HERMX_DASH_AUTH enabled but HERMX_SECRET is blank; failing closed with 401 for protected routes.", file=sys.stderr)
     server = ThreadingHTTPServer((HERMX_BIND_HOST, PORT), Handler)
-    # Pre-warm the model cache in the background; the server binds and serves
-    # immediately while warming happens off the request path.
-    threading.Thread(target=_warm_dashboard_cache, daemon=True).start()
+    # Keep the model cache warm with a periodic background rebuild; the server
+    # binds and serves immediately while refreshes happen off the request path.
+    threading.Thread(target=_refresh_dashboard_cache_loop, daemon=True).start()
     server.serve_forever()
