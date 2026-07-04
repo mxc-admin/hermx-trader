@@ -156,7 +156,11 @@
           "type": "object",
           "properties": {
             "budget_usd": { "type": "number", "exclusiveMinimum": 0 },
-            "reinvest": { "type": "boolean", "default": true },
+            "reinvest": {
+              "type": "boolean",
+              "default": true,
+              "description": "Compounding switch. True (default, also when the key is absent): orders size off equity = budget_usd (seed) + realized net P&L from the closed-trade ledger, scoped to the strategy's account mode (demo|live) and accounting window; equity <= 0 blocks new opens (never closes). False: orders always size off the fixed budget_usd seed."
+            },
             "max_notional_usd": {
               "type": "number",
               "exclusiveMinimum": 0,

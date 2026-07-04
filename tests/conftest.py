@@ -39,6 +39,17 @@ os.environ["HERMX_SECRET"] = "test-secret"
 # process, unless an individual test opts in via monkeypatch.
 os.environ.pop("HERMX_LIVE_TRADING", None)
 
+# A deployed shell (VPS) may export HERMX_DATA_DIR=/opt/hermx — pop it so DATA_DIR
+# and the call-time pnl_* path resolvers fall back to HERMX_ROOT (the isolated temp
+# dir above). Popping, rather than pinning a fixed dir, keeps DATA_DIR following the
+# per-test root when the wr/reload_wr fixtures rebind HERMX_ROOT and reload; the
+# opt-in `ledger_dir` fixture still sets it per test via monkeypatch.
+os.environ.pop("HERMX_DATA_DIR", None)
+# Force the import-time HMAC-required flag to its documented default. A VPS shell
+# exporting HERMX_REQUIRE_HMAC=true would otherwise flip webhook auth for every test;
+# tests that want it armed monkeypatch.setattr the module attribute after import.
+os.environ["HERMX_REQUIRE_HMAC"] = "false"
+
 # Make `import webhook_receiver` resolve against src/.
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))

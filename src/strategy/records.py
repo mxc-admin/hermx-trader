@@ -88,6 +88,21 @@ def strategy_budget_usd(strategy: dict) -> float:
     return float(v) if v is not None else 0.0
 
 
+def strategy_reinvest_enabled(strategy: dict) -> bool:
+    """Read capital.reinvest (v2 nested) with flat fallback; ABSENT defaults True.
+
+    True (the schemas/strategy.schema.json default) sizes orders off equity =
+    seed budget + realized net P&L (compounding); False pins sizing to the
+    fixed ``budget_usd`` seed.
+    """
+    cap = (strategy or {}).get("capital")
+    if isinstance(cap, dict) and "reinvest" in cap:
+        return bool(cap.get("reinvest"))
+    if "reinvest" in (strategy or {}):
+        return bool(strategy.get("reinvest"))
+    return True
+
+
 def normalize_strategy_record(row: dict) -> dict:
     """v2 loader shim (REFACTOR_PLAN.md Phase 6 / Layer C).
 

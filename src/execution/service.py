@@ -222,6 +222,30 @@ class ExecutionService:
         if trading_state == "reducing" and not readiness.get("close_only"):
             return _blocked("trading_state_reducing:reversal_blocked", "trading_state")
 
+        # Gate 6 -- reinvest equity stop. A reinvest-sized strategy whose equity
+        # (seed budget + realized net P&L) is depleted to <= 0 must not OPEN new
+        # risk: its tradable capital is gone. ``equity_usd`` is set by readiness
+        # ONLY when reinvest sizing resolved, so fixed-sizing (reinvest=false)
+        # strategies and operator-built records are untouched, and a failed
+        # ledger read (equity_usd=None) fails safe -- never block on unknown
+        # equity. A close_only record ALWAYS passes -- HermX never blocks a close
+        # (same invariant as the kill switch / symbol pause / trading_state).
+        # Returns BEFORE the write-ahead journal, so a blocked open leaves no
+        # PLANNED row. Recovery is stateless: raise budget_usd, reset the
+        # accounting window, or realize a profit and the next signal re-arms.
+        equity_usd = readiness.get("equity_usd")
+        if equity_usd is not None and not readiness.get("close_only"):
+            try:
+                equity_usd = float(equity_usd)
+            except (TypeError, ValueError):
+                equity_usd = None  # unparseable -> unknown equity -> fail-safe pass
+            if equity_usd is not None and equity_usd <= 0.0:
+                logging.warning(
+                    "equity_stop block strategy_id=%s equity=%.2f symbol=%s",
+                    readiness.get("strategy_id"), equity_usd, readiness.get("symbol"),
+                )
+                return _blocked(f"equity_depleted:{equity_usd:.2f}", "equity_stop")
+
         order_intent_from_readiness = self._h("order_intent_from_readiness")
         cl_ord_id_from_readiness = self._h("cl_ord_id_from_readiness")
         latest_order_record = self._h("latest_order_record")

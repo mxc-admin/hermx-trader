@@ -24,9 +24,12 @@ identity + clOrdId derivation (signals.dedupe) and the strategy-record reads
 """
 from __future__ import annotations
 
-from control_state import load_control_state
+import logging
+
+from control_state import accounting_start_for, load_control_state
+from pnl_ledger import net_realized_for_strategy
 from signals.dedupe import _signal_identity, stable_client_order_id
-from strategy.records import strategy_budget_usd, strategy_instrument
+from strategy.records import strategy_budget_usd, strategy_instrument, strategy_reinvest_enabled
 from webhook.config import EXEC_BACKEND, EXECUTION_DEFAULTS, resolve_default_type
 from webhook.money import dec_notional
 
@@ -76,7 +79,41 @@ def build_strategy_execution_readiness(record: dict) -> dict:
     client_order_id_close = stable_client_order_id(signal_identity, role="close")
     client_order_id_open = stable_client_order_id(signal_identity, role="open")
     client_order_id = client_order_id_open
-    base_notional = strategy_budget_usd(strategy) * float(strategy.get("leverage") or 1.0)
+    # Sizing budget: ``budget_usd`` is the SEED; with capital.reinvest (schema default
+    # True) the strategy sizes off equity = seed + durable realized net P&L from the
+    # closed-trade ledger, scoped to this strategy's account mode and accounting
+    # window — the exact "Effective budget" number the dashboard card shows (Phase 5
+    # Decision ⑤A), so execution and display can never diverge. Stateless: recomputed
+    # per signal, so a mid-flight budget_usd edit or accounting-window reset applies
+    # on the very next signal. Fail-safe: a ledger read error degrades to seed-only
+    # sizing with equity_usd=None (the equity-stop gate never fires on unknown equity).
+    seed_budget_usd = strategy_budget_usd(strategy)
+    sizing_budget_usd = seed_budget_usd
+    equity_usd = None
+    reinvest = strategy_reinvest_enabled(strategy)
+    if reinvest:
+        _pnl_sid = str(strategy.get("strategy_id") or normalized.get("strategy_id") or "").strip()
+        _pnl_mode = "live" if execution_mode == "live" else "demo"  # ledger mode column is demo|live
+        try:
+            realized_net = (
+                net_realized_for_strategy(
+                    _pnl_sid, mode=_pnl_mode, accounting_start_at=accounting_start_for(_pnl_sid)
+                )
+                if _pnl_sid
+                else 0.0
+            )
+            equity_usd = seed_budget_usd + realized_net
+            # Depleted equity must never yield a negative notional; the ExecutionService
+            # equity-stop gate blocks the open outright, this clamp keeps sizing sane.
+            sizing_budget_usd = max(equity_usd, 0.0)
+        except Exception as exc:
+            logging.warning(
+                "reinvest equity read failed strategy_id=%s mode=%s: %s -- sizing off seed budget",
+                _pnl_sid, _pnl_mode, exc,
+            )
+            equity_usd = None
+            sizing_budget_usd = seed_budget_usd
+    base_notional = sizing_budget_usd * float(strategy.get("leverage") or 1.0)
     planned_notional = float(dec_notional(base_notional))
     # Exchange-agnostic instruction contract (Phase 6 / M3, ARCHITECTURE.md). ``td_mode``
     # below is the OKX translation of this same value, so derive both from one expression.
@@ -110,6 +147,12 @@ def build_strategy_execution_readiness(record: dict) -> dict:
         "asset": strategy.get("asset") or normalized.get("symbol"),
         "target_side": direction,
         "target_notional_usd": planned_notional,
+        # Equity-sizing observability + the equity-stop gate's input. ``equity_usd``
+        # is present (a float, possibly <= 0) ONLY when reinvest sizing resolved;
+        # None means fixed sizing or a failed ledger read (gate must not fire).
+        "reinvest": reinvest,
+        "budget_seed_usd": seed_budget_usd,
+        "equity_usd": equity_usd,
         "margin_mode": margin_mode,
         "leverage": strategy.get("leverage"),
         "timeframe": normalized.get("timeframe"),
@@ -122,7 +165,7 @@ def build_strategy_execution_readiness(record: dict) -> dict:
             "risk_weight": 1.0,
             "target_direction": direction,
             "actions": ["CLOSE_OPPOSITE_IF_ANY", f"OPEN_{direction.upper()}"],
-            "base_notional_usd": strategy_budget_usd(strategy),
+            "base_notional_usd": sizing_budget_usd,
             "planned_notional_usd": planned_notional,
             "client_order_id": client_order_id,
             "client_order_id_open": client_order_id_open,
