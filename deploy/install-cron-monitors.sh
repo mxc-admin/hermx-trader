@@ -12,7 +12,7 @@
 #                                                                 # never edit existing ones
 #                                                                 # (preserves operator pauses/edits)
 #
-# See docs/HERMES_CRON_MONITOR_DESIGN.md for the design this implements.
+# See docs/EXECUTION_MONITORING.md for the design this implements.
 set -euo pipefail
 
 # --------------------------------------------------------------------------- #

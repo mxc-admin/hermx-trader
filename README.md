@@ -131,7 +131,7 @@ All use the `mxc duo-base v2.5` indicator logic. They are configured for demo/sa
 - TradingView alerts configured and sending signals
 - Local read-only dashboard (`http://127.0.0.1:8098`)
 - Hermes Agent in Telegram for monitoring and signal relay
-- Five read-only cron monitors (weekly/daily digest, reconcile, health, zero-intake) delivered to Telegram — see [docs/HERMES_CRON_MONITOR_DESIGN.md](docs/HERMES_CRON_MONITOR_DESIGN.md)
+- Five read-only cron monitors (weekly/daily digest, reconcile, health, zero-intake) delivered to Telegram — see [docs/EXECUTION_MONITORING.md](docs/EXECUTION_MONITORING.md)
 - Complete peace of mind that safety logic lives in auditable Python code
 
 ## Repository Layout

@@ -6,7 +6,7 @@ gate scripts import. It is READ-ONLY against HermX state — the only file it ev
 writes is its own monitoring sidecar (``~/.hermes/scripts/.hermx-<concern>.state``),
 which is monitoring bookkeeping and MUST NOT be confused with ``control-state.json``.
 
-Design contract (see ``docs/HERMES_CRON_MONITOR_DESIGN.md`` §7):
+Design contract (see ``docs/EXECUTION_MONITORING.md`` §3):
   * the clock is passed in as ``now_epoch`` — never frozen, never read inline in the
     decision functions, so tests can pin it (repo convention);
   * fingerprints carry NO timestamp / counter / free-text — only the stable identity

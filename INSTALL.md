@@ -837,7 +837,7 @@ This registers five read-only monitors (all fail-closed, no money-path access):
 
 On subsequent upgrades (`bash deploy/deploy.sh`), missing monitor jobs are created automatically in "create-only" mode — existing jobs are never edited, so manual pauses and schedule changes are preserved.
 
-Pause a noisy monitor with `/cron pause <name>`. Full design: `docs/HERMES_CRON_MONITOR_DESIGN.md`.
+Pause a noisy monitor with `/cron pause <name>`. Full design: `docs/EXECUTION_MONITORING.md`.
 
 ### 6.6 Test it
 

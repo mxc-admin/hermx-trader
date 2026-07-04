@@ -1,5 +1,18 @@
 # Nautilus Gap Remediation Plan — Validated (2026-07-04)
 
+> **Implementation status (2026-07-04, post-revalidation):** Items **A** (balance
+> check + sub-min disambiguation, 3 commits), **C1** (dashboard realized-pnl
+> preference), **C2** (partial-fill journal detail parity, both sites), and **B1**
+> (balance-drift wiring: enumerator + equity estimate + throttled wiring) are
+> **implemented and merged into the working tree**, via CC2, tests-first, each as
+> an independent bounded task per §0.6's ordered execution plan. Full suite:
+> **843 passed / 28 skipped / 0 failed** (independently re-run, zero regressions).
+> One mid-sequence regression was caught and fixed (a `KeyError` in
+> `src/reconcile/unknown_resolver.py`'s lost-race path from C2's bracket-indexed
+> detail dict vs. a test stub's partial outcome — fixed to `.get(...)`, matching
+> every other key in those dicts). **Item B2 remains unstarted**, blocked on the
+> Option 1 vs Option 2 decision per §0.6 step 5 — do not start without that call.
+
 > Ruthless re-validation of the "Top gaps" in `docs/NAUTILUS_TRADER_COMPARISON.md`.
 > Every claim was re-derived from the current tree (HEAD `be3c0c66`) by independent
 > code reads — citations were NOT trusted. Baseline: the 7 relevant test suites
