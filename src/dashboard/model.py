@@ -1,0 +1,675 @@
+"""Dashboard data model: projections, health/freshness summaries, P&L contracts
+and API payloads (REFACTOR_PLAN.md Phase 7 sub-step 2; monolith lines 357-505 +
+1490-1898 pre-sub-step-1 numbering, moved not rewritten).
+
+PACKAGE LAYOUT NOTE: this directory deliberately has NO __init__.py. A regular
+package named ``dashboard`` would shadow ``src/dashboard.py`` for every
+``import dashboard`` (packages win over same-named modules on sys.path), which
+would break the whole test suite and the shim design. Instead, dashboard.py
+extends its own ``__path__`` to this directory, which makes
+``dashboard.model`` importable as a submodule while ``import dashboard``
+keeps resolving to the monolith. Do not add an __init__.py here.
+
+LOGS, the model cache (``_MODEL_CACHE``/``_MODEL_BUILD_LOCK``), REFRESH/TTL
+constants, ``_hermes_enabled`` and every dashboard_core import (``SYMBOLS``,
+``as_float``, ``parse_dt``, ``LEDGER_READ_STATS``, ...) are root-bound /
+reload-sensitive (dashboard.py resolves ROOT from HERMX_ROOT at import time,
+and test fixtures do ``importlib.reload(dashboard_core)`` +
+``importlib.reload(dashboard)`` against a fresh temp root), so they are read
+lazily via ``import dashboard as _dash`` rather than imported at module top --
+matching the snapshots.py / reconcile/executor_select.py pattern. In
+particular the tests mutate ``dash_mod._MODEL_CACHE`` in place, so the cache
+dict itself must keep living on the dashboard module.
+
+Several names called below are ALSO the seams tests monkeypatch directly on
+the ``dashboard`` module (``okx_live_snapshot`` via plain attribute
+assignment, ``active_strategies``, ``load_strategy_files``, ``trial_symbols``,
+``LOGS``, ``_dashboard_executor``/``_strategy_executor`` transitively) and
+expect callers -- including callers in THIS SAME module -- to observe. A
+same-module direct call would bind to this module's own (unpatched) function
+object, so every cross-function call below dereferences through ``_dash.`` too.
+
+The deferred ``from pnl_ledger import ...`` imports are kept function-local ON
+PURPOSE (REFACTOR_PLAN.md circular-import notes): pnl_ledger must stay off the
+dashboard import-time graph. Do not hoist them to module top.
+"""
+from __future__ import annotations
+
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, TypedDict
+
+
+class StrategyPnlContract(TypedDict, total=False):
+    """Per-strategy P&L contract returned by :func:`_strategy_pnl_contract`.
+
+    Deliberately a *superset* (hence ``total=False``): the Phase-3 ``*_usd``
+    aggregate keys and the Phase-4 React-UI alias keys are both present, as
+    views onto the same numbers. tests/test_pnl_api_contracts.py pins the
+    exact key set the frontend consumes -- do not rename or drop keys here."""
+    # Phase-3 ledger aggregate keys (pnl_ledger.aggregate_strategy_pnl)
+    budget_usd: float
+    closed_realized_pnl_usd: float
+    closed_fees_usd: float
+    closed_net_pnl_usd: float
+    open_upl_usd: float
+    equity_now_usd: float
+    closed_order_count: int
+    last_close_at_ms: Optional[int]
+    accounting_start_at: Optional[int]
+    # Phase-4 React UI contract aliases
+    strategy_id: Optional[str]
+    venue: str
+    mode: str
+    realized_net: float
+    realized_gross: float
+    fees: float
+    upl: float
+    total_net: float
+    trade_count: int
+
+
+class PortfolioContract(TypedDict):
+    """Portfolio roll-up returned by :func:`portfolio_contract` (React UI
+    contract, pinned by tests/test_pnl_api_contracts.py)."""
+    realized_net: float
+    realized_gross: float
+    fees: float
+    upl: float
+    total_net: float
+    trade_count: int
+    strategies: int
+
+
+class DashboardModel(TypedDict, total=False):
+    """The cached dashboard model built by :func:`_build_dashboard_model`.
+
+    ``total=False`` because the dict is built incrementally (executor /
+    ledger_health / freshness are stamped after the literal)."""
+    config: Dict[str, Any]
+    loaded: Dict[str, Any]
+    okx_live: Dict[str, Any]
+    okx_live_by_mode: Dict[str, Any]
+    okx_live_by_env: Dict[str, Any]
+    okx_executions: List[Dict[str, Any]]
+    strategies: List[Dict[str, Any]]
+    active_strategies: List[Dict[str, Any]]
+    strategy_alerts: List[Dict[str, Any]]
+    generated_at: str
+    executor: Dict[str, Any]
+    ledger_health: Dict[str, Any]
+    freshness: Dict[str, Any]
+
+
+def active_strategies(strategies=None):
+    import dashboard as _dash
+    rows = strategies if strategies is not None else _dash.load_strategy_files()
+    return [s for s in rows if _dash.is_strategy_active(s)]
+
+
+def trial_symbols(config=None):
+    """Symbols the dashboard cares about, derived from active strategy files (D5).
+
+    Falls back to the legacy static SYMBOLS list only when there are no strategy
+    files at all, so an empty/misconfigured deploy still renders something.
+    """
+    import dashboard as _dash
+    seen = []
+    for strategy in _dash.active_strategies():
+        sym = strategy.get("asset")
+        if sym and sym not in seen:
+            seen.append(sym)
+    if not seen:
+        for sym in _dash.SYMBOLS:
+            if sym not in seen:
+                seen.append(sym)
+    return seen
+
+
+def strategy_inst_id(config, sym):
+    # Venue-aware: the strategy file's OWN instrument block is the source of truth (a
+    # kucoin spot pair, a hyperliquid perp, an okx swap all resolve to THEIR id), then
+    # any explicitly configured per-asset inst_id. No hardcoded -USDT-SWAP transform --
+    # an unknown symbol resolves to "" (the caller degrades gracefully, never fabricates
+    # a fake okx instrument).
+    import dashboard as _dash
+    for strategy in _dash.load_strategy_files():
+        if strategy.get("asset") == sym:
+            inst = strategy.get("instrument") or {}
+            inst_id = inst.get("inst_id") or strategy.get("inst_id")
+            if inst_id:
+                return inst_id
+    try:
+        configured = _dash.asset_inst_id(config, sym)
+        if configured:
+            return configured
+    except Exception:
+        pass
+    return ""
+
+
+def _pipeline_rows(stage, limit, scan=None):
+    """Read up to ``limit`` rows of one pipeline ``stage`` from the unified
+    pipeline.jsonl. Because the file interleaves stages, we tail a larger ``scan``
+    window (bounded by the same OOM-safe reverse-tail reader) and keep the last
+    ``limit`` rows matching the stage. Returns ``(rows, stats)``."""
+    import dashboard as _dash
+    scan = scan if scan is not None else max(int(limit) * 6, 1000)
+    rows, stats = _dash.read_jsonl_stats(_dash.LOGS / "pipeline.jsonl", scan)
+    rows = [r for r in rows if r.get("stage") == stage]
+    if limit and len(rows) > limit:
+        rows = rows[-limit:]
+    return rows, stats
+
+
+SIGNALS_MAX_N = 500
+SIGNALS_DEFAULT_N = 50
+
+
+def _signal_projection(row):
+    """Project one execution-stage pipeline row to the compact /api/signals shape.
+
+    Handles both normal TV-triggered submissions (fields nested under
+    ``okx_execution.payload.plan``) and operator closes (symbol/strategy_id/kind/
+    operator/reason stamped at the top level by execute_operator_close)."""
+    okx = row.get("okx_execution") or {}
+    payload = okx.get("payload") or {}
+    plan = payload.get("plan") or {}
+    intent = plan.get("execution_intent") or {}
+    return {
+        "ts": row.get("ts"),
+        "submitted_at": row.get("received_at") or row.get("ts"),
+        "symbol": row.get("symbol") or plan.get("symbol"),
+        "side": plan.get("signal_side") or plan.get("target_side"),
+        "strategy_id": row.get("strategy_id") or plan.get("strategy_id"),
+        "mode": okx.get("mode") or payload.get("mode"),
+        "reason": okx.get("reason"),
+        "kind": row.get("kind"),
+        "operator": row.get("operator"),
+        "cl_ord_id": row.get("cl_ord_id") or intent.get("client_order_id"),
+        "ok": okx.get("ok"),
+        "elapsed_ms": okx.get("elapsed_ms"),
+    }
+
+
+def signals_payload(n=SIGNALS_DEFAULT_N, symbol=None):
+    """Last ``n`` execution-stage events from pipeline.jsonl (the full TV-triggered +
+    operator-close trade history), most recent first, optionally filtered by symbol.
+
+    A missing ledger yields ``{"ok": True, "signals": [], "count": 0}``. ``n`` is
+    clamped to [1, SIGNALS_MAX_N]; the underlying reverse-tail read stays bounded."""
+    import dashboard as _dash
+    n = max(1, min(int(n), SIGNALS_MAX_N))
+    symbol_filter = str(symbol or "").strip().upper() or None
+    # Scan a wider window than n so a symbol filter still surfaces n matches when
+    # the stage interleaves many symbols; the read is OOM-bounded regardless.
+    scan = max(n * 12, 2000)
+    rows, _stats = _dash._pipeline_rows("execution", scan, scan=scan)
+    projected = [_dash._signal_projection(r) for r in rows]
+    if symbol_filter:
+        projected = [p for p in projected if str(p.get("symbol") or "").strip().upper() == symbol_filter]
+    projected = list(reversed(projected))  # most recent first
+    if len(projected) > n:
+        projected = projected[:n]
+    return {"ok": True, "signals": projected, "count": len(projected)}
+
+
+def _alerts_rows(kind, limit, scan=None):
+    """Read up to ``limit`` rows of one alert ``kind`` from the unified alerts.jsonl
+    (kind in {operator, reconcile, state}). Returns ``(rows, stats)``."""
+    import dashboard as _dash
+    scan = scan if scan is not None else max(int(limit) * 6, 500)
+    rows, stats = _dash.read_jsonl_stats(_dash.LOGS / "alerts.jsonl", scan)
+    rows = [r for r in rows if r.get("kind") == kind]
+    if limit and len(rows) > limit:
+        rows = rows[-limit:]
+    return rows, stats
+
+
+def strategy_alert_rows(limit=500):
+    import dashboard as _dash
+    rows, _stats = _dash._pipeline_rows("strategy_match", limit)
+    out = []
+    for row in rows:
+        norm = row.get("normalized") or {}
+        strategy = row.get("strategy_config") or {}
+        if not norm.get("strategy_id"):
+            continue
+        out.append({
+            "received_at": row.get("received_at"),
+            "received_colombia": _dash.colombia_time(row.get("received_at")),
+            "strategy_id": norm.get("strategy_id"),
+            "strategy_name": strategy.get("name") or norm.get("strategy_name") or norm.get("strategy_id"),
+            "asset": norm.get("symbol") or strategy.get("asset"),
+            "timeframe": norm.get("timeframe") or strategy.get("timeframe"),
+            "side": str(norm.get("side") or "").upper(),
+            "price": norm.get("tv_signal_price"),
+            "tv_time": norm.get("tv_time"),
+            "tv_time_colombia": _dash.colombia_time(norm.get("tv_time")),
+            "duplicate": bool(row.get("duplicate")),
+            "decision": _dash.nested_get(row, "strategy_decision", "decision") or _dash.nested_get(row, "decision", "decision"),
+            "mode": row.get("mode"),
+            "okx_mode": _dash.nested_get(row, "okx_execution", "mode"),
+            "block_reason": _dash.nested_get(row, "execution_readiness", "block_reason"),
+            "latency": _dash.nested_get(row, "latency", "latency_seconds"),
+        })
+    out.sort(key=lambda r: _dash.parse_dt(r.get("tv_time") or r.get("received_at")) or datetime.min.replace(tzinfo=timezone.utc))
+    return out
+
+
+def executor_health_summary(okx_live, now=None):
+    """Collapse the executor read into an explicit health verdict (D3).
+
+    ``degraded`` drives the visible banner; we never let an errored or stale
+    executor read render as a healthy flat view.
+    """
+    import dashboard as _dash
+    now = now if now is not None else time.time()
+    okx_live = okx_live or {}
+    healthy = bool(okx_live.get("ok"))
+    error = None if healthy else str(okx_live.get("error") or "executor_unavailable")
+    age = None
+    stale = False
+    dt = _dash.parse_dt(okx_live.get("generated_at"))
+    if dt is not None:
+        age = max(0.0, now - dt.timestamp())
+        stale = age > _dash.REFRESH_INTERVAL_SECONDS
+    elif healthy:
+        # Reported ok but no timestamp to prove freshness -> treat as stale.
+        stale = True
+    return {
+        "ok": healthy and not stale,
+        "healthy": healthy,
+        "error": error,
+        "stale": stale,
+        "degraded": (not healthy) or stale,
+        "age_seconds": age,
+        "generated_at": okx_live.get("generated_at"),
+    }
+
+
+def ledger_health_summary():
+    """Aggregate corrupt/skipped-line counts surfaced by the bounded reader (D1/D2)."""
+    import dashboard as _dash
+    ledgers = {}
+    total_skipped = 0
+    truncated_tails = 0
+    for path, st in _dash.LEDGER_READ_STATS.items():
+        skipped = int(st.get("skipped") or 0)
+        total_skipped += skipped
+        if st.get("truncated_tail"):
+            truncated_tails += 1
+        if skipped or st.get("truncated_tail") or st.get("more"):
+            ledgers[Path(path).name] = {
+                "skipped": skipped,
+                "truncated_tail": bool(st.get("truncated_tail")),
+                "more": bool(st.get("more")),
+                "read": int(st.get("read") or 0),
+            }
+    return {
+        "total_skipped": total_skipped,
+        "truncated_tails": truncated_tails,
+        "ledgers": ledgers,
+    }
+
+
+def freshness_summary(model, now=None):
+    """True data age vs. the refresh interval, for the "Updated" badge (D7)."""
+    import dashboard as _dash
+    now = now if now is not None else time.time()
+    candidates = []
+    for row in model.get("strategy_alerts") or []:
+        for key in ("received_at", "tv_time"):
+            dt = _dash.parse_dt(row.get(key))
+            if dt is not None:
+                candidates.append(dt.timestamp())
+    dt = _dash.parse_dt((model.get("okx_live") or {}).get("generated_at"))
+    if dt is not None:
+        candidates.append(dt.timestamp())
+    data_at = max(candidates) if candidates else None
+    age = (now - data_at) if data_at is not None else None
+    stale = (age is None) or (age > _dash.REFRESH_INTERVAL_SECONDS)
+    return {
+        "generated_at": model.get("generated_at"),
+        "data_at": datetime.fromtimestamp(data_at, timezone.utc).isoformat() if data_at is not None else None,
+        "age_seconds": age,
+        "stale": stale,
+        "no_data": data_at is None,
+        "refresh_interval_seconds": _dash.REFRESH_INTERVAL_SECONDS,
+    }
+
+
+def dashboard_model() -> DashboardModel:
+    # Stale-while-revalidate: once the cache holds ANY model, return it
+    # immediately -- even if past its TTL. Freshness is the background refresh
+    # loop's job (_refresh_dashboard_cache_loop), so /api never blocks on a
+    # rebuild in steady state. A genuinely empty cache (model is None, e.g.
+    # first boot or a test that reset it) still does one synchronous build,
+    # single-flighted under _MODEL_BUILD_LOCK so a concurrent cold /api request
+    # and the loop's first pass don't both pay the ~15s cost.
+    import dashboard as _dash
+    cached = _dash._MODEL_CACHE.get("model")
+    if cached is not None:
+        return cached
+    with _dash._MODEL_BUILD_LOCK:
+        # Re-check under the lock: another thread may have built while we waited.
+        cached = _dash._MODEL_CACHE.get("model")
+        if cached is not None:
+            return cached
+        return _dash._build_dashboard_model()
+
+
+def _build_dashboard_model() -> DashboardModel:
+    """Build the dashboard model and refresh _MODEL_CACHE. Always does the full
+    work -- callers decide when a rebuild is warranted (cold cache in
+    dashboard_model(), or the periodic background loop)."""
+    import dashboard as _dash
+    now = time.time()
+    # Clear per-read ledger stats so ledger_health reflects THIS build only (D1/D2).
+    _dash.LEDGER_READ_STATS.clear()
+    cfg = _dash.shadow_config()
+    loaded = _dash.load_events()
+    strategies = _dash.load_strategy_files()
+    # Phase 0 (demo/live separation): read the account that matches each strategy's
+    # mode. Always fetch the demo snapshot (today's behavior). Only fetch the live
+    # snapshot when at least one strategy is effectively live -- okx_live_snapshot
+    # itself fail-closes to demo when HERMX_LIVE_TRADING is disarmed. If no strategy
+    # is live, the live slot reuses the demo snapshot so behavior is unchanged.
+    _ctrl = _dash._load_control_state()
+    _overrides = _ctrl.get("strategy_overrides") if isinstance(_ctrl.get("strategy_overrides"), dict) else {}
+    _any_live = any(_dash._effective_strategy_mode(s, _overrides) == "live" for s in strategies)
+    # Call the demo path with no kwarg (default simulated_trading=True) so any test
+    # stub or legacy caller with a 1-arg signature stays compatible. Only reach for
+    # the live path when a strategy is actually live.
+    okx_live_demo = _dash.okx_live_snapshot(cfg)
+    okx_live_live = _dash.okx_live_snapshot(cfg, simulated_trading=False) if _any_live else okx_live_demo
+    okx_live_by_mode = {"demo": okx_live_demo, "live": okx_live_live}
+    # Phase 0.5 (per-strategy venue+mode): each strategy is an independent
+    # (asset, venue, mode) environment. Group active strategies by (venue, mode) so
+    # one executor per account serves every strategy on it, and fetch that account's
+    # positions + order history from the strategy's OWN venue -- a KuCoin strategy
+    # reads KuCoin, an OKX-live strategy reads OKX live. The per-env map is keyed
+    # "{venue}:{mode}"; the legacy okx_live_by_mode above is retained for callers that
+    # only distinguish demo/live (executor_health_summary, freshness).
+    okx_live_by_env = {}
+    seen_envs = {}  # (venue, mode) -> representative strategy_config
+    for s in strategies:
+        venue = _dash._strategy_venue(s)
+        mode = _dash._effective_strategy_mode(s, _overrides)
+        mode_key = "live" if mode == "live" else "demo"
+        seen_envs.setdefault((venue, mode_key), s)
+    for (venue, mode_key), rep in seen_envs.items():
+        env_key = f"{venue}:{mode_key}"
+        okx_live_by_env[env_key] = _dash.strategy_live_snapshot(rep, mode_key)
+        # Reconcile that account's order history into the durable ledger (venue+mode
+        # correct, never hardcoded). Read-only; failures are swallowed inside.
+        _dash.strategy_order_history_snapshot(rep, mode_key)
+    # Singular okx_live stays the demo snapshot for backward-compatible consumers
+    # (executor_health_summary, freshness, the demo ledger section).
+    okx_live = okx_live_demo
+    model: DashboardModel = {
+        "config": cfg,
+        "loaded": loaded,
+        "okx_live": okx_live,
+        "okx_live_by_mode": okx_live_by_mode,
+        "okx_live_by_env": okx_live_by_env,
+        "okx_executions": _dash.okx_execution_records(cfg),
+        "strategies": strategies,
+        "active_strategies": _dash.active_strategies(strategies),
+        "strategy_alerts": _dash.strategy_alert_rows(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    model["executor"] = _dash.executor_health_summary(okx_live, now)
+    model["ledger_health"] = _dash.ledger_health_summary()
+    model["freshness"] = _dash.freshness_summary(model, now)
+    _dash._MODEL_CACHE["model"] = model
+    # Stamp expiry from build-completion time, not the build-start `now`. A slow
+    # (~15s) build previously produced a cache that was already expired the
+    # instant it was stored (born-expired), forcing a rebuild on the very next
+    # request.
+    _dash._MODEL_CACHE["expires_at"] = time.time() + _dash.MODEL_CACHE_TTL_SECONDS
+    return model
+
+
+def _effective_strategy_mode(strategy: dict, overrides: dict) -> str:
+    """Resolve a strategy's effective UI mode (pause/demo/live).
+
+    An override (control-state.json) wins; otherwise derive from the strategy file:
+    ``submit_orders`` explicitly False -> "pause", else ``execution_mode``."""
+    sid = (strategy or {}).get("strategy_id") or ""
+    ov = (overrides or {}).get(sid)
+    if isinstance(ov, dict) and ov.get("mode"):
+        return str(ov["mode"]).lower()
+    if (strategy or {}).get("submit_orders") is False:
+        return "pause"
+    return str((strategy or {}).get("execution_mode") or "demo").lower()
+
+
+def _strategy_pnl_contract(strategy, accounting_start_at, by_env, by_mode) -> StrategyPnlContract:
+    """Build the per-strategy P&L contract (ledger closed figures + live UPnL).
+
+    Read-only and additive: sums the durable closed-trade ledger scoped to the
+    strategy, its account mode (demo|live), and the ``accounting_start_at`` clean
+    window, then adds the open UPnL from THIS strategy's own (venue, mode) snapshot.
+    A missing ledger yields all-zero closed figures, never an error.
+
+    The returned dict is a *superset*: it carries the Phase-3 ``*_usd`` keys the
+    aggregate produces AND the Phase-4 contract keys (``strategy_id``, ``venue``,
+    ``mode``, ``realized_net``, ``realized_gross``, ``fees``, ``upl``, ``total_net``,
+    ``trade_count``, ``last_close_at_ms``) the React UI consumes. Both name-sets are
+    views onto the same numbers so neither consumer breaks."""
+    import dashboard as _dash
+    sid = strategy.get("strategy_id")
+    venue = _dash._strategy_venue(strategy)
+    mode = (strategy.get("effective_mode") or strategy.get("execution_mode") or "demo").lower()
+    mode_key = "live" if mode == "live" else "demo"  # ledger mode column is demo|live
+    budget = _dash.as_float((strategy.get("capital") or {}).get("budget_usd") or strategy.get("budget_usd")) or 0.0
+    # Open UPnL from the strategy's own environment snapshot (Phase 0.5 per-env read).
+    snap = _dash._snapshot_for_env(by_env, by_mode, venue, mode)
+    pos = ((snap or {}).get("positions") or {}).get(strategy.get("asset")) or {}
+    open_upl = _dash.as_float(pos.get("upl")) or 0.0
+    try:
+        from pnl_ledger import aggregate_strategy_pnl
+
+        agg = aggregate_strategy_pnl(
+            sid,
+            budget_usd=budget,
+            mode=mode_key,
+            accounting_start_at=accounting_start_at,
+            open_upl_usd=open_upl,
+        )
+    except Exception:
+        # Never let a ledger read break the API payload (fail-safe, like the reconcile
+        # feed). Degrade to budget + open UPnL only.
+        agg = {
+            "budget_usd": budget,
+            "closed_realized_pnl_usd": 0.0,
+            "closed_fees_usd": 0.0,
+            "closed_net_pnl_usd": 0.0,
+            "open_upl_usd": open_upl,
+            "equity_now_usd": budget + open_upl,
+            "closed_order_count": 0,
+            "last_close_at_ms": None,
+            "accounting_start_at": accounting_start_at,
+        }
+    # Phase-4 aliases (React UI contract) layered on top of the Phase-3 aggregate.
+    realized_net = agg.get("closed_net_pnl_usd") or 0.0
+    upl = agg.get("open_upl_usd") or 0.0
+    agg.update({
+        "strategy_id": sid,
+        "venue": venue,
+        "mode": mode_key,
+        "realized_net": realized_net,
+        "realized_gross": agg.get("closed_realized_pnl_usd") or 0.0,
+        "fees": agg.get("closed_fees_usd") or 0.0,
+        "upl": upl,
+        "total_net": realized_net + upl,
+        "trade_count": agg.get("closed_order_count") or 0,
+        "last_close_at_ms": agg.get("last_close_at_ms"),
+    })
+    return agg
+
+
+def _ledger_net_realized(strategy_id, mode, accounting_start_at):
+    """Durable realized-net P&L for a strategy from the closed-trade ledger.
+
+    Fail-safe: any ledger error (missing/corrupt file, import failure) degrades to
+    0.0 so a card / budget computation never breaks on a bad read — mirrors the
+    reconcile-feed and ``_strategy_pnl_contract`` fail-open posture."""
+    if not strategy_id:
+        return 0.0
+    try:
+        from pnl_ledger import net_realized_for_strategy
+
+        return net_realized_for_strategy(
+            strategy_id, mode=mode, accounting_start_at=accounting_start_at
+        )
+    except Exception:
+        return 0.0
+
+
+def portfolio_contract(strategy_pnls) -> PortfolioContract:
+    """Aggregate the per-strategy P&L contracts into a single portfolio object.
+
+    ``strategy_pnls`` is the list of dicts produced by :func:`_strategy_pnl_contract`.
+    Sums are additive across strategies; ``strategies`` counts those carrying any P&L
+    data (a ledger row OR a live open position), so a portfolio of untouched demo
+    strategies reports 0 rather than inflating the count. Read-only."""
+    realized_net = realized_gross = fees = upl = 0.0
+    trade_count = 0
+    active = 0
+    for p in strategy_pnls or []:
+        if not isinstance(p, dict):
+            continue
+        realized_net += p.get("realized_net") or 0.0
+        realized_gross += p.get("realized_gross") or 0.0
+        fees += p.get("fees") or 0.0
+        upl += p.get("upl") or 0.0
+        trade_count += int(p.get("trade_count") or 0)
+        if (p.get("trade_count") or 0) or (p.get("upl") or 0.0):
+            active += 1
+    return {
+        "realized_net": realized_net,
+        "realized_gross": realized_gross,
+        "fees": fees,
+        "upl": upl,
+        "total_net": realized_net + upl,
+        "trade_count": trade_count,
+        "strategies": active,
+    }
+
+
+def api_payload():
+    """The structured model the ``/api`` route serializes.
+
+    Legacy `policies` field removed (D4): it was always ``{}`` because no policies
+    are configured. Executor/ledger/freshness health is surfaced explicitly so a
+    consumer can never mistake an executor failure for a healthy flat view (D3).
+    """
+    import dashboard as _dash
+    model = _dash.dashboard_model()
+    loaded = model["loaded"]
+    open_orders, oo_stats = _dash.order_journal_open_orders()
+    recon, rc_stats = _dash.reconcile_alert_records()
+    ops, op_stats = _dash.operator_alert_records()
+
+    # Merge strategy-mode overrides (control-state.json) into the payload. An override
+    # takes precedence over the strategy file; otherwise effective_mode is derived from
+    # the file: submit_orders explicitly False -> "pause", else execution_mode (demo/live).
+    _ctrl = _dash._load_control_state()
+    _overrides = _ctrl.get("strategy_overrides") if isinstance(_ctrl.get("strategy_overrides"), dict) else {}
+    _acct_windows = _ctrl.get("accounting_windows") if isinstance(_ctrl.get("accounting_windows"), dict) else {}
+    _by_env = model.get("okx_live_by_env") or {}
+    _by_mode = model.get("okx_live_by_mode") or {}
+    annotated_strategies = []
+    for s in model.get("active_strategies") or []:
+        s = dict(s)
+        s["effective_mode"] = _dash._effective_strategy_mode(s, _overrides)
+        # Phase 0.5: this strategy's own environment -- venue + which account (demo/live)
+        # its positions are read from. The React UI keys per-strategy reads off these.
+        s["venue"] = _dash._strategy_venue(s)
+        s["okx_account_source"] = "live" if s["effective_mode"] == "live" else "demo"
+        s["env_key"] = f"{s['venue']}:{s['okx_account_source']}"
+        # Phase 3: accounting window + ledger-backed P&L contract (additive; the React
+        # UI adopts it in Phase 4). closed_* come from the durable ledger scoped to the
+        # clean window; open UPnL from this strategy's own (venue, mode) snapshot.
+        _acct_start = _dash._accounting_start_for(s.get("strategy_id"), _ctrl)
+        s["accounting_start_at"] = _acct_start
+        s["strategy_pnl"] = _dash._strategy_pnl_contract(s, _acct_start, _by_env, _by_mode)
+        annotated_strategies.append(s)
+
+    # Phase 4: top-level portfolio roll-up across every strategy's durable P&L.
+    portfolio = _dash.portfolio_contract([s.get("strategy_pnl") for s in annotated_strategies])
+
+    # P1-2: read-only reconcile-health (max recorded_at_ms, lag, v3-coverage pct).
+    # Never fail the /api response on a ledger read error.
+    try:
+        from pnl_ledger import reconcile_health_stats
+
+        reconcile_health = reconcile_health_stats()
+    except Exception:
+        reconcile_health = None
+
+    return {
+        "generated_at": model["generated_at"],
+        "source_counts": {k: loaded[k] for k in ("historical_count", "backfill_count", "live_count")},
+        "backfill": loaded["backfill"],
+        "strategies": annotated_strategies,
+        "portfolio": portfolio,
+        "strategy_overrides": _overrides,
+        "accounting_windows": _acct_windows,
+        "trading_state": _dash._get_trading_state(_ctrl),
+        "strategy_alerts": model.get("strategy_alerts") or [],
+        "okx_live": model.get("okx_live"),
+        "okx_live_by_mode": model.get("okx_live_by_mode") or {},
+        "okx_live_by_env": model.get("okx_live_by_env") or {},
+        "okx_executions": model.get("okx_executions") or [],
+        "executor": model.get("executor") or {},
+        "hermes": {
+            "enabled": _dash._hermes_enabled,
+            "ok": _dash._hermes_enabled,
+        },
+        "ledger_health": model.get("ledger_health") or {},
+        "reconcile_health": reconcile_health,
+        "freshness": model.get("freshness") or {},
+        # Read-only order/reconcile/operator observability (each with its read stats).
+        "open_orders": {"rows": open_orders, "stats": oo_stats},
+        "reconcile_alerts": {"rows": recon, "stats": rc_stats},
+        "operator_alerts": {"rows": ops, "stats": op_stats},
+    }
+
+
+def health_payload():
+    import dashboard as _dash
+    cfg = _dash.shadow_config()
+    policies = list(((cfg.get("policies") or {}).get("enabled")) or [])
+
+    # Arming is driven by the 2-control model (execution_mode per strategy +
+    # the global HERMX_LIVE_TRADING kill switch), not the dead config-flag chain.
+    # ``live_trading_enabled()`` is the single source of truth for the global gate;
+    # kill_switch_engaged means live trading is DISABLED.
+    live_enabled, _live_raw = _dash.live_trading_enabled()
+    kill_switch_engaged = not live_enabled
+
+    strategies = _dash.active_strategies()
+    demo_count = sum(1 for s in strategies if (s.get("execution_mode") or "demo") != "live")
+    live_count = sum(1 for s in strategies if (s.get("execution_mode") or "demo") == "live")
+    armed = live_count > 0 and live_enabled
+
+    return {
+        "ok": True,
+        "service": "hermx_dashboard",
+        "mode": "demo_live",
+        "policies": policies,
+        "primary_policy": cfg.get("primary_policy"),
+        "arm": {
+            "kill_switch_engaged": kill_switch_engaged,
+            "live_trading_enabled": live_enabled,
+            "demo_strategies": demo_count,
+            "live_strategies": live_count,
+            "armed": armed,
+        },
+        "strategy_files": [row.get("strategy_id") for row in strategies],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
