@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -30,7 +31,7 @@ _LOCK = threading.Lock()
 # Ledger row schema version. v1 rows have no ``net_realized_pnl``/``schema_version``;
 # ``read_closed_trades`` back-fills net for them on read (Phase 2). Bump on any
 # breaking row-shape change so consumers can branch on it.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Per-venue knowledge: does the exchange's 'pnl' / 'realizedPnl' field already
 # include trading fees (net), or is it gross P&L before fees?
@@ -180,6 +181,11 @@ def read_closed_trades(
                     _as_float(row.get("fee_cost")),
                     row.get("exchange"),
                 )
+            # Back-fill recorded_at_ms (local ts_init) for v1/v2 rows as None on read
+            # -- local observation time can't be recovered from stored rows. Same
+            # read-only, never-persisted pattern as the net back-fill above (v3).
+            if "recorded_at_ms" not in row:
+                row["recorded_at_ms"] = None
             rows.append(row)
     return rows
 
@@ -365,6 +371,7 @@ def _build_entry(row: dict, exchange_id: str, mode: str, side: str, filled: floa
         # Gross stays the displayed value for now (Decision ②: verify net later).
         "net_realized_pnl": _compute_net_realized(pnl_gross, fee_cost, exchange_id),
         "closed_at_ms": _row_ts(row),
+        "recorded_at_ms": int(time.time() * 1000),
         "cl_ord_id": cl_ord_id,
     }
 

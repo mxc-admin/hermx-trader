@@ -435,3 +435,61 @@ def test_max_recorded_closed_at_filters_by_env(ledger_dir):
 
 def test_max_recorded_closed_at_none_when_empty(ledger_dir):
     assert pnl_ledger.max_recorded_closed_at("okx", "demo") is None
+
+
+# --- P1-1 dual timestamps (schema v3, recorded_at_ms) -----------------------
+
+def test_recorded_at_ms_written_on_new_rows(ledger_dir):
+    rows = [
+        {"instId": "BTC-USDT-SWAP", "ordId": "c", "clOrdId": "mxcC", "side": "sell",
+         "accFillSz": 1.0, "reduceOnly": True, "pnl": "1.0", "uTime": 300},
+    ]
+    assert pnl_ledger.reconcile_from_order_history(rows, "okx", "demo") == 1
+    row = pnl_ledger.read_closed_trades()[0]
+    assert isinstance(row["recorded_at_ms"], int)
+    assert row["recorded_at_ms"] > 0
+    assert row["schema_version"] == 3
+
+
+def test_v2_rows_backfill_recorded_at_none_on_read(ledger_dir):
+    ledger_dir.write_text(
+        json.dumps({"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "v2",
+                    "mode": "demo", "closed_at_ms": 100, "pnl_gross": 5.0,
+                    "fee_cost": -0.1, "net_realized_pnl": 4.9,
+                    "schema_version": 2}) + "\n",
+        encoding="utf-8",
+    )
+    row = pnl_ledger.read_closed_trades()[0]
+    assert "recorded_at_ms" in row
+    assert row["recorded_at_ms"] is None
+
+
+def test_schema_v3_reader_reads_v1_v2_v3_mixed_ledger(ledger_dir):
+    ledger_dir.write_text(
+        "\n".join([
+            # v1: no net_realized_pnl, no recorded_at_ms
+            json.dumps({"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "v1",
+                        "mode": "demo", "closed_at_ms": 100, "pnl_gross": 5.0,
+                        "fee_cost": -0.1}),
+            # v2: net present, no recorded_at_ms
+            json.dumps({"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "v2",
+                        "mode": "demo", "closed_at_ms": 200, "pnl_gross": 3.0,
+                        "fee_cost": -0.2, "net_realized_pnl": 2.8, "schema_version": 2}),
+            # v3: both present
+            json.dumps({"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "v3",
+                        "mode": "demo", "closed_at_ms": 300, "pnl_gross": 1.0,
+                        "fee_cost": -0.05, "net_realized_pnl": 0.95,
+                        "recorded_at_ms": 123456789, "schema_version": 3}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    rows = pnl_ledger.read_closed_trades()
+    assert len(rows) == 3
+    for row in rows:
+        assert "net_realized_pnl" in row
+        assert "recorded_at_ms" in row
+    by_id = {r["ord_id"]: r for r in rows}
+    assert by_id["v1"]["recorded_at_ms"] is None
+    assert by_id["v2"]["recorded_at_ms"] is None
+    assert by_id["v3"]["recorded_at_ms"] == 123456789
+    assert by_id["v1"]["net_realized_pnl"] == 4.9
