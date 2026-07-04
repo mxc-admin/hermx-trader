@@ -517,6 +517,117 @@ def test_post_submit_reconcile_submitted_to_unknown(wr, monkeypatch):
     assert len(open_orders) == 1 and open_orders[0]["state"] == wr.ORDER_STATE_UNKNOWN
 
 
+# ---------------------------------------------------------------------------
+# Phase 5 prep — characterization of the remaining reconcile_order_once /
+# map_order_outcome branches (REFACTOR_PLAN Phase 5: tests-first before the
+# reconcile/ extraction). These lock in CURRENT behavior; they do not change it.
+# ---------------------------------------------------------------------------
+
+def test_live_order_maps_submitted_keep_polling(wr):
+    # A non-terminal (live) order maps to SUBMITTED so the backoff keeps polling.
+    ex = StubExecutor(order=norm_order("live"))
+    out = wr.reconcile_order_once(ex, LOOKUP)
+    assert out["state"] == wr.ORDER_STATE_SUBMITTED
+    assert out["partial"] is False
+    assert out["reason"] == "live"
+    assert out["source"] == "get_order"
+
+
+def test_error_state_order_falls_through_chain_to_not_found(wr):
+    # An unrecognized venue state (error/not_implemented/garbage) is not "present"
+    # (_PRESENT_ORDER_STATES), so reconcile_order_once falls through the whole
+    # fallback chain and maps UNKNOWN/not_found — never a terminal guess. (The
+    # map_order_outcome "inconclusive:<state>" reason is only reachable by calling
+    # the pure mapper directly; the chain filters non-present orders first.)
+    ex = StubExecutor(order=norm_order("error"), pending=[], archive=[])
+    out = wr.reconcile_order_once(ex, LOOKUP)
+    assert out["state"] == wr.ORDER_STATE_UNKNOWN
+    assert out["reason"] == "not_found"
+    assert out["matched_order"] is None
+    # The pure mapper, fed the same order directly, reports the inconclusive reason.
+    state, _, reason = wr.map_order_outcome(norm_order("error"))
+    assert (state, reason) == (wr.ORDER_STATE_UNKNOWN, "inconclusive:error")
+
+
+def test_map_order_outcome_pure_branches(wr):
+    # None (absent everywhere) -> UNKNOWN/not_found.
+    assert wr.map_order_outcome(None) == (wr.ORDER_STATE_UNKNOWN, False, "not_found")
+    # Empty state string -> inconclusive:empty.
+    state, partial, reason = wr.map_order_outcome({"state": "", "acc_fill_sz": 0.0})
+    assert (state, reason) == (wr.ORDER_STATE_UNKNOWN, "inconclusive:empty")
+    # live + 0 < acc < ordered: still SUBMITTED (non-terminal), partial informs logging.
+    state, partial, reason = wr.map_order_outcome(
+        {"state": "live", "acc_fill_sz": 4.0}, ordered=10.0
+    )
+    assert (state, partial, reason) == (wr.ORDER_STATE_SUBMITTED, True, "live")
+    # Exact fill (acc == ordered) is a full FILLED, not partial_by_size.
+    state, partial, reason = wr.map_order_outcome(
+        {"state": "filled", "acc_fill_sz": 10.0}, ordered=10.0
+    )
+    assert (state, partial, reason) == (wr.ORDER_STATE_FILLED, False, "filled")
+
+
+def test_lookup_without_inst_id_never_queries_venue(wr):
+    # No inst_id => every fallback stage is skipped (each is gated on inst_id) and the
+    # outcome is UNKNOWN/not_found with the lookup's own ids echoed back.
+    ex = StubExecutor(order=norm_order("filled", acc=10.0))
+    out = wr.reconcile_order_once(ex, {"cl_ord_id": "cl-1", "ord_id": "ord-1"})
+    assert ex.calls == []  # venue never touched
+    assert out["state"] == wr.ORDER_STATE_UNKNOWN
+    assert out["reason"] == "not_found"
+    assert out["ord_id"] == "ord-1"
+    assert out["cl_ord_id"] == "cl-1"
+
+
+def test_pending_match_by_ord_id_only(wr):
+    # A pending order is matched by ordId alone when the lookup has no clOrdId.
+    ex = StubExecutor(
+        order=norm_not_found(),
+        pending=[norm_order("live", cl_ord_id="venue-generated", ord_id="ord-9")],
+    )
+    out = wr.reconcile_order_once(ex, {"inst_id": "XRP-USDT-SWAP", "ord_id": "ord-9"})
+    assert out["source"] == "orders_pending"
+    assert out["ord_id"] == "ord-9"
+    assert out["state"] == wr.ORDER_STATE_SUBMITTED  # live -> keep polling
+
+
+def test_keyless_lookup_accepts_first_present_order(wr):
+    # With neither ordId nor clOrdId, the first PRESENT order for the instrument is
+    # accepted (documented _order_matches fallback).
+    ex = StubExecutor(
+        order=norm_not_found(),
+        pending=[norm_order("filled", cl_ord_id="whoever", ord_id="any", acc=10.0)],
+    )
+    out = wr.reconcile_order_once(ex, {"inst_id": "XRP-USDT-SWAP"})
+    assert out["source"] == "orders_pending"
+    assert out["state"] == wr.ORDER_STATE_FILLED
+
+
+def test_history_limit_from_lookup_threaded_to_archive(wr):
+    ex = StubExecutor(order=norm_not_found(), pending=[], archive=[])
+    wr.reconcile_order_once(ex, {**LOOKUP, "history_limit": 7})
+    archive_calls = [c for c in ex.calls if c[0] == "get_order_history_archive"]
+    assert archive_calls == [("get_order_history_archive", "XRP-USDT-SWAP", 7)]
+
+
+def test_emit_reconcile_alert_ledger_oserror_still_notifies_operator(wr, monkeypatch):
+    # Log-and-continue on the observability path: a failed ledger append must not
+    # swallow the operator transport (and must not raise into the reconcile loop).
+    operator_calls = []
+    monkeypatch.setattr(
+        wr, "emit_operator_alert",
+        lambda kind, detail, severity="warning": operator_calls.append((kind, severity)),
+    )
+
+    def boom(path, rec):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(wr, "append_jsonl", boom)
+    record = wr.emit_reconcile_alert(wr.RECONCILE_ALERT_MISMATCH, {"stage": "test"})
+    assert record["kind"] == "reconcile"
+    assert operator_calls == [(wr.RECONCILE_ALERT_MISMATCH, "warning")]
+
+
 def test_startup_not_found_orphan_stays_unknown_not_rejected(wr):
     # MONEY-SAFETY at startup: an orphaned SUBMITTED order the venue cannot find is NOT
     # auto-rejected. It stays UNKNOWN + open so the periodic resolver keeps chasing it;

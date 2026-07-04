@@ -357,6 +357,118 @@ def test_planned_orphan_found_on_venue_promoted_not_rejected(wr, monkeypatch):
     assert any(a["alert"] == wr.RECONCILE_ALERT_PLANNED_ON_VENUE for a in op_alerts)
 
 
+# ---------------------------------------------------------------------------
+# Phase 5 prep — characterization of the remaining resolve_unknown_orders_once
+# branches (REFACTOR_PLAN Phase 5: tests-first before the reconcile/ extraction).
+# ---------------------------------------------------------------------------
+
+def test_resolver_no_executor_short_circuits(wr, monkeypatch):
+    # With no injected executor and the factory yielding None, the pass returns the
+    # empty summary WITHOUT touching the journal (fail closed to observe-only).
+    cl = "mxc-xrpusdt-buy-noexec"
+    _seed_submitted(wr, cl)
+    monkeypatch.setattr(wr, "_reconciliation_executor", lambda order_intent=None: None)
+
+    summary = wr.resolve_unknown_orders_once()
+
+    assert summary["executor_available"] is False
+    assert summary["checked"] == 0
+    assert summary["errors"] == []
+    open_orders = wr.load_open_orders()
+    assert len(open_orders) == 1 and open_orders[0]["state"] == wr.ORDER_STATE_SUBMITTED
+
+
+def test_resolver_max_orders_caps_pass_oldest_first(wr):
+    # Candidates are ordered by journal seq (oldest first); max_orders bounds the
+    # per-tick work so one tick cannot starve the loop. The un-checked order is
+    # untouched and stays open for the next tick.
+    first, second = "mxc-xrpusdt-buy-cap-first", "mxc-xrpusdt-buy-cap-second"
+    _seed_submitted(wr, first)
+    _seed_submitted(wr, second)
+
+    summary = wr.resolve_unknown_orders_once(
+        executor=ObserveOnlyStub(order=_norm_order("filled", cl_ord_id=first, acc=10.0)),
+        max_orders=1,
+    )
+
+    assert (summary["checked"], summary["resolved"]) == (1, 1)
+    open_orders = wr.load_open_orders()
+    assert [o["cl_ord_id"] for o in open_orders] == [second]  # oldest was resolved
+    assert open_orders[0]["state"] == wr.ORDER_STATE_SUBMITTED
+
+
+def test_unknown_reresolved_unknown_not_rerecorded(wr, monkeypatch):
+    # An already-UNKNOWN order that re-resolves UNKNOWN is NOT re-journalled (no-op
+    # rows would bloat the journal and buy nothing: age runs from origin_ts). The
+    # pending mismatch alert is still emitted each tick.
+    cl = "mxc-xrpusdt-buy-rerecord"
+    _seed_unknown(wr, cl)
+    _no_wait_backoff(wr, monkeypatch)
+    ex = StubExecutor(order=_norm_order("live", cl_ord_id=cl))
+
+    first = wr.resolve_unknown_orders_once(executor=ex)
+    records_after_first = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+    second = wr.resolve_unknown_orders_once(executor=ex)
+    records_after_second = wr.read_jsonl_tolerant(wr.ORDER_JOURNAL_LEDGER)
+
+    assert first["pending"] == 1 and second["pending"] == 1
+    # Journal unchanged across the second tick: exactly one UNKNOWN row, ever.
+    assert len(records_after_second) == len(records_after_first)
+    states = [r["state"] for r in records_after_second if r["cl_ord_id"] == cl]
+    assert states == [wr.ORDER_STATE_PLANNED, wr.ORDER_STATE_SUBMITTED, wr.ORDER_STATE_UNKNOWN]
+    # The mismatch alert IS re-emitted per tick (divergence stays visible). Filter to
+    # kind="reconcile": emit_reconcile_alert also writes a paired kind="operator" row.
+    alerts = wr.read_jsonl_tolerant(wr.ALERTS_LEDGER)
+    pending = [
+        a for a in alerts
+        if a.get("kind") == "reconcile"
+        and a.get("detail", {}).get("stage") == "unknown_resolver_pending"
+    ]
+    assert len(pending) == 2
+
+
+def test_symbolless_expired_order_alerts_every_tick(wr, monkeypatch):
+    # A symbol-less order cannot be deduped via the pause store, so its timeout alert
+    # is NEVER swallowed: it re-alerts on every tick and pauses nothing.
+    cl = "mxc-nosymbol-buy-expired"
+    intent = {"side": "buy", "inst_id": "XRP-USDT-SWAP", "planned_notional_usd": 1500.0}
+    wr.record_order_state(cl, wr.ORDER_STATE_PLANNED, intent=intent, prev_state=None)
+    wr.record_order_state(cl, wr.ORDER_STATE_SUBMITTED, intent=intent, prev_state=wr.ORDER_STATE_PLANNED)
+    monkeypatch.setattr(wr, "UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS", 1.0)
+    ex = StubExecutor(order=_norm_order("live", cl_ord_id=cl))
+
+    first = wr.resolve_unknown_orders_once(executor=ex, now_ts="2099-01-01T00:00:00Z")
+    second = wr.resolve_unknown_orders_once(executor=ex, now_ts="2099-01-01T01:00:00Z")
+
+    assert first["expired"] == 1 and second["expired"] == 1
+    assert first["paused_symbols"] == [] and second["paused_symbols"] == []
+    assert wr.load_control_state().get("symbol_pauses", {}) == {}
+    alerts = wr.read_jsonl_tolerant(wr.ALERTS_LEDGER)
+    timeouts = [a for a in alerts if a["alert"] == wr.RECONCILE_ALERT_RESOLVER_TIMEOUT]
+    assert len(timeouts) == 2  # one per tick, never deduped away
+
+
+def test_resolver_venue_exception_alerts_and_continues(wr, monkeypatch):
+    # A venue query that raises is captured per-order: errors recorded, an operator
+    # UNKNOWN_RESOLVER_ERROR emitted, the order left untouched (no terminal write).
+    cl = "mxc-xrpusdt-buy-venue-boom"
+    _seed_submitted(wr, cl)
+
+    class _BoomExecutor(StubExecutor):
+        def get_order(self, inst_id, ord_id=None, cl_ord_id=None):
+            raise RuntimeError("venue 502")
+
+    summary = wr.resolve_unknown_orders_once(executor=_BoomExecutor(order=None))
+
+    assert summary["checked"] == 1
+    assert summary["resolved"] == 0
+    assert len(summary["errors"]) == 1 and cl in summary["errors"][0]
+    alerts = wr.read_jsonl_tolerant(wr.ALERTS_LEDGER)
+    assert any(a["alert"] == "UNKNOWN_RESOLVER_ERROR" for a in alerts)
+    open_orders = wr.load_open_orders()
+    assert len(open_orders) == 1 and open_orders[0]["state"] == wr.ORDER_STATE_SUBMITTED
+
+
 def test_symbol_pause_blocks_submit_path(wr, monkeypatch):
     wr.pause_symbol("XRPUSDT", "manual pause test")
     monkeypatch.setenv("HERMX_LIVE_TRADING", "1")

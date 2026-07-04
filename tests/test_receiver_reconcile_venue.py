@@ -208,6 +208,67 @@ def test_reconcile_startup_explicit_executor_unchanged(wr):
 
 
 # ---------------------------------------------------------------------------
+# resolve_unknown_orders_once — the periodic resolver honors the same per-order
+# (venue, mode) invariant (#20a). Two orders on DIFFERENT accounts in one pass must
+# each be queried on THEIR OWN executor; this test FAILS if the resolver ever
+# collapses back to a single global-default executor.
+# ---------------------------------------------------------------------------
+
+def test_resolver_two_venues_each_queries_own_executor(wr, monkeypatch):
+    orders = {
+        "mxc-bybit-live-mix1": {
+            "symbol": "BTCUSDT", "inst_id": "BTC-USDT-SWAP",
+            "venue": "bybit", "mode": "live", "simulated_trading": False,
+        },
+        "mxc-okx-demo-mix2": {
+            "symbol": "XRPUSDT", "inst_id": "XRP-USDT-SWAP",
+            "venue": "okx", "mode": "demo", "simulated_trading": True,
+        },
+    }
+    for cl, intent in orders.items():
+        wr.record_order_state(cl, wr.ORDER_STATE_PLANNED, intent=intent, prev_state=None)
+        wr.record_order_state(cl, wr.ORDER_STATE_SUBMITTED, intent=intent, prev_state=wr.ORDER_STATE_PLANNED)
+
+    class _RecordingExec:
+        def __init__(self, env_key):
+            self.env_key = env_key
+            self.queried: list = []
+
+        def get_order(self, inst_id, ord_id=None, cl_ord_id=None):
+            self.queried.append(cl_ord_id)
+            # Terminal on attempt 1 so the backoff never sleeps.
+            return {"state": "filled", "acc_fill_sz": 10.0, "avg_px": 1.0,
+                    "ord_id": "ord-x", "cl_ord_id": cl_ord_id, "inst_id": inst_id}
+
+        def get_open_orders(self, inst_id=None):
+            return []
+
+        def get_order_history_archive(self, inst_id=None, limit=100):
+            return []
+
+    built: dict = {}
+
+    def fake_build(order_intent=None):
+        key = (
+            (order_intent or {}).get("venue"),
+            (order_intent or {}).get("simulated_trading"),
+        )
+        built[key] = _RecordingExec(key)
+        return built[key]
+
+    monkeypatch.setattr(wr, "_reconciliation_executor", fake_build)
+    summary = wr.resolve_unknown_orders_once()  # executor=None -> production per-order path
+
+    assert (summary["checked"], summary["resolved"]) == (2, 2)
+    # One executor per (venue, mode) — and each order was queried ONLY on its own.
+    assert built[("bybit", False)].queried == ["mxc-bybit-live-mix1"]
+    assert built[("okx", True)].queried == ["mxc-okx-demo-mix2"]
+    # The global default (built with no intent) was never used to query an order.
+    default = built.get((None, None))
+    assert default is None or default.queried == []
+
+
+# ---------------------------------------------------------------------------
 # Adapter venue resolution (H2): merged from test_reconciliation_venue_resolution.py.
 # _reconciliation_executor() builds a CcxtExecutor from _effective_execution_config(),
 # which carries the adapter selector exchange="ccxt" (the BACKEND name, not a venue).

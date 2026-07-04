@@ -155,6 +155,80 @@ def test_drift_emits_reconcile_mismatch(monkeypatch):
     assert ex.execute_called is False  # never auto-corrects
 
 
+# ---- Phase 5 prep — remaining drift branches (REFACTOR_PLAN Phase 5) ------
+# Characterization of detect_position_drift boundaries + the wr wiring branches
+# not yet pinned: no-drift emits nothing, one alert PER drift, venue/mode threading.
+
+
+def test_detect_position_drift_journal_position_missing_on_venue():
+    # Journal believes a position exists but the venue is flat -> reported as a
+    # negative drift (venue_qty 0.0), not silently skipped.
+    ex = _FakePosExecutor([])
+    drifts = detect_position_drift(ex, {"BTC-USDT-SWAP": 1.0}, "okx", "demo")
+    assert len(drifts) == 1
+    d = drifts[0]
+    assert (d["journal_qty"], d["venue_qty"]) == (1.0, 0.0)
+    assert d["drift"] == pytest.approx(-1.0)
+
+
+def test_detect_position_drift_eps_boundary():
+    # abs(drift) must EXCEED POSITION_DRIFT_EPS (1e-8): dust below/at the epsilon is
+    # not drift; just above it is.
+    ex_dust = _FakePosExecutor([{"inst_id": "BTC-USDT-SWAP", "pos": 5e-9}])
+    assert detect_position_drift(ex_dust, {"BTC-USDT-SWAP": 0.0}, "okx", "demo") == []
+    ex_over = _FakePosExecutor([{"inst_id": "BTC-USDT-SWAP", "pos": 2e-8}])
+    drifts = detect_position_drift(ex_over, {"BTC-USDT-SWAP": 0.0}, "okx", "demo")
+    assert len(drifts) == 1
+    assert drifts[0]["drift"] == pytest.approx(2e-8)
+
+
+def test_no_drift_emits_no_alert(monkeypatch):
+    # Exact journal/venue match -> reconcile_position_drift returns [] and emits NOTHING.
+    emitted = []
+    monkeypatch.setattr(
+        wr_mod, "emit_reconcile_alert",
+        lambda kind, detail: emitted.append((kind, detail)),
+    )
+    ex = _FakePosExecutor([{"inst_id": "BTC-USDT-SWAP", "pos": 1.0}])
+    drifts = wr_mod.reconcile_position_drift(ex, {"BTC-USDT-SWAP": 1.0}, "okx", "demo")
+    assert drifts == []
+    assert emitted == []
+
+
+def test_multiple_drifts_emit_one_alert_each(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(
+        wr_mod, "emit_reconcile_alert",
+        lambda kind, detail: emitted.append(detail),
+    )
+    ex = _FakePosExecutor([
+        {"inst_id": "BTC-USDT-SWAP", "pos": 0.5},
+        {"inst_id": "ETH-USDT-SWAP", "pos": 2.0},
+    ])
+    drifts = wr_mod.reconcile_position_drift(
+        ex, {"BTC-USDT-SWAP": 1.0, "ETH-USDT-SWAP": 2.0, "XRP-USDT-SWAP": 3.0},
+        "okx", "demo",
+    )
+    # BTC (0.5 vs 1.0) and XRP (venue flat vs 3.0) drift; ETH matches.
+    assert len(drifts) == 2 == len(emitted)
+    assert {d["inst_id"] for d in emitted} == {"BTC-USDT-SWAP", "XRP-USDT-SWAP"}
+    assert ex.execute_called is False  # still observe-only with multiple drifts
+
+
+def test_drift_alert_threads_actual_venue_and_mode(monkeypatch):
+    # The (venue, mode) the caller read must land in the alert detail verbatim —
+    # never a hardcoded okx/demo (same invariant as reconcile_from_order_history).
+    emitted = []
+    monkeypatch.setattr(
+        wr_mod, "emit_reconcile_alert",
+        lambda kind, detail: emitted.append(detail),
+    )
+    ex = _FakePosExecutor([{"inst_id": "BTC-USDT-SWAP", "pos": 0.5}])
+    wr_mod.reconcile_position_drift(ex, {"BTC-USDT-SWAP": 1.0}, "bybit", "live")
+    assert len(emitted) == 1
+    assert (emitted[0]["venue"], emitted[0]["mode"]) == ("bybit", "live")
+
+
 # ---- Opp 10 — overfill invariant (folded into B1) ------------------------
 
 def test_overfill_check_logs_warning(caplog):
