@@ -30,7 +30,7 @@ WORKDIR="$REPO_ROOT"
 DELIVER="telegram"
 
 READONLY_SKILLS=(hermx-status hermx-positions hermx-trace signal-memory)
-BRIDGE_SCRIPTS=(hermx_gate_lib.py hermx-reconcile-gate.py hermx-health-watch.py hermx-intake-gate.py)
+BRIDGE_SCRIPTS=(hermx_gate_lib.py hermx-reconcile-gate.py hermx-health-watch.py hermx-intake-gate.py hermx-ledger-reconcile.py)
 
 DRY_RUN="${HERMX_CRON_DRY_RUN:-0}"
 DO_SMOKE="${HERMX_CRON_SMOKE:-1}"
@@ -154,6 +154,15 @@ ensure_job "hermx-health-check" \
    --script hermx-health-watch.py \
    --workdir \"$WORKDIR\" --deliver $DELIVER"
 
+# P&L-ledger reconcile safety net (Phase 3). Non-LLM (--no-agent): folds each active
+# strategy's recent order history into closed-trades.jsonl on a cadence so a close is
+# captured even when the dashboard is idle (History-window race mitigation). Distinct
+# from the LLM hermx-reconcile watchdog above and from HERMX_RECONCILE_ENABLED.
+ensure_job "hermx-ledger-reconcile" \
+  "\"every 10m\" --no-agent \
+   --script hermx-ledger-reconcile.py \
+   --workdir \"$WORKDIR\" --deliver $DELIVER"
+
 ensure_job "hermx-signal-late" \
   "\"every 30m\" \"$SIGNAL_LATE_PROMPT\" \
    --script hermx-intake-gate.py \
@@ -168,7 +177,7 @@ run "hermes -z \"ping\" --skills hermx-status >/dev/null && echo '  hermx-status
 
 if [ "$DO_SMOKE" = "1" ]; then
   say "Firing each job once ('hermes cron run'); inspect ~/.hermes/cron/output/<job_id>/"
-  for name in hermx-weekly hermx-reconcile hermx-daily hermx-health-check hermx-signal-late; do
+  for name in hermx-weekly hermx-reconcile hermx-daily hermx-health-check hermx-signal-late hermx-ledger-reconcile; do
     run "hermes cron run \"$name\"" || warn "  'cron run $name' failed — inspect manually"
   done
 else
