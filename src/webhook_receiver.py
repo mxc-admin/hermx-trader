@@ -1849,7 +1849,10 @@ def _execute_authoritative(record: dict) -> dict:
             "mode": "not_submitted",
             "reason": "execution_unavailable",
         }
-        record_pipeline_event("execution", _signal_id_of(record), {"received_at": record.get("received_at"), "okx_execution": result})
+        try:
+            record_pipeline_event("execution", _signal_id_of(record), {"received_at": record.get("received_at"), "okx_execution": result})
+        except Exception as exc:  # pipeline ledger is observability; must never block the outcome
+            logging.warning("execution ledger append failed: %s", exc)
         return result
     return _execute_via_service(record)
 
@@ -2005,7 +2008,10 @@ def execute_with_advisor(record: dict) -> dict:
                 "reason": "vetoed_by_advisor",
                 "advisor": {"risk_note": decision.get("risk_note"), "score": decision.get("score")},
             }
-            record_pipeline_event("execution", _signal_id_of(record), {"received_at": record.get("received_at"), "okx_execution": result})
+            try:
+                record_pipeline_event("execution", _signal_id_of(record), {"received_at": record.get("received_at"), "okx_execution": result})
+            except Exception as exc:  # pipeline ledger is observability; must never block the veto outcome
+                logging.warning("execution ledger append failed: %s", exc)
             return result
     return execute_if_enabled(record)
 
