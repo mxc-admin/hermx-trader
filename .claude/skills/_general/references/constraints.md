@@ -75,3 +75,9 @@ After the flag cleanup, root resolution is `HERMX_ROOT` only. `SHADOW_ROOT` is n
 
 ### Installer cron quoting/`hermes cron edit` grammar is untested
 `ensure_job()` relies on `hermes cron edit "$name" $*` accepting the same positional args as `create`, and on shell double-eval of `"..."` strings containing apostrophes. Neither is exercised by any test, and a dry-run won't catch the quoting break — it fails only at real invocation.
+
+### Concurrent sessions may commit to the same repo
+More than one agent/session can be editing and committing to this repo at once. A concurrent session committed while P&L work was in flight. Mitigation: atomic per-item commits keep each unit of work self-contained and recoverable, preventing cross-session contamination of a large uncommitted diff.
+
+### Nautilus reconciliation is report-driven only
+In Nautilus Rust (`engine/mod.rs`, `orders.rs`), reconciliation acts only on venue reports it receives. Absence of a report for an order does NOT imply rejection — the order is left in its current state, never force-transitioned. Any HermX design that infers a terminal state from missing venue data diverges from Nautilus and risks mislabeling live positions.

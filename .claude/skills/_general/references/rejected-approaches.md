@@ -189,3 +189,17 @@
 - **Verdict:** REJECTED
 - **Reason:** It gates on `risk_index_gate_enabled`, a flag that does not exist in the codebase, so the job can never fire. An inert-but-listed monitor is false reassurance — worse than no monitor. Removed from installer; script kept in repo but unwired.
 - **Date:** July 2026
+
+### Force UNKNOWN → REJECTED for venue-absent orders (NAUTILUS plan Item 4)
+- **What:** Treat a stuck `UNKNOWN` order (no venue report found) as terminal and force it to `REJECTED`.
+- **Tested:** Static analysis of Nautilus Rust source (`engine/mod.rs`, `orders.rs`) + HermX reconcile path.
+- **Verdict:** REJECTED (plan conclusion overturned)
+- **Reason:** Nautilus reconciliation is report-driven only — it leaves venue-absent orders untouched, never synthesizing a rejection. HermX already aligns. Forcing `REJECTED` re-introduces the "drop a live position as flat" bug. Correct path is an optional non-position-affecting `ABANDONED` state, but only after a production UNKNOWN census.
+- **Date:** July 2026
+
+### Delete the `reconcile_from_order_history` call in `okx_order_history_snapshot`
+- **What:** Remove the literal `reconcile_from_order_history(rows, "okx", "demo")` call flagged by the plan (P2-2).
+- **Tested:** Re-read current code + existing test before executing the planned deletion.
+- **Verdict:** REJECTED
+- **Reason:** A prior session had already fixed it by threading the real `(venue, mode)` from the executor; the test now requires the call to *exist*. Blind deletion per the stale plan would have regressed the test. The real fix (thread actual venue/mode) was already in place.
+- **Date:** July 2026

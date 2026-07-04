@@ -64,6 +64,21 @@ When root resolution uses `HERMX_ROOT or SHADOW_ROOT`, a test fixture that only 
 ### Hyperliquid cloid is 0x hex, not decimal
 `_to_hyperliquid_cloid()` produces `0x{sha256[:32]}` — a hex string, not a decimal integer. Any `is_hermx_cl_ord_id()` guard using `text.isdigit()` misses it. Broaden the guard to `startswith("0x") or isdigit()` when resolving Hyperliquid cloids.
 
+### Append-only ledger needs read-side dedup, not just write-side
+Write-side dedup under a lock still leaves a TOCTOU window where a duplicate row can be appended between the check and the write (or by a concurrent writer). For a money ledger like `closed-trades.jsonl` that doubles P&L, add read-side dedup by composite key (`exchange`, `inst_id`, `ord_id`, `mode`), last-wins, and preserve malformed rows rather than dropping them.
+
+### Skip non-terminal venue rows in reconcile
+`reconcile_from_order_history` must only convert ledger rows whose venue state is terminal (`filled`, `canceled`) or explicitly `reduceOnly=True` into closes. In-flight partial fills otherwise get misclassified as closes, corrupting position and P&L attribution.
+
+### Log fee-currency mismatch and None realized-PnL instead of silently writing zero
+A fee reported in a non-quote currency, or a missing venue `pnl`/`realizedPnl` field, silently corrupts accounting if coerced to zero. Warn (log-and-continue) and persist the row with the anomaly recorded — never write a fabricated zero.
+
+### Re-read current code before executing a planned change
+Tests and code can change between when a plan is written and when it is executed (concurrent sessions, prior fixes). A plan item said to delete a hardcoded `reconcile_from_order_history(rows, "okx", "demo")` call, but a prior session had already fixed it by threading real `(venue, mode)` and a test now requires the call to exist — blind deletion would have regressed. Always re-read the current code (and its tests) immediately before acting on a planned edit.
+
+### Static analysis can close empirical "needs a live check" validations
+Not every "requires a live/production check" item actually does. `ord_id` uniqueness across venues and legacy-path reachability were both answered conclusively by reading the code plus existing tests. Attempt static resolution (source + tests) before scheduling a live experiment; reserve live checks for genuinely runtime-only facts (e.g. venue fee-inclusion semantics).
+
 ## Anti-Patterns (populated by /learn)
 <!-- Entries added here as anti-patterns are identified -->
 

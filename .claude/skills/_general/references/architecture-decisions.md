@@ -180,3 +180,23 @@
 - **Decision:** `hermx-risk-watch` was removed from the installer because it gates on a nonexistent flag (`risk_index_gate_enabled`) and can never fire.
 - **Alternatives:** Keep it wired "for coverage" until the flag exists.
 - **Rationale:** A monitor that looks alive in `hermes cron list` but never fires creates false confidence — worse than no monitor. Delete until the flag is real.
+
+### PnL / cost-basis / unrealized delegated to the exchange, not computed locally
+- **Decision:** HermX reads realized/unrealized PnL and cost basis from the venue (CCXT `pnl`/`realizedPnl`/position fields) rather than computing them from a local fill log.
+- **Alternatives:** Compute locally like Nautilus Trader (maintains its own position + averaging engine).
+- **Rationale:** Venue-neutral delegation is simpler and correct at HermX's scale/one-account-per-`(venue,mode)` model. Nautilus computes itself because it's a full backtest/live framework; HermX is a thin execution relay and the exchange is already the source of truth.
+
+### Read-side dedup by composite key in `read_closed_trades`
+- **Decision:** `read_closed_trades` dedups `closed-trades.jsonl` rows on a composite key (`exchange`, `inst_id`, `ord_id`, `mode`), last-wins, preserving malformed rows.
+- **Alternatives:** Rely solely on write-side dedup under the append lock.
+- **Rationale:** Write-side dedup leaves a TOCTOU window where a duplicate can still be appended; read-side dedup closes the money-doubling window at query time. Malformed rows are preserved (not silently dropped) so accounting never loses a record it can't parse.
+
+### UPnL is single-asset per strategy by design
+- **Decision:** Unrealized-PnL attribution assumes one instrument per strategy; a multi-instrument strategy is out of scope.
+- **Alternatives:** Per-instrument position cache keyed within a strategy.
+- **Rationale:** Every current strategy trades a single `inst_id`. A per-instrument cache is real complexity for zero present demand. Documented as a limitation in `PNL_MASTER_PLAN.md`; revisit only if a multi-instrument strategy is introduced.
+
+### Observability by periodic pull gate (Hermes cron), not an event bus
+- **Decision:** Reconcile-lag and other observability signals are surfaced by periodic pre-check gate scripts (Hermes cron) reading state read-only, not by an in-process event bus.
+- **Alternatives:** Event-bus/pub-sub emission on every state transition (Nautilus-style).
+- **Rationale:** HermX has exactly one consumer of these signals (the operator via Hermes). A pull gate is deterministic, crash-safe, and adds no coupling to the money path. An event bus is infrastructure for many consumers HermX does not have.
