@@ -41,7 +41,22 @@ The agent uses only the local loopback API that already runs:
    hermes --version
    ```
 
-2. **Set a provider / LLM key — USER action.** Hermes needs a model provider. Pick one:
+2. **Seed the agent's identity — OPTIONAL but recommended.** By default a fresh
+   Hermes instance uses Nous Research's generic default identity, with no awareness
+   it's operating HermX. `skills/hermx-identity/` ships a ready-made split (validated
+   against Nous's own SOUL.md vs AGENTS.md guidance):
+
+   ```bash
+   cp skills/hermx-identity/SOUL.md ~/.hermes/SOUL.md      # identity, tone, style (global)
+   cp skills/hermx-identity/AGENTS.md ./AGENTS.md          # HermX mechanics (repo-scoped)
+   ```
+
+   `~/.hermes/SOUL.md` only exists if you already ran Hermes once (it auto-seeds a
+   starter on first run) — overwrite it here. Restart Hermes (or start a new session)
+   for the change to take effect. See `skills/hermx-identity/README.md` for why the
+   content is split this way.
+
+3. **Set a provider / LLM key — USER action.** Hermes needs a model provider. Pick one:
    - **xAI / Grok (API key, what this deployment uses):** add `XAI_API_KEY=xai-...` to
      `~/.hermes/.env`, then point Hermes at it:
 
@@ -58,7 +73,7 @@ The agent uses only the local loopback API that already runs:
    Do not commit any key. This repo never stores the provider key — it lives only in
    `~/.hermes/.env`. Rotate the key if it is ever pasted into a chat or shell history.
 
-3. **Register the hermx-control skill.** Symlink it into the Hermes skills tree (reversible;
+4. **Register the hermx-control skill.** Symlink it into the Hermes skills tree (reversible;
    stays in sync with the repo). From the repo root:
 
    ```bash
@@ -74,7 +89,7 @@ The agent uses only the local loopback API that already runs:
 
    To unregister: `rm ~/.hermes/skills/hermx-control` (removes only the symlink).
 
-4. **Let the local agent reach the dashboard.** The agent runs on the same host. Choose one:
+5. **Let the local agent reach the dashboard.** The agent runs on the same host. Choose one:
    - **No-auth loopback:** start the dashboard with `HERMX_DASH_AUTH=false` while it is bound
      to `127.0.0.1` only. Simplest on a single-user host.
    - **Token:** keep `HERMX_DASH_AUTH=true`, set `HERMX_SECRET=<secret>` in `.env`,
@@ -136,7 +151,7 @@ The advisor invokes the **Hermes Agent** as a one-shot **with our skills loaded*
 `hermes -z "<prompt>" --skills hermx-control` — so the agent runs through Hermes (its
 configured provider + credentials) and can use the `hermx-control` skill to read the live
 local API before its verdict. It is **not** a bare LLM call. Requires the `hermes` binary
-on the receiver's `PATH` (step 1) and the skill registered (step 3).
+on the receiver's `PATH` (step 1) and the skill registered (step 4).
 
 It is OFF by default. Defaults are built in; env vars override. (Note: `shadow-config.json` is dead code — not a config source; file-based overrides live in the `advisor` block of `engine-config.json`, loaded via `load_engine_config()`.) The env vars:
 
@@ -185,7 +200,7 @@ Concrete, copy-paste steps to talk to HermX from Telegram. This expands the
    > For more than one operator, comma-separate the IDs. Never leave it blank or
    > allow-all on a trading agent.
 
-4. **Register the `hermx-control` skill** (if not already done in step 3 above):
+4. **Register the `hermx-control` skill** (if not already done in step 4 above):
 
    ```bash
    mkdir -p ~/.hermes/skills

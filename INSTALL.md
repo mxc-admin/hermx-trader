@@ -741,7 +741,25 @@ source ~/.bashrc          # or ~/.zshrc
 hermes --version
 ```
 
-### 6.2 Configure the agent's own env (`~/.hermes/.env`)
+### 6.2 Seed the agent's identity
+
+By default a fresh Hermes instance uses Nous Research's generic default identity, with
+no awareness it's operating HermX. `skills/hermx-identity/` ships a ready-made split
+(validated against Nous's own SOUL.md vs AGENTS.md guidance — identity/tone stays
+global, HermX mechanics stay project-scoped):
+
+```bash
+cd /opt/hermx     # or your repo root, so $PWD is correct
+cp skills/hermx-identity/SOUL.md ~/.hermes/SOUL.md   # identity, tone, style (global)
+cp skills/hermx-identity/AGENTS.md ./AGENTS.md       # HermX mechanics (repo-scoped)
+```
+
+`~/.hermes/SOUL.md` only exists if `hermes` has already run once (it auto-seeds a
+starter on first run) — overwrite it here. This takes effect on the agent's next
+session/restart, so do it before `hermes gateway start` (6.5). See
+`skills/hermx-identity/README.md` for why the content is split this way.
+
+### 6.3 Configure the agent's own env (`~/.hermes/.env`)
 
 > These values live in the **agent's** env, never in the HermX repo. Use the values you collected in
 > Phase 2.5.
@@ -763,7 +781,7 @@ To get the Telegram values: open **@BotFather** → `/newbot` → choose a name 
 `bot` → copy the token. Then open **@userinfobot** → send any message → copy your numeric user ID.
 `TELEGRAM_ALLOWED_USERS` must be an allowlist of only the operator — never blank, never allow-all.
 
-### 6.3 Register the `hermx-control` skill
+### 6.4 Register the `hermx-control` skill
 
 ```bash
 cd /opt/hermx     # or your repo root, so $PWD is correct
@@ -776,7 +794,7 @@ Make sure the agent can read the dashboard: either set `HERMX_DASH_AUTH=false` (
 single-user) in `.env`, or give the agent the `HERMX_SECRET` to send as the
 `X-Dashboard-Token` header.
 
-### 6.3.1 Register the slash-command skills
+### 6.4.1 Register the slash-command skills
 
 Beyond the single `hermx-control` skill, HermX ships focused **slash-command skills** — each
 `skills/hermx-*/SKILL.md` becomes a dynamic slash command in Hermes (`/hx-status`, `/hx-positions`,
@@ -798,14 +816,14 @@ guarded loopback mutations) and speak the contract in
 `skills/hermx-ops/references/api-contract.md`. Full command reference:
 `skills/hermx-help/SKILL.md`.
 
-### 6.4 Start the Telegram gateway
+### 6.5 Start the Telegram gateway
 
 ```bash
 hermes gateway setup     # one-time wizard — select Telegram
 hermes gateway start     # managed service (or `hermes gateway` for foreground)
 ```
 
-### 6.5 Install the cron monitors
+### 6.6 Install the cron monitors
 
 The Hermes gateway includes a built-in cron scheduler. Install the HermX monitor jobs once the gateway is running:
 
@@ -839,7 +857,7 @@ On subsequent upgrades (`bash deploy/deploy.sh`), missing monitor jobs are creat
 
 Pause a noisy monitor with `/cron pause <name>`. Full design: `docs/7-EXECUTION_MONITORING.md`.
 
-### 6.6 Test it
+### 6.7 Test it
 
 Ask the user to message their bot in Telegram: **"are you there?"** and confirm a sane reply.
 
