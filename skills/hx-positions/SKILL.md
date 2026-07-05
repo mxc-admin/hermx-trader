@@ -1,5 +1,5 @@
 ---
-name: hermx-positions
+name: hx-positions
 description: "Use when the operator asks what positions are open on HermX — open size, side, entry, mark, unrealized PnL. Read-only. Reads the local dashboard /api okx_live.positions over loopback. On any read failure or a stale/degraded executor it reports UNKNOWN — never 'flat'. Never places or closes an order."
 version: 0.1.0
 author: HermX
@@ -13,7 +13,7 @@ required_environment_variables:
 metadata:
   hermes:
     tags: [trading, hermx, positions, read-only, operations]
-    related_skills: [hermx-control, hermx-status, hermx-strategy-list, hermx-trace]
+    related_skills: [hermx-control, hx-status, hx-strategy-list, hx-trace]
     config:
       - key: hermx.dashboard_base
         description: "HermX dashboard base URL (loopback)"

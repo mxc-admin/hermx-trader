@@ -1,5 +1,5 @@
 ---
-name: hermx-restart
+name: hx-restart
 description: "Use when the operator wants to restart the HermX services because the dashboard or receiver is down or unresponsive. Mutating (process lifecycle, not trading). First health-checks dashboard /health and receiver /health over loopback; if both are UP it reports 'up' and does nothing. If one or both are down it previews a restart plan and requires explicit 'yes' before restarting via systemd (preferred) or a start script (fallback). `/hx-restart force` restarts both regardless of state with a stronger prompt. Never edits strategy files, never places or relays an order."
 version: 0.1.0
 author: HermX
@@ -13,7 +13,7 @@ required_environment_variables:
 metadata:
   hermes:
     tags: [trading, hermx, restart, lifecycle, operations, mutating]
-    related_skills: [hermx-status, hermx-control, emergency-stop, hermx-positions]
+    related_skills: [hx-status, hermx-control, hx-emergency-stop, hx-positions]
     config:
       - key: hermx.dashboard_base
         description: "HermX dashboard base URL (loopback)"

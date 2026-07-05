@@ -1,5 +1,5 @@
 ---
-name: hermx-strategy
+name: hx-strategy
 description: "Use when the operator wants to ADD, UPDATE, or ARCHIVE a HermX strategy definition file (strategies/*.json). add/update are INTERACTIVE: the agent collects fields conversationally (add offers auto-generated or manual strategy_id), always dry-runs first, requires explicit 'yes' before any write, and after a successful add/update prints the strategy's BUY/SELL/CLOSE TradingView alert Message templates (same payload shape as /hx-tv-alerts). Mutating, filesystem-only — no dashboard/receiver endpoint exists for strategy CRUD. Validates against the strategy_v2 schema and archives by moving to strategies/_archive/ (never deletes). Files load at import time: NO change is live until /hx-restart."
 version: 0.1.0
 author: HermX
@@ -13,7 +13,7 @@ required_environment_variables:
 metadata:
   hermes:
     tags: [trading, hermx, strategies, mutating, crud, operations]
-    related_skills: [hermx-strategy-mode, hermx-strategy-list, hermx-restart, hermx-close, hermx-tv-alerts]
+    related_skills: [hx-strategy-mode, hx-strategy-list, hx-restart, hx-close, hx-tv-alerts]
     config:
       - key: hermx.strategies_dir
         description: "Directory of strategy files"
@@ -46,7 +46,7 @@ restart. **Every success report from this skill MUST end with:
 - This skill is distinct from `/hx-strategy-mode` (which POSTs a control override and
   **never** touches `strategies/*.json`) and `/hx-strategy-list` (read-only). This
   skill **never edits `control-state.json`** — mode overrides stay in
-  hermx-strategy-mode's territory.
+  hx-strategy-mode's territory.
 - `strategies/*.json` is **git-tracked**. This skill NEVER runs `git add`/`git commit`
   — committing is the operator's/`/git-commit`'s step. Report the uncommitted change.
 - Never invent or suggest an order size — `capital.budget_usd` is configuration;

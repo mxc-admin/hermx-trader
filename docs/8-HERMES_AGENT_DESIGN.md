@@ -426,7 +426,7 @@ Legend: ✓ = confirms signal, ✗ = contradicts, **?** = UNKNOWN/unavailable.
 #### 5.2.1 The `/hx-*` slash-command skill family **[BUILT]**
 
 Alongside `hermx-control` (the original single-skill model), HermX ships a family of
-focused operator skills — each `skills/hermx-*/SKILL.md` becomes a dynamic slash
+focused operator skills — each `skills/hx-*/SKILL.md` becomes a dynamic slash
 command in Hermes. They share one helper library
 (`skills/hermx-ops/lib/hermx_ops.py`, stdlib-only) and one canonical endpoint contract
 (`skills/hermx-ops/references/api-contract.md`), and they inherit the exact posture of
@@ -755,7 +755,7 @@ the agent flags reduced context.
 
 **Purpose.** Give the operator small, single-purpose commands (catalog: §5.2.1) instead
 of routing every request through the monolithic `hermx-control`. Each command is its
-own `skills/hermx-*/SKILL.md` satisfying the §5.3 contract; shared behavior lives in
+own `skills/hx-*/SKILL.md` satisfying the §5.3 contract; shared behavior lives in
 `skills/hermx-ops/lib/hermx_ops.py` (stdlib-only helpers) and
 `skills/hermx-ops/references/api-contract.md` (the canonical endpoint/auth/response
 contract every command encodes).

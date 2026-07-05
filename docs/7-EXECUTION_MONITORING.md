@@ -245,8 +245,8 @@ Segment rotation seals the live file after 1000 records — orders of magnitude 
 to no alert (fail-open, consistent with the gate's read-gap posture elsewhere), never a
 false one.
 
-Fresh conditions wake an LLM agent (skills: `hermx-trace`, `hermx-positions`,
-`hermx-status`) that traces the affected signal end-to-end, confirms current exposure and
+Fresh conditions wake an LLM agent (skills: `hx-trace`, `hx-positions`,
+`hx-status`) that traces the affected signal end-to-end, confirms current exposure and
 trading/arm state, and either reports a short operator summary or replies `[SILENT]` if the
 condition is already resolved — the second-opinion layer that pure threshold monitors don't
 have.
@@ -315,7 +315,7 @@ MONITORING_GAPS_BRAINSTORM.md Scenario A.
 
 Self-contained prompt, always fires: arm state and mode, executor/freshness health, open
 positions with exposure and uPnL, alert count over the last 24 h, active strategy-mode overrides;
-under 200 words; `UNKNOWN` for stale reads. Skills: `hermx-status`, `hermx-positions`,
+under 200 words; `UNKNOWN` for stale reads. Skills: `hx-status`, `hx-positions`,
 `signal-memory`.
 
 ### 4.7 `hermx-weekly` — weekly summary (Monday 09:00 UTC, LLM, ungated)
@@ -356,8 +356,8 @@ enabling flag is produced by nothing" — which is why it was cut.
 Each LLM job fire is a **fresh Hermes agent session**: no conversation history, the job's
 read-only skills injected as context, the prompt appended as the task, and
 `--workdir "<hermx repo>"` so the skills' cwd-relative imports and `HERMX_DATA_DIR`-relative
-reads resolve. Monitoring jobs must only ever load **read-only** skills (`hermx-status`,
-`hermx-positions`, `hermx-trace`, `signal-memory`) — never a mutating skill and never the
+reads resolve. Monitoring jobs must only ever load **read-only** skills (`hx-status`,
+`hx-positions`, `hx-trace`, `signal-memory`) — never a mutating skill and never the
 relay-capable `hermx-control`. Cron sessions also have the `cronjob` toolset disabled natively
 (no monitor can spawn monitors).
 
@@ -390,7 +390,7 @@ worth saying (the run is still audited in `~/.hermes/cron/output/`).
 
 Idempotent; safe to re-run. Steps:
 
-1. **Register read-only skills** — symlink `hermx-status`, `hermx-positions`, `hermx-trace`,
+1. **Register read-only skills** — symlink `hx-status`, `hx-positions`, `hx-trace`,
    `signal-memory` from the repo `skills/` dir into `~/.hermes/skills/trading/`.
 2. **Install bridge scripts** — copy `hermx_gate_lib.py` and the gate/watchdog scripts from
    `deploy/hermes-scripts/` (the version-controlled source of truth) into `~/.hermes/scripts/`
@@ -404,7 +404,7 @@ Idempotent; safe to re-run. Steps:
    - **`HERMX_CRON_CREATE_ONLY=1`** (used by `deploy/deploy.sh` on every upgrade): create
      missing jobs, **skip existing ones entirely** — so a deploy can never silently re-enable a
      monitor the operator paused or overwrite a hand-tuned schedule.
-5. **Smoke test** — skill resolution (`hermes -z "ping" --skills hermx-status`) and one manual
+5. **Smoke test** — skill resolution (`hermes -z "ping" --skills hx-status`) and one manual
    fire per job (`hermes cron run <name>`; skip with `HERMX_CRON_SMOKE=0`).
 
 `HERMX_CRON_DRY_RUN=1` prints every action without executing.

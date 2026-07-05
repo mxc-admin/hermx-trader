@@ -168,7 +168,7 @@ Python execution layer. A skill/agent **never** sets or suggests an order size.
 - Symbol is derived from `instrument.inst_id`: `BTC-USDT-SWAP` → `BTCUSDT`.
 - No top-level `symbol`/`budget_usd`; read `instrument.inst_id` / `capital.budget_usd`.
 
-## hermx-strategy file-write contract
+## hx-strategy file-write contract
 
 Strategy add/update/archive (`/hx-strategy`) are **direct filesystem operations** on
 `strategies/*.json` — no dashboard/receiver endpoint exists for strategy CRUD.

@@ -1,5 +1,5 @@
 ---
-name: hermx-close
+name: hx-close
 description: "Use when the operator wants to CLOSE (flatten) one open HermX position by symbol or strategy. Mutating, reduce-only. Confirms the position exists via /api first, previews side+size, and on explicit 'yes' POSTs /api/close on the receiver. Never sends a size; never routes via /webhook. A failed/stale read is UNKNOWN — it refuses to close rather than assume flat."
 version: 0.1.0
 author: HermX
@@ -13,7 +13,7 @@ required_environment_variables:
 metadata:
   hermes:
     tags: [trading, hermx, positions, close, mutating, operations]
-    related_skills: [hermx-positions, hermx-control, hermx-strategy-mode, emergency-stop]
+    related_skills: [hx-positions, hermx-control, hx-strategy-mode, hx-emergency-stop]
     config:
       - key: hermx.dashboard_base
         description: "HermX dashboard base URL (loopback)"

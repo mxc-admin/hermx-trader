@@ -69,7 +69,11 @@ hermes setup              # Choose your LLM (xAI, OpenAI, Anthropic, Ollama, etc
 
 ```bash
 # From inside this repository
-ln -sfn "$(pwd)/skills/hermx-control" ~/.hermes/skills/hermx-control
+mkdir -p ~/.hermes/skills
+for d in skills/hermx-control skills/hx-status skills/hx-positions skills/hx-strategy-list skills/hx-trace skills/hx-tv-alerts skills/hx-help skills/hx-strategy-mode skills/hx-close skills/hx-emergency-stop skills/hx-restart skills/hx-upgrade skills/hx-exchange skills/hx-troubleshoot skills/hx-strategy; do
+  ln -sfn "$PWD/$d" ~/.hermes/skills/"$(basename "$d")"
+done
+hermes skills list | grep -E 'hermx-control|hx-'
 cat INSTALL.md | hermes -z --skills hermx-control
 ```
 
@@ -82,7 +86,7 @@ Full instructions: [INSTALL.md](INSTALL.md)
 ### Operator commands (slash commands)
 
 The `hermx-control` skill above is the older single-skill model. HermX now also ships a
-set of focused **slash-command skills** — each `skills/hermx-*/SKILL.md` becomes a dynamic
+set of focused **slash-command skills** — each `skills/hx-*/SKILL.md` becomes a dynamic
 slash command in Hermes:
 
 - `/hx-status` — armed?, mode, dashboard/receiver reachability, last alert
@@ -97,7 +101,7 @@ slash command in Hermes:
 - `/hx-help` — list or explain the commands (pure text)
 
 They share a helper library, `skills/hermx-ops/lib/hermx_ops.py` (UNKNOWN-never-flat reads,
-guarded mutations over loopback). Full reference: [skills/hermx-help/SKILL.md](skills/hermx-help/SKILL.md).
+guarded mutations over loopback). Full reference: [skills/hx-help/SKILL.md](skills/hx-help/SKILL.md).
 
 ## Included Strategies
 

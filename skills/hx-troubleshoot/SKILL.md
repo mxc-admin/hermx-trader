@@ -1,5 +1,5 @@
 ---
-name: hermx-troubleshoot
+name: hx-troubleshoot
 description: "Use when an order is stuck in a confusing state (e.g. UNKNOWN that never resolves, or a Hermes reconcile-gate alert pointing here). Investigates ALL open orders in one pass, classifies each against known corruption/ambiguity patterns, and offers a one-confirm fix ONLY for the one provably-safe pattern (a terminal state illegally overwritten in the journal's own history). Never offers a write for a genuinely ambiguous order -- those require manual investigation per HermX's not-found-is-not-rejected invariant."
 version: 0.1.0
 author: HermX
@@ -13,7 +13,7 @@ required_environment_variables:
 metadata:
   hermes:
     tags: [trading, hermx, orders, diagnostics, mutating, operations]
-    related_skills: [hermx-trace, hermx-control, hermx-close]
+    related_skills: [hx-trace, hermx-control, hx-close]
     config:
       - key: hermx.receiver_base
         description: "HermX webhook receiver base URL (loopback)"
@@ -98,7 +98,7 @@ PY
 
 ## Required log (every mutation)
 Record: time, operator, reason, `cl_ord_id`, `from_state`/`to_state` (on `healed`) or the
-refusal reason (on `refused`) — same discipline as `hermx-close`.
+refusal reason (on `refused`) — same discipline as `hx-close`.
 
 ## Outcomes
 - `healed` — the journal's terminal state was restored; report `from_state`/`to_state`.

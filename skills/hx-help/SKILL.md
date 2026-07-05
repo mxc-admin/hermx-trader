@@ -1,5 +1,5 @@
 ---
-name: hermx-help
+name: hx-help
 description: "Use when the operator asks what HermX slash commands exist, how one works, or wants usage help — e.g. '/hx-help', '/hx-help close', 'what commands are there', 'how do I use /hx-strategy-mode'. Prints a human-readable overview of all HermX commands, or a detailed guide for one. Read-only text: no HTTP calls, no file writes, no mutations."
 version: 0.1.0
 author: HermX
@@ -8,7 +8,7 @@ platforms: [linux, macos]
 metadata:
   hermes:
     tags: [trading, hermx, help, docs, read-only, operations]
-    related_skills: [hermx-control, hermx-status, hermx-positions, hermx-strategy-list, hermx-trace, hermx-tv-alerts, hermx-strategy-mode, hermx-close, emergency-stop, hermx-restart, hermx-upgrade, hermx-exchange]
+    related_skills: [hermx-control, hx-status, hx-positions, hx-strategy-list, hx-trace, hx-tv-alerts, hx-strategy-mode, hx-close, hx-emergency-stop, hx-restart, hx-upgrade, hx-exchange]
     config:
       - key: hermx.dashboard_base
         description: "HermX dashboard base URL (loopback)"

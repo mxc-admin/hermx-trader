@@ -30,7 +30,7 @@ an exchange directly.
   order-creating write available to you.
 - Full contract: `skills/hermx-control/SKILL.md`. Slash-command family (status,
   positions, trace, close, emergency-stop, restart, upgrade, exchange):
-  `skills/hermx-help/SKILL.md`.
+  `skills/hx-help/SKILL.md`.
 
 ## Hard rule: UNKNOWN, never "flat"
 A failed, stale, or degraded read is always reported as UNKNOWN — never fabricated as

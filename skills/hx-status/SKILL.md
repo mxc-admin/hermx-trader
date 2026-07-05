@@ -1,5 +1,5 @@
 ---
-name: hermx-status
+name: hx-status
 description: "Use when the operator asks about HermX system status — is it armed, what mode, is the dashboard/receiver up, when was the last alert, how many strategies. Read-only. Calls the local dashboard /health and /api plus the receiver /health and /latest over loopback. Never relays a signal, never places an order."
 version: 0.1.0
 author: HermX
@@ -13,7 +13,7 @@ required_environment_variables:
 metadata:
   hermes:
     tags: [trading, hermx, status, read-only, operations]
-    related_skills: [hermx-control, hermx-positions, hermx-strategy-list, hermx-trace]
+    related_skills: [hermx-control, hx-positions, hx-strategy-list, hx-trace]
     config:
       - key: hermx.dashboard_base
         description: "HermX dashboard base URL (loopback)"

@@ -1,5 +1,5 @@
 ---
-name: hermx-exchange
+name: hx-exchange
 description: "Manage exchange credentials for HermX: add, update, remove, and validate API keys for OKX, KuCoin, Bybit, Binance, Bitget, Gate, Hyperliquid, Coinbase. Triggered by: '/hx-exchange list', '/hx-exchange add okx --demo', '/hx-exchange status bybit --live', '/hx-exchange remove kucoin --demo', 'add exchange credentials', 'how do I configure Bybit'."
 version: 0.1.0
 author: HermX
@@ -13,7 +13,7 @@ required_environment_variables:
 metadata:
   hermes:
     tags: [trading, hermx, exchange, credentials, operations, mutating]
-    related_skills: [hermx-control, hermx-status, hermx-strategy-list, hermx-restart, hermx-help]
+    related_skills: [hermx-control, hx-status, hx-strategy-list, hx-restart, hx-help]
     config:
       - key: hermx.ssh_target
         description: "SSH target for the HermX VPS (user@host or ssh_config alias)"

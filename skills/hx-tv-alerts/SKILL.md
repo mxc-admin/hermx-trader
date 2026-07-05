@@ -1,5 +1,5 @@
 ---
-name: hermx-tv-alerts
+name: hx-tv-alerts
 description: "Use when the operator wants copy-paste-ready TradingView alert Message templates for a HermX strategy — 'give me the BUY/SELL alert JSON for SOL', 'what do I paste into TradingView for btcusdt_duo_base_dev_2h'. Read-only. Resolves a name/id/symbol to a strategy_id via hermx_ops.resolve_strategy, reads the strategy file, and emits two schema-valid alert payloads (long/short) plus the webhook URL + X-Webhook-Secret guidance. Never sends an alert, never mutates, never calls /webhook."
 version: 0.1.0
 author: HermX
@@ -8,7 +8,7 @@ platforms: [linux, macos]
 metadata:
   hermes:
     tags: [trading, hermx, tradingview, alerts, templates, read-only, operations]
-    related_skills: [hermx-strategy-list, hermx-status, hermx-trace, hermx-help]
+    related_skills: [hx-strategy-list, hx-status, hx-trace, hx-help]
     config:
       - key: hermx.strategies_dir
         description: "Directory of strategy files"

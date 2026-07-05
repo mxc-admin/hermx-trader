@@ -1,3 +1,28 @@
+---
+name: hx-emergency-stop
+description: "Use when execution must be paused immediately — the HermX kill switch. Mutating. Levels: global live kill (HERMX_LIVE_TRADING env + receiver restart), flatten every open position (reduce-only via /api/close), force one strategy to demo/sandbox, or pause a single symbol in control-state.json. Always dry-run preview first; every mutation requires explicit 'yes'; UNKNOWN reads never render as flat — it refuses rather than assumes."
+version: 0.1.0
+author: HermX
+license: MIT
+platforms: [linux, macos]
+required_environment_variables:
+  - name: HERMX_SECRET
+    prompt: "HermX dashboard/receiver shared secret (X-Dashboard-Token header)"
+    help: "Set in HermX .env on this host. The /api read and /api/close + control endpoints fail closed without a matching token."
+    required_for: "Authenticated dashboard /api read and receiver /api/close + control writes"
+metadata:
+  hermes:
+    tags: [trading, hermx, emergency, kill-switch, flatten, mutating, operations]
+    related_skills: [hermx-control, hx-positions, hx-close, hx-strategy-mode, hx-restart]
+    config:
+      - key: hermx.dashboard_base
+        description: "HermX dashboard base URL (loopback)"
+        default: "http://127.0.0.1:8098"
+      - key: hermx.receiver_base
+        description: "HermX webhook receiver base URL (loopback)"
+        default: "http://127.0.0.1:8891"
+---
+
 # Skill: Emergency Stop
 
 Use this when execution must be paused immediately. The system has two operative
@@ -65,8 +90,8 @@ Stop the receiver service. The dashboard may remain online for read-only status.
 
 All emergency commands share three invariants: **dry-run preview first**, **explicit
 `yes` before any mutation**, and **UNKNOWN never renders as flat**. They reuse the
-audited wrappers in [`hermx-ops/lib/hermx_ops.py`](hermx-ops/lib/hermx_ops.py); the
-contract is [`hermx-ops/references/api-contract.md`](hermx-ops/references/api-contract.md).
+audited wrappers in [`hermx-ops/lib/hermx_ops.py`](../hermx-ops/lib/hermx_ops.py); the
+contract is [`hermx-ops/references/api-contract.md`](../hermx-ops/references/api-contract.md).
 None of them set an order size, and none route via `/webhook`.
 
 ### `kill` — global live kill (cannot be done over HTTP)

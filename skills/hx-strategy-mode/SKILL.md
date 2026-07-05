@@ -1,5 +1,5 @@
 ---
-name: hermx-strategy-mode
+name: hx-strategy-mode
 description: "Use when the operator wants to CHANGE a HermX strategy's execution mode — pause, resume, demo, or live. Mutating. Resolves a name/id/symbol to a strategy_id, previews current→target, and POSTs the override to the dashboard control endpoint (never edits strategies/*.json). Always dry-run first; live transitions require explicit 'yes'. On any read failure it reports UNKNOWN and refuses."
 version: 0.1.0
 author: HermX
@@ -13,7 +13,7 @@ required_environment_variables:
 metadata:
   hermes:
     tags: [trading, hermx, strategies, mutating, control, operations]
-    related_skills: [hermx-control, hermx-strategy-list, hermx-positions, emergency-stop]
+    related_skills: [hermx-control, hx-strategy-list, hx-positions, hx-emergency-stop]
     config:
       - key: hermx.dashboard_base
         description: "HermX dashboard base URL (loopback)"

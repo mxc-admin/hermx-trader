@@ -505,7 +505,7 @@ Phase column: **P1** = read-only, **P2** = paper, **P3** = live/multi-account.
 
 ### Documentation updates
 - Update `CLAUDE.md` / `.claude/CLAUDE.md` Key Files to list `src/snaptrade/` and `snaptrade_adapter.py`.
-- Add SnapTrade venues to the slash-command reference (`skills/hermx-help/SKILL.md`) where operator commands (`/hx-positions`, `/hx-close`) now span brokers.
+- Add SnapTrade venues to the slash-command reference (`skills/hx-help/SKILL.md`) where operator commands (`/hx-positions`, `/hx-close`) now span brokers.
 - Record any new proven pattern in **both** `.claude/rules/code-quality.md` and `.windsurf/rules/code-quality.md` (dual-file rule) — e.g. the backend(`snaptrade`)-vs-venue(`snaptrade:alpaca:acct`) distinction, which is exactly the class of bug the shadow-config regression taught us to guard.
 - Close out `SNAPTRADE_PHASE0_FINDINGS.md` open questions as each is answered; fold Q10 (regulatory) and Q11 (options, deferred) into a future-work note.
 

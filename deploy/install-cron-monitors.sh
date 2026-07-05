@@ -29,7 +29,7 @@ TELEGRAM_HOME_CHANNEL="7000111380"          # operator DM "Tiger (MomentumX) Qua
 WORKDIR="$REPO_ROOT"
 DELIVER="telegram"
 
-READONLY_SKILLS=(hermx-status hermx-positions hermx-trace signal-memory)
+READONLY_SKILLS=(hx-status hx-positions hx-trace signal-memory)
 # hermx-reconcile-lag-gate.py intentionally NOT installed: superseded by the
 # ledger_mismatch/rejected_order conditions inside hermx-reconcile-gate.py (its wall-clock
 # lag threshold was miscalibrated, and its run_gate("reconcile") shared the reconcile
@@ -141,18 +141,18 @@ say "Creating/updating monitor cron jobs"
 
 ensure_job "hermx-weekly" \
   "\"0 9 * * 1\" \"$WEEKLY_PROMPT\" \
-   --skill hermx-status --skill hermx-positions --skill signal-memory \
+   --skill hx-status --skill hx-positions --skill signal-memory \
    --workdir \"$WORKDIR\" --deliver $DELIVER"
 
 ensure_job "hermx-reconcile" \
   "\"every 5m\" \"$RECONCILE_PROMPT\" \
    --script hermx-reconcile-gate.py \
-   --skill hermx-trace --skill hermx-positions --skill hermx-status \
+   --skill hx-trace --skill hx-positions --skill hx-status \
    --workdir \"$WORKDIR\" --deliver $DELIVER"
 
 ensure_job "hermx-daily" \
   "\"0 8 * * *\" \"$DAILY_PROMPT\" \
-   --skill hermx-status --skill hermx-positions --skill signal-memory \
+   --skill hx-status --skill hx-positions --skill signal-memory \
    --workdir \"$WORKDIR\" --deliver $DELIVER"
 
 ensure_job "hermx-health-check" \
@@ -186,7 +186,7 @@ ensure_job "hermx-signal-late" \
 # 6. Smoke test                                                               #
 # --------------------------------------------------------------------------- #
 say "Skill resolution smoke test"
-run "hermes -z \"ping\" --skills hermx-status >/dev/null && echo '  hermx-status resolves OK'" \
+run "hermes -z \"ping\" --skills hx-status >/dev/null && echo '  hx-status resolves OK'" \
   || warn "  skill resolution smoke test failed"
 
 if [ "$DO_SMOKE" = "1" ]; then

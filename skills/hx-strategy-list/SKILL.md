@@ -1,5 +1,5 @@
 ---
-name: hermx-strategy-list
+name: hx-strategy-list
 description: "Use when the operator asks which HermX strategies exist and what mode each is in — demo/live/paused, symbol, timeframe. Read-only. Reads strategies/*.json merged with control-state.json strategy_overrides and symbol_pauses. Renders a table (id, name, symbol, tf, file_mode, effective_mode, paused). Never edits a strategy or changes a mode."
 version: 0.1.0
 author: HermX
@@ -8,7 +8,7 @@ platforms: [linux, macos]
 metadata:
   hermes:
     tags: [trading, hermx, strategies, read-only, operations]
-    related_skills: [hermx-control, hermx-status, hermx-positions, hermx-trace]
+    related_skills: [hermx-control, hx-status, hx-positions, hx-trace]
     config:
       - key: hermx.strategies_dir
         description: "Directory of strategy files"

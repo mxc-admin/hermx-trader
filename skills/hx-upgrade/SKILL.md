@@ -1,5 +1,5 @@
 ---
-name: hermx-upgrade
+name: hx-upgrade
 description: "Use when the operator wants to upgrade the HermX host to the latest code — pull, install deps, rebuild the dashboard UI, run tests, and restart services. Mutating (deploy + process lifecycle, not trading). Wraps `bash deploy/deploy.sh`, which has built-in auto-rollback on health-check failure. Always previews a dry-run (current git HEAD + what the deploy will do) and requires explicit 'yes' before running. Passes through `--no-pull`, `--no-tests`, `--no-ui`. Never edits strategy files, never places or relays an order, never routes via `/webhook` or `/api/close`."
 version: 0.1.0
 author: HermX
@@ -13,7 +13,7 @@ required_environment_variables:
 metadata:
   hermes:
     tags: [trading, hermx, upgrade, deploy, lifecycle, operations, mutating]
-    related_skills: [hermx-restart, hermx-status, hermx-control, emergency-stop, hermx-positions]
+    related_skills: [hx-restart, hx-status, hermx-control, hx-emergency-stop, hx-positions]
     config:
       - key: hermx.dashboard_base
         description: "HermX dashboard base URL (loopback)"

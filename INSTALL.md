@@ -797,24 +797,23 @@ single-user) in `.env`, or give the agent the `HERMX_SECRET` to send as the
 ### 6.4.1 Register the slash-command skills
 
 Beyond the single `hermx-control` skill, HermX ships focused **slash-command skills** — each
-`skills/hermx-*/SKILL.md` becomes a dynamic slash command in Hermes (`/hx-status`, `/hx-positions`,
+`skills/hx-*/SKILL.md` becomes a dynamic slash command in Hermes (`/hx-status`, `/hx-positions`,
 `/hx-strategy-list`, `/hx-trace`, `/hx-strategy-mode`, `/hx-close`, `/hx-emergency-stop`, `/hx-restart`,
 `/hx-upgrade`, `/hx-help`). Link them all in one pass:
 
 ```bash
 cd /opt/hermx     # repo root, so $PWD is correct
 mkdir -p ~/.hermes/skills
-for d in skills/hermx-*/; do
-  name="$(basename "$d")"
-  ln -sfn "$PWD/$d" ~/.hermes/skills/"$name"
+for d in skills/hermx-control skills/hx-status skills/hx-positions skills/hx-strategy-list skills/hx-trace skills/hx-tv-alerts skills/hx-help skills/hx-strategy-mode skills/hx-close skills/hx-emergency-stop skills/hx-restart skills/hx-upgrade skills/hx-exchange skills/hx-troubleshoot skills/hx-strategy; do
+  ln -sfn "$PWD/$d" ~/.hermes/skills/"$(basename "$d")"
 done
-hermes skills list | grep hermx-        # expect each hermx-* skill enabled
+hermes skills list | grep -E 'hermx-control|hx-'   # expect hermx-control and each hx-* skill enabled
 ```
 
 They share the helper library `skills/hermx-ops/lib/hermx_ops.py` (UNKNOWN-never-flat reads,
 guarded loopback mutations) and speak the contract in
 `skills/hermx-ops/references/api-contract.md`. Full command reference:
-`skills/hermx-help/SKILL.md`.
+`skills/hx-help/SKILL.md`.
 
 ### 6.5 Start the Telegram gateway
 
@@ -861,10 +860,10 @@ Pause a noisy monitor with `/cron pause <name>`. Full design: `docs/7-EXECUTION_
 
 Ask the user to message their bot in Telegram: **"are you there?"** and confirm a sane reply.
 
-**✅ Verify Phase 6:** `hermes skills list` shows `hermx-control` **and** the `hermx-*`
+**✅ Verify Phase 6:** `hermes skills list` shows `hermx-control` **and** the `hx-*`
 slash-command skills enabled, `hermes doctor` is clean, `hermes cron list` shows the 5 hermx
 monitor jobs, and the Telegram bot responds. Full details: `setup/09-hermes-agent.md`;
-slash-command reference: `skills/hermx-help/SKILL.md`.
+slash-command reference: `skills/hx-help/SKILL.md`.
 
 ---
 

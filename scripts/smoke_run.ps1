@@ -7,7 +7,7 @@
 # locally for manual smoke testing.
 #
 # SAFETY: exports $env:HERMX_LIVE_TRADING="false", which hard-blocks all OKX
-# order submission before any subprocess is spawned (skills/emergency-stop.md,
+# order submission before any subprocess is spawned (skills/hx-emergency-stop/SKILL.md,
 # Level 0). This is a smoke-test harness, never a live launcher.
 #
 # Usage:

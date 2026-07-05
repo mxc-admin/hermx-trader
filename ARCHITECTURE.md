@@ -318,7 +318,7 @@ Hermes UI (slash command)  →  skills/hermx-*/SKILL.md  →  skills/hermx-ops/l
   the API seam.
 
 The canonical API contract these skills speak is `skills/hermx-ops/references/api-contract.md`.
-Full command reference: `skills/hermx-help/SKILL.md`.
+Full command reference: `skills/hx-help/SKILL.md`.
 
 ---
 
@@ -489,9 +489,9 @@ Intelligence is **purely additive** and lives *outside* the money path. Pattern:
 | `src/security/webhook_auth.py` | Pure auth/rate-limit/HMAC/replay helpers |
 | `deploy/deploy.sh` | Config-safe deploy script: snapshot, pull, pip install, UI build, test gate, restart, auto-rollback |
 | `skills/hermx-control/SKILL.md` | Agent skill: loopback reads + signal relay, with hard money-safety rules (older single-skill model) |
-| `skills/hermx-{status,positions,strategy-list,trace,strategy-mode,close,restart,upgrade,help}/SKILL.md` | Slash-command skills — one dynamic Hermes command each (see `skills/hermx-help/SKILL.md`) |
+| `skills/hx-{status,positions,strategy-list,trace,strategy-mode,close,emergency-stop,restart,upgrade,help}/SKILL.md` | Slash-command skills — one dynamic Hermes command each (see `skills/hx-help/SKILL.md`) |
 | `skills/hermx-ops/` | Shared helper (`lib/hermx_ops.py`) + canonical API contract (`references/api-contract.md`) for the slash commands |
-| `skills/*.md` | Flat operator runbooks (`emergency-stop`, `optimization-workflow`, `tradingview-alert-setup`, `tradingview-recovery`) |
+| `skills/*.md` | Flat operator runbooks (`optimization-workflow`, `tradingview-alert-setup`, `tradingview-recovery`) |
 | `schemas/strategy.schema.json` | Strategy file contract (v1 + v2, no inline credentials) |
 | `schemas/tradingview-alert.schema.json` | Inbound alert contract (Draft 2020-12) |
 | `engine-config.json` (repo root) | **Runtime/engine config source** — loaded via `load_engine_config()` (`src/dashboard_core.py`), consumed by the receiver. (`shadow-config.json` is dead code, not a config source.) |

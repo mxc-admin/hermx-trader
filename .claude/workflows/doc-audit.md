@@ -62,9 +62,8 @@ fi
 
 # ---------------------------------------------------------------------------
 sec "2. Skill-count sync"
-skill_count=$(ls skills/hermx-*/SKILL.md 2>/dev/null | wc -l | tr -d ' ')
-[ -f skills/emergency-stop.md ] && skill_count=$((skill_count + 1))
-info "discovered $skill_count operator skills (skills/hermx-*/SKILL.md + emergency-stop.md)"
+skill_count=$(ls skills/hermx-*/SKILL.md skills/hx-*/SKILL.md 2>/dev/null | wc -l | tr -d ' ')
+info "discovered $skill_count operator skills (skills/hermx-*/SKILL.md + skills/hx-*/SKILL.md)"
 for doc in README.md ARCHITECTURE.md INSTALL.md; do
   if [ ! -f "$doc" ]; then warn "$doc missing"; continue; fi
   if grep -q 'docs/hermx-slash-commands\.md' "$doc"; then
@@ -286,7 +285,7 @@ exits non-zero, so it is safe to wire into CI or a pre-release gate.
 | Check | Where to fix |
 |-------|--------------|
 | 1 — dead config refs | Remove/relabel `shadow-config.json` in the flagged `.md`; source is `engine-config.json` via `load_engine_config()`. Delete any stray physical `shadow-config.json`. |
-| 2 — skill-count sync | Add the `docs/hermx-slash-commands.md` pointer + a slash-command example to `README.md`, `ARCHITECTURE.md`, `INSTALL.md`. Skills live in `skills/hermx-*/SKILL.md` and `skills/emergency-stop.md`. |
+| 2 — skill-count sync | Add the `docs/hermx-slash-commands.md` pointer + a slash-command example to `README.md`, `ARCHITECTURE.md`, `INSTALL.md`. Skills live in `skills/hermx-*/SKILL.md` and `skills/hx-*/SKILL.md`. |
 | 3 — ops-lib ref | Mention `hermx_ops.py` in `ARCHITECTURE.md` / `INSTALL.md`. |
 | 4 — Docker/state | Ensure `HERMX_DATA_DIR` and `hermx-state` (value `/app/data`) appear in `INSTALL.md` + `ARCHITECTURE.md` and match `docker-compose.yml`. |
 | 5 — deploy path | Reference `deploy/deploy.sh` in `INSTALL.md` + `ARCHITECTURE.md` (or `docs/DOCKER_PACKAGE_PLAN.md`). |

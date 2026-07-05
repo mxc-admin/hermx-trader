@@ -73,21 +73,24 @@ The agent uses only the local loopback API that already runs:
    Do not commit any key. This repo never stores the provider key — it lives only in
    `~/.hermes/.env`. Rotate the key if it is ever pasted into a chat or shell history.
 
-4. **Register the hermx-control skill.** Symlink it into the Hermes skills tree (reversible;
-   stays in sync with the repo). From the repo root:
+4. **Register the HermX skills.** Symlink `hermx-control` and every `hx-*` slash-command
+   skill into the Hermes skills tree (reversible; stays in sync with the repo). From the
+   repo root:
 
    ```bash
    mkdir -p ~/.hermes/skills
-   ln -sfn "$PWD/skills/hermx-control" ~/.hermes/skills/hermx-control
+   for d in skills/hermx-control skills/hx-status skills/hx-positions skills/hx-strategy-list skills/hx-trace skills/hx-tv-alerts skills/hx-help skills/hx-strategy-mode skills/hx-close skills/hx-emergency-stop skills/hx-restart skills/hx-upgrade skills/hx-exchange skills/hx-troubleshoot skills/hx-strategy; do
+     ln -sfn "$PWD/$d" ~/.hermes/skills/"$(basename "$d")"
+   done
    ```
 
-   Confirm discovery (look for a `hermx-control` row, category `trading`, `enabled`):
+   Confirm discovery (look for `hermx-control` and each `hx-*` row, category `trading`, `enabled`):
 
    ```bash
-   hermes skills list | grep hermx-control
+   hermes skills list | grep -E 'hermx-control|hx-'
    ```
 
-   To unregister: `rm ~/.hermes/skills/hermx-control` (removes only the symlink).
+   To unregister: `rm ~/.hermes/skills/hermx-control ~/.hermes/skills/hx-*` (removes only the symlinks).
 
 5. **Let the local agent reach the dashboard.** The agent runs on the same host. Choose one:
    - **No-auth loopback:** start the dashboard with `HERMX_DASH_AUTH=false` while it is bound
@@ -102,7 +105,7 @@ The agent uses only the local loopback API that already runs:
 ## Verification checklist
 
 - [ ] `hermes --version` prints a version.
-- [ ] `hermes skills list` shows `hermx-control` as `enabled`.
+- [ ] `hermes skills list` shows `hermx-control` and each `hx-*` skill as `enabled`.
 - [ ] Ask the agent **"what's open?"** — it summarizes `GET /api` positions (or says
       UNKNOWN if the read fails / data is stale — never "flat").
 - [ ] Ask **"are we armed?"** — it reports the `arm` block from `GET /health`
@@ -200,12 +203,14 @@ Concrete, copy-paste steps to talk to HermX from Telegram. This expands the
    > For more than one operator, comma-separate the IDs. Never leave it blank or
    > allow-all on a trading agent.
 
-4. **Register the `hermx-control` skill** (if not already done in step 4 above):
+4. **Register the HermX skills** (if not already done in step 4 above):
 
    ```bash
    mkdir -p ~/.hermes/skills
-   ln -sfn "$PWD/skills/hermx-control" ~/.hermes/skills/hermx-control
-   hermes skills list | grep hermx-control   # confirm: enabled, category trading
+   for d in skills/hermx-control skills/hx-status skills/hx-positions skills/hx-strategy-list skills/hx-trace skills/hx-tv-alerts skills/hx-help skills/hx-strategy-mode skills/hx-close skills/hx-emergency-stop skills/hx-restart skills/hx-upgrade skills/hx-exchange skills/hx-troubleshoot skills/hx-strategy; do
+     ln -sfn "$PWD/$d" ~/.hermes/skills/"$(basename "$d")"
+   done
+   hermes skills list | grep -E 'hermx-control|hx-'   # confirm: enabled, category trading
    ```
 
 5. **Start the gateway:**

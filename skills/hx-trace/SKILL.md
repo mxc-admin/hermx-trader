@@ -1,5 +1,5 @@
 ---
-name: hermx-trace
+name: hx-trace
 description: "Use when the operator wants to trace one HermX signal end-to-end — intake → dedupe → pipeline stages → execution outcome. Read-only. Joins logs/raw-webhooks.jsonl, signals.jsonl, pipeline.jsonl, executions.jsonl on received_at. Accepts a received_at or a symbol (shows recent matches, defaults to latest). Never re-derives ids for time-less payloads. Never relays or executes."
 version: 0.1.0
 author: HermX
@@ -8,7 +8,7 @@ platforms: [linux, macos]
 metadata:
   hermes:
     tags: [trading, hermx, trace, diagnostics, read-only]
-    related_skills: [hermx-control, hermx-status, hermx-positions, signal-memory]
+    related_skills: [hermx-control, hx-status, hx-positions, signal-memory]
     config:
       - key: hermx.logs_dir
         description: "HermX JSONL log directory"
