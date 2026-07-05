@@ -168,6 +168,25 @@ Python execution layer. A skill/agent **never** sets or suggests an order size.
 - Symbol is derived from `instrument.inst_id`: `BTC-USDT-SWAP` → `BTCUSDT`.
 - No top-level `symbol`/`budget_usd`; read `instrument.inst_id` / `capital.budget_usd`.
 
+## hermx-strategy file-write contract
+
+Strategy add/update/archive (`/hx-strategy`) are **direct filesystem operations** on
+`strategies/*.json` — no dashboard/receiver endpoint exists for strategy CRUD.
+
+- **Not hot-reloaded.** `webhook_receiver.py` builds `STRATEGIES =
+  load_strategy_files()` at import time (`src/webhook_receiver.py:500`) and
+  `dashboard.py` globs `STRATEGIES_DIR` in its own `load_strategy_files()`
+  (`src/dashboard.py:144`). Any add/update/archive is inert until both restart
+  (`/hx-restart`).
+- **Atomic writes.** add/update write a temp file in the same dir then `os.replace` —
+  a crash never leaves a partial `strategies/<id>.json`.
+- **Archive = move, not delete.** Files move to `strategies/_archive/<file>.json`.
+  `_archive/` sits outside both loaders' non-recursive `strategies/*.json` glob, so
+  archived strategies drop out of the live set with history preserved.
+- Files are git-tracked; the skill never runs `git add`/`git commit` — committing is
+  the operator's step. Mode overrides stay in `control-state.json` via
+  `/hx-strategy-mode`, never in this path.
+
 ## control-state.json shape
 
 ```json
