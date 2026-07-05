@@ -28,7 +28,7 @@ from pathlib import Path
 import jsonschema
 import pytest
 
-from conftest import _HERMX_ROOT, load_alert, write_engine_config
+from conftest import _HERMX_ROOT, CORPUS_STRATEGIES_DIR, load_alert, write_engine_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = REPO_ROOT / "schemas" / "strategy.schema.json"
@@ -267,7 +267,7 @@ def _readiness(module, strategy_id: str, alert_rel: str) -> dict:
 def test_live_file_is_canonical_v2(strategy_id, alert_rel):
     """The on-disk file is canonical v2 with a sane instrument block and no
     leftover legacy keys."""
-    v2 = json.loads((LIVE_STRATEGIES_DIR / f"{strategy_id}.json").read_text(encoding="utf-8"))
+    v2 = json.loads((CORPUS_STRATEGIES_DIR / f"{strategy_id}.json").read_text(encoding="utf-8"))
     assert v2["schema_version"] == 2
     assert v2["instrument"] == {
         "exchange": "okx",
@@ -283,7 +283,7 @@ def test_live_file_is_canonical_v2(strategy_id, alert_rel):
 def test_live_v2_readiness_stable_and_consistent(strategy_id, alert_rel, tmp_path):
     """End-to-end: the live v2 file produces an internally-consistent execution
     readiness that is stable (deterministic) across two isolated loads."""
-    v2 = json.loads((LIVE_STRATEGIES_DIR / f"{strategy_id}.json").read_text(encoding="utf-8"))
+    v2 = json.loads((CORPUS_STRATEGIES_DIR / f"{strategy_id}.json").read_text(encoding="utf-8"))
 
     orig_root = os.environ.get("HERMX_ROOT")
     try:

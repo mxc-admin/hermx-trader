@@ -441,7 +441,7 @@ def test_build_report_deterministic_no_timestamp(tmp_path):
 
 def test_main_exit_zero_on_clean(tmp_path, capsys):
     _write(tmp_path, "src/ok.py", "x = 1\n")
-    rc = audit.main(["--root", str(tmp_path)])
+    rc = audit.main(["--root", str(tmp_path), "--fast"])
     assert rc == 0
     assert "RESULT: PASS" in capsys.readouterr().out
 
@@ -479,9 +479,9 @@ def test_main_unknown_check_errs(tmp_path):
 
 def test_main_fail_on_medium(tmp_path, capsys):
     _write(tmp_path, "src/imp.py", "__import__(name)\n")  # MEDIUM (dynamic import)
-    assert audit.main(["--root", str(tmp_path), "--fail-on", "high"]) == 0
+    assert audit.main(["--root", str(tmp_path), "--fail-on", "high", "--fast"]) == 0
     capsys.readouterr()
-    assert audit.main(["--root", str(tmp_path), "--fail-on", "medium"]) == 1
+    assert audit.main(["--root", str(tmp_path), "--fail-on", "medium", "--fast"]) == 1
 
 
 def test_main_missing_root_errs(tmp_path):
