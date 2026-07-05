@@ -1,6 +1,7 @@
 'use client'
 import { useDashboardContext } from './DashboardProvider'
 import { StatCard } from './StatCard'
+import { envBreakdown } from '../lib/format'
 
 // Surfaces the explicit executor-read verdict (src/dashboard.py:
 // executor_health_summary) so an errored/stale read never reads as healthy.
@@ -23,9 +24,11 @@ export function ExecutorHealthCard() {
     accentColor = 'var(--positive)'
   }
 
-  const sub = executor.error
-    ? executor.error.slice(0, 50)
-    : 'executor healthy'
+  // Multi-venue breakdown wins when ≥2 envs are aggregated; it lists every
+  // non-ok env key, whereas executor.error only carries the first env's error.
+  const sub =
+    envBreakdown(executor.envs) ??
+    (executor.error ? executor.error.slice(0, 50) : 'executor healthy')
 
   const skipped = ledgerHealth.total_skipped ?? 0
 

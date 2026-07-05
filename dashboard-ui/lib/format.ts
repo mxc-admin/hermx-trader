@@ -69,6 +69,26 @@ export function sideKind(side: string): 'good' | 'bad' | 'muted' {
   }
 }
 
+/**
+ * Multi-venue Engine sub-text from executor.envs ("{venue}:{mode}" keys):
+ * "3/3 venues OK" when every env is ok, else "degraded: kucoin:live, bybit:demo"
+ * listing the non-ok env keys. Null when envs is absent or has fewer than 2
+ * entries — the legacy single-verdict sub-text stays untouched in that case.
+ * The backend guarantees per-env degraded ⇔ !ok; an explicit `degraded` flag
+ * still taints the entry even if `ok` disagrees, so a broken invariant can
+ * never render green.
+ */
+export function envBreakdown(
+  envs: Record<string, { ok?: boolean; degraded?: boolean }> | null | undefined,
+): string | null {
+  if (!envs) return null
+  const keys = Object.keys(envs)
+  if (keys.length < 2) return null
+  const bad = keys.filter((k) => !envs[k]?.ok || envs[k]?.degraded === true)
+  if (bad.length === 0) return `${keys.length}/${keys.length} venues OK`
+  return `degraded: ${bad.join(', ')}`
+}
+
 /** Plain fixed-decimal number — em-dash for null/undefined/non-numeric. */
 export function num(
   val: number | string | null | undefined,

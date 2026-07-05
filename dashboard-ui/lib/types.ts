@@ -212,7 +212,15 @@ export interface LedgerStats {
   checkpoint_records?: number
 }
 
-/** executor field — explicit executor-read health verdict. */
+/**
+ * executor field — explicit executor-read health verdict.
+ *
+ * With ≥1 active strategy the backend aggregates every active strategy's
+ * (venue, mode) environment (model.py:executor_env_health_summary) and adds
+ * `envs`, keyed "{venue}:{mode}" (e.g. "kucoin:live"), each value carrying that
+ * environment's own summary (never nested further). With zero active
+ * strategies the legacy single-snapshot shape is emitted and `envs` is absent.
+ */
 export interface ExecutorHealth {
   ok?: boolean
   healthy?: boolean
@@ -221,6 +229,7 @@ export interface ExecutorHealth {
   degraded?: boolean
   age_seconds?: number | null
   generated_at?: string | null
+  envs?: Record<string, ExecutorHealth>
 }
 
 /** ledger_health field — aggregate corrupt/skipped line counts. */

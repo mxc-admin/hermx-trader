@@ -2,7 +2,7 @@
 import { useDashboardContext } from '../../components/DashboardProvider'
 import { Badge } from '../../components/Badge'
 import { StatCard } from '../../components/StatCard'
-import { age } from '../../lib/format'
+import { age, envBreakdown } from '../../lib/format'
 
 export default function HealthPage() {
   const { health, data, loading } = useDashboardContext()
@@ -62,6 +62,7 @@ export default function HealthPage() {
           <StatCard
             label="Status"
             value={executor?.ok ? 'OK' : executor?.error ? 'ERROR' : '—'}
+            sub={envBreakdown(executor?.envs) ?? undefined}
             accentColor={executor?.ok ? 'var(--positive)' : 'var(--negative)'}
             valueColor={executor?.ok ? 'var(--positive)' : 'var(--negative)'}
           />

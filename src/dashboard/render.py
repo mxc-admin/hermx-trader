@@ -482,7 +482,7 @@ def metric_cards_colored(items):
     return f'<div class="metrics">{"".join(cells)}</div>'
 
 
-def strategy_card(strategy, okx_live, alerts, okx_live_by_mode=None, okx_live_by_env=None):
+def strategy_card(strategy, okx_live, alerts, okx_live_by_mode=None, exch_live_by_env=None):
     import dashboard as _dash
     esc, num, badge, money, side_kind = _dash.esc, _dash.num, _dash.badge, _dash.money, _dash.side_kind
     metric_cards_colored, as_float = _dash.metric_cards_colored, _dash.as_float
@@ -496,8 +496,8 @@ def strategy_card(strategy, okx_live, alerts, okx_live_by_mode=None, okx_live_by
     # the per-env map; fall back to the legacy mode-only map, then to the single
     # snapshot passed in (legacy callers). A live strategy reads its venue's live
     # account; demo/pause read that venue's demo sandbox.
-    if okx_live_by_env or okx_live_by_mode:
-        okx_live = _dash._snapshot_for_env(okx_live_by_env, okx_live_by_mode, _dash._strategy_venue(strategy), mode)
+    if exch_live_by_env or okx_live_by_mode:
+        okx_live = _dash._snapshot_for_env(exch_live_by_env, okx_live_by_mode, _dash._strategy_venue(strategy), mode)
     live = (okx_live.get("positions") or {}).get(sym) or {}
     _mode_labels = {"pause": "Pause", "demo": "Demo", "live": "Live"}
     mode_label = _mode_labels.get(mode, mode.title())
@@ -836,11 +836,11 @@ def order_state_section():
     """
 
 
-def strategy_trial_tab(strategies, alerts, okx_live, okx_executions, okx_live_by_mode=None, okx_live_by_env=None):
+def strategy_trial_tab(strategies, alerts, okx_live, okx_executions, okx_live_by_mode=None, exch_live_by_env=None):
     import dashboard as _dash
     badge = _dash.badge
     cards = ''.join(
-        _dash.strategy_card(strategy, okx_live, alerts, okx_live_by_mode, okx_live_by_env)
+        _dash.strategy_card(strategy, okx_live, alerts, okx_live_by_mode, exch_live_by_env)
         for strategy in strategies
     )
     strategy_rows = []
@@ -1015,7 +1015,7 @@ def render():
     panels = _dash.strategy_trial_tab(
         strategies, strategy_alerts, okx_live, okx_executions,
         okx_live_by_mode=model.get("okx_live_by_mode"),
-        okx_live_by_env=model.get("okx_live_by_env"),
+        exch_live_by_env=model.get("exch_live_by_env"),
     )
     return f"""<!doctype html>
 <html>

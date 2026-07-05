@@ -389,14 +389,14 @@ def strategy_order_history_snapshot(strategy_config, mode):
     return snapshot
 
 
-def _snapshot_for_env(okx_live_by_env, okx_live_by_mode, venue, mode):
+def _snapshot_for_env(exch_live_by_env, okx_live_by_mode, venue, mode):
     """Pick the positions snapshot matching a strategy's ``(venue, mode)`` environment.
 
     Prefers the per-``{venue}:{mode}`` map; falls back to the legacy mode-only map
     (:func:`_snapshot_for_mode`) so a caller that only has the demo/live snapshots
     still resolves, then to an empty snapshot so a missing entry never raises."""
     import dashboard as _dash
-    by_env = okx_live_by_env or {}
+    by_env = exch_live_by_env or {}
     key = f"{str(venue or 'okx').strip().lower()}:{'live' if str(mode or '').lower() == 'live' else 'demo'}"
     hit = by_env.get(key)
     if hit is not None:

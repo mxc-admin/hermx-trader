@@ -91,7 +91,7 @@ class DashboardModel(TypedDict, total=False):
     loaded: Dict[str, Any]
     okx_live: Dict[str, Any]
     okx_live_by_mode: Dict[str, Any]
-    okx_live_by_env: Dict[str, Any]
+    exch_live_by_env: Dict[str, Any]
     okx_executions: List[Dict[str, Any]]
     strategies: List[Dict[str, Any]]
     active_strategies: List[Dict[str, Any]]
@@ -289,6 +289,76 @@ def executor_health_summary(okx_live, now=None):
     }
 
 
+def _active_env_keys(strategies, overrides):
+    """Distinct ``{venue}:{mode_key}`` environments used by ACTIVE strategies, in
+    strategy-file order — the same (venue, effective-mode) derivation
+    :func:`_build_dashboard_model` uses to build ``exch_live_by_env``, so every key
+    returned here has a per-env snapshot there. Module-local on purpose (pure
+    derivation, not a monkeypatched seam, and not re-exported by dashboard.py)."""
+    import dashboard as _dash
+    keys = []
+    for s in _dash.active_strategies(strategies):
+        venue = _dash._strategy_venue(s)
+        mode = _dash._effective_strategy_mode(s, overrides)
+        key = f"{venue}:{'live' if mode == 'live' else 'demo'}"
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
+def executor_env_health_summary(exch_live_by_env, env_keys, now=None):
+    """Collapse the per-(venue, mode) snapshots of the given environments into one
+    aggregate executor verdict (the red/green Engine widget).
+
+    Same top-level shape as :func:`executor_health_summary` — ``ok`` / ``healthy``
+    / ``error`` / ``stale`` / ``degraded`` / ``age_seconds`` / ``generated_at``;
+    render.py's banners/cards and the React ExecutorHealthCard read exactly those
+    keys — plus an additive ``envs`` map carrying each environment's own summary.
+    Verdict semantics: ``ok``/``healthy`` only when EVERY env is; any env
+    stale/degraded taints the aggregate; ``error`` is the first env's error,
+    env-prefixed; ``age_seconds``/``generated_at`` report the OLDEST env read. An
+    env key with no fetched snapshot surfaces as an explicit error, never a
+    KeyError — an unfetched venue must not render green."""
+    import dashboard as _dash
+    now = now if now is not None else time.time()
+    by_env = exch_live_by_env or {}
+    envs = {}
+    for key in env_keys:
+        snap = by_env.get(key)
+        if snap is None:
+            envs[key] = {
+                "ok": False,
+                "healthy": False,
+                "error": "missing_env_snapshot",
+                "stale": False,
+                "degraded": True,
+                "age_seconds": None,
+                "generated_at": None,
+            }
+        else:
+            envs[key] = _dash.executor_health_summary(snap, now)
+    error = None
+    for key, summary in envs.items():
+        if summary.get("error"):
+            error = f"{key}: {summary['error']}"
+            break
+    oldest = None
+    for summary in envs.values():
+        age = summary.get("age_seconds")
+        if age is not None and (oldest is None or age > oldest["age_seconds"]):
+            oldest = summary
+    return {
+        "ok": bool(envs) and all(s.get("ok") for s in envs.values()),
+        "healthy": bool(envs) and all(s.get("healthy") for s in envs.values()),
+        "error": error,
+        "stale": any(s.get("stale") for s in envs.values()),
+        "degraded": (not envs) or any(s.get("degraded") for s in envs.values()),
+        "age_seconds": oldest["age_seconds"] if oldest else None,
+        "generated_at": oldest.get("generated_at") if oldest else None,
+        "envs": envs,
+    }
+
+
 def ledger_health_summary():
     """Aggregate corrupt/skipped-line counts surfaced by the bounded reader (D1/D2)."""
     import dashboard as _dash
@@ -392,7 +462,7 @@ def _build_dashboard_model() -> DashboardModel:
     # reads KuCoin, an OKX-live strategy reads OKX live. The per-env map is keyed
     # "{venue}:{mode}"; the legacy okx_live_by_mode above is retained for callers that
     # only distinguish demo/live (executor_health_summary, freshness).
-    okx_live_by_env = {}
+    exch_live_by_env = {}
     seen_envs = {}  # (venue, mode) -> representative strategy_config
     for s in strategies:
         venue = _dash._strategy_venue(s)
@@ -401,7 +471,7 @@ def _build_dashboard_model() -> DashboardModel:
         seen_envs.setdefault((venue, mode_key), s)
     for (venue, mode_key), rep in seen_envs.items():
         env_key = f"{venue}:{mode_key}"
-        okx_live_by_env[env_key] = _dash.strategy_live_snapshot(rep, mode_key)
+        exch_live_by_env[env_key] = _dash.strategy_live_snapshot(rep, mode_key)
         # Reconcile that account's order history into the durable ledger (venue+mode
         # correct, never hardcoded). Read-only; failures are swallowed inside.
         _dash.strategy_order_history_snapshot(rep, mode_key)
@@ -413,14 +483,24 @@ def _build_dashboard_model() -> DashboardModel:
         "loaded": loaded,
         "okx_live": okx_live,
         "okx_live_by_mode": okx_live_by_mode,
-        "okx_live_by_env": okx_live_by_env,
+        "exch_live_by_env": exch_live_by_env,
         "okx_executions": _dash.okx_execution_records(cfg),
         "strategies": strategies,
         "active_strategies": _dash.active_strategies(strategies),
         "strategy_alerts": _dash.strategy_alert_rows(),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
-    model["executor"] = _dash.executor_health_summary(okx_live, now)
+    # The Engine verdict aggregates every ACTIVE strategy's own (venue, mode)
+    # environment — the per-env snapshots fetched above — instead of only the
+    # legacy OKX-demo read, which could render green while every real trading
+    # venue was down (or red while all were fine). Zero active strategies keeps
+    # the legacy single-snapshot verdict unchanged. Direct (non-_dash) calls on
+    # purpose: these two helpers are pure and not re-exported by dashboard.py.
+    _active_envs = _active_env_keys(strategies, _overrides)
+    if _active_envs:
+        model["executor"] = executor_env_health_summary(exch_live_by_env, _active_envs, now)
+    else:
+        model["executor"] = _dash.executor_health_summary(okx_live, now)
     model["ledger_health"] = _dash.ledger_health_summary()
     model["freshness"] = _dash.freshness_summary(model, now)
     _dash._MODEL_CACHE["model"] = model
@@ -580,7 +660,7 @@ def api_payload():
     _ctrl = _dash._load_control_state()
     _overrides = _ctrl.get("strategy_overrides") if isinstance(_ctrl.get("strategy_overrides"), dict) else {}
     _acct_windows = _ctrl.get("accounting_windows") if isinstance(_ctrl.get("accounting_windows"), dict) else {}
-    _by_env = model.get("okx_live_by_env") or {}
+    _by_env = model.get("exch_live_by_env") or {}
     _by_mode = model.get("okx_live_by_mode") or {}
     annotated_strategies = []
     for s in model.get("active_strategies") or []:
@@ -623,7 +703,7 @@ def api_payload():
         "strategy_alerts": model.get("strategy_alerts") or [],
         "okx_live": model.get("okx_live"),
         "okx_live_by_mode": model.get("okx_live_by_mode") or {},
-        "okx_live_by_env": model.get("okx_live_by_env") or {},
+        "exch_live_by_env": model.get("exch_live_by_env") or {},
         "okx_executions": model.get("okx_executions") or [],
         "executor": model.get("executor") or {},
         "hermes": {

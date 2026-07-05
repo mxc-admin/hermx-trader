@@ -2,6 +2,7 @@
 import type { CSSProperties } from 'react'
 import { StatCard } from './StatCard'
 import { useDashboardContext } from './DashboardProvider'
+import { envBreakdown } from '../lib/format'
 
 // Mirrors src/dashboard.py:summary_cards() — four at-a-glance status cards.
 type Kind = 'good' | 'bad' | 'warn' | 'muted'
@@ -129,6 +130,7 @@ export function SummaryCards() {
         valueColor={kindColor(execKind)}
         value2={hermesLabel}
         value2Color={hermesColor}
+        sub={envBreakdown(executor?.envs) ?? undefined}
         accentColor={kindColor(execKind)}
       />
     </div>

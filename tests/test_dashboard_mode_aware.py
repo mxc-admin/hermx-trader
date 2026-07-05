@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib
 import os
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -435,7 +436,7 @@ def test_dashboard_model_builds_per_env_map_no_cross_contamination(dash, monkeyp
 
     model = dash_mod.dashboard_model()
 
-    by_env = model["okx_live_by_env"]
+    by_env = model["exch_live_by_env"]
     assert "okx:demo" in by_env
     assert "kucoin:demo" in by_env
     assert by_env["okx:demo"]["venue"] == "okx"
@@ -444,6 +445,169 @@ def test_dashboard_model_builds_per_env_map_no_cross_contamination(dash, monkeyp
     venues_built = {venue for venue, _sim in calls}
     assert "okx" in venues_built and "kucoin" in venues_built
     assert False not in {sim for _venue, sim in calls}
+
+
+# ---------------------------------------------------------------------------
+# Engine verdict — model["executor"] aggregates every ACTIVE (venue, mode) env
+# instead of keying off the single legacy OKX-demo snapshot.
+# ---------------------------------------------------------------------------
+
+
+def _iso_ago(minutes=0):
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+
+
+def _stub_model_offline(dash_mod, monkeypatch, env_snaps, legacy_ok=True):
+    """Stub every network-touching snapshot seam for a full dashboard_model()
+    build. ``env_snaps`` maps '{venue}:{mode}' -> the strategy_live_snapshot stub
+    result for that env. The legacy okx_live_snapshot (demo) read is stubbed
+    independently so tests can prove the verdict no longer keys off it."""
+
+    def fake_env_snapshot(strategy_config, mode):
+        venue = dash_mod._strategy_venue(strategy_config)
+        mode_key = "live" if str(mode or "").lower() == "live" else "demo"
+        snap = dict(env_snaps[f"{venue}:{mode_key}"])
+        snap.setdefault("positions", {})
+        snap.update({"venue": venue, "mode": mode_key})
+        return snap
+
+    monkeypatch.setattr(dash_mod, "strategy_live_snapshot", fake_env_snapshot)
+    monkeypatch.setattr(
+        dash_mod, "strategy_order_history_snapshot",
+        lambda strategy_config, mode: {"ok": False, "rows": []},
+    )
+    monkeypatch.setattr(
+        dash_mod, "okx_live_snapshot",
+        lambda config, simulated_trading=True: {
+            "ok": legacy_ok,
+            "positions": {},
+            "error": None if legacy_ok else "legacy_demo_down",
+            "generated_at": _iso_ago() if legacy_ok else None,
+        },
+    )
+    monkeypatch.setattr(dash_mod, "okx_order_history_snapshot", lambda config: {"ok": False})
+    _bust_caches(dash_mod)
+
+
+def _write_two_venue_strategies(root):
+    _write_strategy(
+        root / "strategies", "okxs", asset="BTCUSDT",
+        instrument={"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap"},
+        execution_mode="demo",
+    )
+    _write_strategy(
+        root / "strategies", "kcs", asset="ETHUSDT",
+        instrument={"exchange": "kucoin", "inst_id": "ETH/USDT:USDT", "type": "swap"},
+        execution_mode="demo",
+    )
+
+
+def test_executor_verdict_all_active_envs_healthy(dash, monkeypatch):
+    dash_mod, _core, root = dash
+    _write_two_venue_strategies(root)
+    _stub_model_offline(dash_mod, monkeypatch, {
+        "okx:demo": {"ok": True, "error": None, "generated_at": _iso_ago()},
+        "kucoin:demo": {"ok": True, "error": None, "generated_at": _iso_ago()},
+    })
+
+    execu = dash_mod.dashboard_model()["executor"]
+
+    assert execu["ok"] is True
+    assert execu["healthy"] is True
+    assert execu["stale"] is False
+    assert execu["degraded"] is False
+    assert execu["error"] is None
+    # Additive per-env detail; the ExecutorHealthCard contract keys stay present.
+    assert set(execu["envs"]) == {"okx:demo", "kucoin:demo"}
+    assert execu["generated_at"] is not None
+
+
+def test_executor_verdict_env_error_beats_healthy_legacy_demo(dash, monkeypatch):
+    """THE bug: the legacy OKX-demo read is healthy while a real trading venue is
+    down — the Engine widget must be red, not green."""
+    dash_mod, _core, root = dash
+    _write_two_venue_strategies(root)
+    _stub_model_offline(dash_mod, monkeypatch, {
+        "okx:demo": {"ok": True, "error": None, "generated_at": _iso_ago()},
+        "kucoin:demo": {"ok": False, "error": "kucoin_unreachable", "generated_at": None},
+    }, legacy_ok=True)
+
+    execu = dash_mod.dashboard_model()["executor"]
+
+    assert execu["ok"] is False
+    assert execu["healthy"] is False
+    assert execu["degraded"] is True
+    # Env-prefixed so the banner names the venue that is down.
+    assert execu["error"] == "kucoin:demo: kucoin_unreachable"
+    assert execu["envs"]["okx:demo"]["ok"] is True
+    assert execu["envs"]["kucoin:demo"]["healthy"] is False
+
+
+def test_executor_verdict_one_env_stale(dash, monkeypatch):
+    dash_mod, _core, root = dash
+    _write_two_venue_strategies(root)
+    _stub_model_offline(dash_mod, monkeypatch, {
+        "okx:demo": {"ok": True, "error": None, "generated_at": _iso_ago()},
+        "kucoin:demo": {"ok": True, "error": None, "generated_at": _iso_ago(minutes=10)},
+    })
+
+    execu = dash_mod.dashboard_model()["executor"]
+
+    assert execu["healthy"] is True
+    assert execu["stale"] is True
+    assert execu["degraded"] is True
+    assert execu["ok"] is False
+    # age_seconds reports the OLDEST env read (~600s), not the fresh one.
+    assert execu["age_seconds"] >= 500
+
+
+def test_executor_verdict_falls_back_to_legacy_when_no_strategies(dash, monkeypatch):
+    """Zero active strategies keeps today's single OKX-demo verdict, exact shape."""
+    dash_mod, _core, _root = dash  # no strategy files written
+    _stub_model_offline(dash_mod, monkeypatch, {}, legacy_ok=False)
+
+    execu = dash_mod.dashboard_model()["executor"]
+
+    assert execu["healthy"] is False
+    assert execu["degraded"] is True
+    assert execu["error"] == "legacy_demo_down"  # un-prefixed legacy summary
+    assert "envs" not in execu
+
+
+def test_executor_verdict_excludes_inactive_strategy_env(dash, monkeypatch):
+    """An env used only by an inactive strategy must not taint the verdict."""
+    dash_mod, _core, root = dash
+    _write_two_venue_strategies(root)
+    monkeypatch.setattr(
+        dash_mod, "is_strategy_active",
+        lambda strategy: (strategy or {}).get("strategy_id") != "kcs",
+    )
+    _stub_model_offline(dash_mod, monkeypatch, {
+        "okx:demo": {"ok": True, "error": None, "generated_at": _iso_ago()},
+        # Fetched by the by_env builder (it walks all files) but inactive: broken.
+        "kucoin:demo": {"ok": False, "error": "kucoin_unreachable", "generated_at": None},
+    })
+
+    execu = dash_mod.dashboard_model()["executor"]
+
+    assert set(execu["envs"]) == {"okx:demo"}
+    assert execu["ok"] is True
+    assert execu["error"] is None
+
+
+def test_executor_env_health_missing_snapshot_is_error(dash):
+    """A derived env with no fetched snapshot is an explicit error, never green
+    and never a KeyError."""
+    _dash_mod, _core, _root = dash
+    from dashboard.model import executor_env_health_summary
+
+    verdict = executor_env_health_summary({}, ["okx:demo"], now=1000.0)
+
+    assert verdict["ok"] is False
+    assert verdict["healthy"] is False
+    assert verdict["degraded"] is True
+    assert verdict["error"] == "okx:demo: missing_env_snapshot"
+    assert verdict["envs"]["okx:demo"]["error"] == "missing_env_snapshot"
 
 
 def test_toggle_switches_venue_and_mode(dash):
