@@ -230,4 +230,4 @@ cd /path/to/hermx && ./.venv/bin/python scripts/security-audit.py --report /var/
 - `pyproject.toml` `[tool.bandit]` / `[tool.ruff.lint]` — optional-tool config.
 - `requirements-security.txt` — optional scanner extras.
 - `.pre-commit-config.yaml` — detect-secrets + the fast local audit hook.
-- `docs/hermx-slash-commands.md`, `.windsurf/workflows/doc-audit.md` — sibling audits.
+- `skills/hermx-help/SKILL.md`, `.windsurf/workflows/doc-audit.md` — sibling audits.

@@ -97,7 +97,7 @@ slash command in Hermes:
 - `/hx-help` — list or explain the commands (pure text)
 
 They share a helper library, `skills/hermx-ops/lib/hermx_ops.py` (UNKNOWN-never-flat reads,
-guarded mutations over loopback). Full reference: [docs/hermx-slash-commands.md](docs/hermx-slash-commands.md).
+guarded mutations over loopback). Full reference: [skills/hermx-help/SKILL.md](skills/hermx-help/SKILL.md).
 
 ## Included Strategies
 
@@ -110,7 +110,7 @@ Four ready-to-run **demo** strategies ship with HermX (all on OKX, isolated marg
 | SOL      | 3h        | SOL-USDT   | $1,500        | Active demo candidate |
 | XRP      | 4h        | XRP-USDT   | $1,500        | Active demo candidate |
 
-All use the `mxc duo-base v2.5` indicator logic. They are configured for demo/sandbox by default. Review and customize the JSON files in the `strategies/` folder. See [docs/STRATEGIES.md](docs/STRATEGIES.md) for the full schema and how to add your own strategies.
+All use the `mxc duo-base v2.5` indicator logic. They are configured for demo/sandbox by default. Review and customize the JSON files in the `strategies/` folder. See [docs/1-STRATEGIES.md](docs/1-STRATEGIES.md) for the full schema and how to add your own strategies.
 
 ## Supported Exchanges
 
@@ -131,7 +131,7 @@ All use the `mxc duo-base v2.5` indicator logic. They are configured for demo/sa
 - TradingView alerts configured and sending signals
 - Local read-only dashboard (`http://127.0.0.1:8098`)
 - Hermes Agent in Telegram for monitoring and signal relay
-- Five read-only cron monitors (weekly/daily digest, reconcile, health, zero-intake) delivered to Telegram — see [docs/EXECUTION_MONITORING.md](docs/EXECUTION_MONITORING.md)
+- Five read-only cron monitors (weekly/daily digest, reconcile, health, zero-intake) delivered to Telegram — see [docs/7-EXECUTION_MONITORING.md](docs/7-EXECUTION_MONITORING.md)
 - Complete peace of mind that safety logic lives in auditable Python code
 
 ## Repository Layout

@@ -281,7 +281,7 @@ The runtime behind the relay seam is `HermesRelayAdapter` (`src/skills/hermes_ex
 
 These are **conceptual roles**, not a config-selected mode: there is **no `orchestration_mode`
 flag**. A second config-gated mode was explicitly judged unnecessary — there is one path
-(advisory/relay) and the gates decide the rest (see `docs/HERMES_AGENT_DESIGN.md`). The "agent"
+(advisory/relay) and the gates decide the rest (see `docs/8-HERMES_AGENT_DESIGN.md`). The "agent"
 row below is the planned end-state for who *originates* a relay; either way the same single
 gate chain runs.
 
@@ -318,7 +318,7 @@ Hermes UI (slash command)  →  skills/hermx-*/SKILL.md  →  skills/hermx-ops/l
   the API seam.
 
 The canonical API contract these skills speak is `skills/hermx-ops/references/api-contract.md`.
-Full command reference: `docs/hermx-slash-commands.md`.
+Full command reference: `skills/hermx-help/SKILL.md`.
 
 ---
 
@@ -377,7 +377,7 @@ Every install is fully isolated: its own Tailscale tailnet/URL, its own `.env`, 
 
 ### 8.4 Cron monitoring
 
-HermX monitoring uses the Hermes gateway's built-in cron scheduler rather than a custom daemon. Five read-only jobs run via pre-check gate scripts that read HermX state (logs, `/api`) and wake an LLM agent only when conditions change. The gate scripts live in `deploy/hermes-scripts/`; `deploy/install-cron-monitors.sh` provisions them idempotently. See `docs/EXECUTION_MONITORING.md` for the full deep dive.
+HermX monitoring uses the Hermes gateway's built-in cron scheduler rather than a custom daemon. Five read-only jobs run via pre-check gate scripts that read HermX state (logs, `/api`) and wake an LLM agent only when conditions change. The gate scripts live in `deploy/hermes-scripts/`; `deploy/install-cron-monitors.sh` provisions them idempotently. See `docs/7-EXECUTION_MONITORING.md` for the full deep dive.
 
 On every code deploy, `deploy/deploy.sh` runs the installer in `HERMX_CRON_CREATE_ONLY=1` mode: missing jobs are created, but existing jobs are never edited — a manually paused or re-scheduled job survives the deploy untouched.
 
@@ -489,7 +489,7 @@ Intelligence is **purely additive** and lives *outside* the money path. Pattern:
 | `src/security/webhook_auth.py` | Pure auth/rate-limit/HMAC/replay helpers |
 | `deploy/deploy.sh` | Config-safe deploy script: snapshot, pull, pip install, UI build, test gate, restart, auto-rollback |
 | `skills/hermx-control/SKILL.md` | Agent skill: loopback reads + signal relay, with hard money-safety rules (older single-skill model) |
-| `skills/hermx-{status,positions,strategy-list,trace,strategy-mode,close,restart,upgrade,help}/SKILL.md` | Slash-command skills — one dynamic Hermes command each (see `docs/hermx-slash-commands.md`) |
+| `skills/hermx-{status,positions,strategy-list,trace,strategy-mode,close,restart,upgrade,help}/SKILL.md` | Slash-command skills — one dynamic Hermes command each (see `skills/hermx-help/SKILL.md`) |
 | `skills/hermx-ops/` | Shared helper (`lib/hermx_ops.py`) + canonical API contract (`references/api-contract.md`) for the slash commands |
 | `skills/*.md` | Flat operator runbooks (`emergency-stop`, `optimization-workflow`, `tradingview-alert-setup`, `tradingview-recovery`) |
 | `schemas/strategy.schema.json` | Strategy file contract (v1 + v2, no inline credentials) |

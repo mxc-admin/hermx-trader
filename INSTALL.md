@@ -796,7 +796,7 @@ hermes skills list | grep hermx-        # expect each hermx-* skill enabled
 They share the helper library `skills/hermx-ops/lib/hermx_ops.py` (UNKNOWN-never-flat reads,
 guarded loopback mutations) and speak the contract in
 `skills/hermx-ops/references/api-contract.md`. Full command reference:
-`docs/hermx-slash-commands.md`.
+`skills/hermx-help/SKILL.md`.
 
 ### 6.4 Start the Telegram gateway
 
@@ -837,7 +837,7 @@ This registers five read-only monitors (all fail-closed, no money-path access):
 
 On subsequent upgrades (`bash deploy/deploy.sh`), missing monitor jobs are created automatically in "create-only" mode — existing jobs are never edited, so manual pauses and schedule changes are preserved.
 
-Pause a noisy monitor with `/cron pause <name>`. Full design: `docs/EXECUTION_MONITORING.md`.
+Pause a noisy monitor with `/cron pause <name>`. Full design: `docs/7-EXECUTION_MONITORING.md`.
 
 ### 6.6 Test it
 
@@ -846,7 +846,7 @@ Ask the user to message their bot in Telegram: **"are you there?"** and confirm 
 **✅ Verify Phase 6:** `hermes skills list` shows `hermx-control` **and** the `hermx-*`
 slash-command skills enabled, `hermes doctor` is clean, `hermes cron list` shows the 5 hermx
 monitor jobs, and the Telegram bot responds. Full details: `setup/09-hermes-agent.md`;
-slash-command reference: `docs/hermx-slash-commands.md`.
+slash-command reference: `skills/hermx-help/SKILL.md`.
 
 ---
 

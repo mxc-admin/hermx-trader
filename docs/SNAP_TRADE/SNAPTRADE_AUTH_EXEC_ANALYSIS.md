@@ -7,10 +7,10 @@
 2. How does a TradingView signal become a real order in that account?
 
 **Source docs (read in order):**
-- [`docs/SNAPTRADE_RESEARCH.md`](./SNAPTRADE_RESEARCH.md) — feasibility, pricing, go/no-go (cited "R §n").
-- [`docs/SNAPTRADE_API_FINDINGS.md`](./SNAPTRADE_API_FINDINGS.md) — grounded API contract (cited "F §n").
-- [`docs/SNAPTRADE_TECH_DESIGN.md`](./SNAPTRADE_TECH_DESIGN.md) — module/security blueprint (cited "TD §n").
-- [`docs/SNAPTRADE_EXECUTION_PLAN.md`](./SNAPTRADE_EXECUTION_PLAN.md) — phased build order (cited "EP Phase n").
+- [`SNAPTRADE_RESEARCH.md`](./SNAPTRADE_RESEARCH.md) — feasibility, pricing, go/no-go (cited "R §n").
+- [`SNAPTRADE_API_FINDINGS.md`](./SNAPTRADE_API_FINDINGS.md) — grounded API contract (cited "F §n").
+- [`SNAPTRADE_TECH_DESIGN.md`](./SNAPTRADE_TECH_DESIGN.md) — module/security blueprint (cited "TD §n").
+- [`SNAPTRADE_EXECUTION_PLAN.md`](./SNAPTRADE_EXECUTION_PLAN.md) — phased build order (cited "EP Phase n").
 
 This document is analysis only — it references sections, file paths, and method names from the design; it does not add new design or code.
 

@@ -1,8 +1,8 @@
 # TradingView → HermX Execution
 
 End-to-end reference: how a TradingView alert becomes an exchange order. Companion to
-[ALERT_CONTRACT.md](ALERT_CONTRACT.md) (the payload contract, field-by-field) and
-[CCXT_EXCH_ADAPTER.md](CCXT_EXCH_ADAPTER.md) (the adapter below the execution service).
+[3-TRADINGVIEW_ALERTS.md](3-TRADINGVIEW_ALERTS.md) (the payload contract, field-by-field) and
+[6-CCXT_EXCH_ADAPTER.md](6-CCXT_EXCH_ADAPTER.md) (the adapter below the execution service).
 
 ## 1. Overview
 
@@ -27,7 +27,7 @@ TradingView alert
 ## 2. Alert Definition
 
 Validated against `schemas/tradingview-alert.schema.json`. See
-[ALERT_CONTRACT.md](ALERT_CONTRACT.md) for full semantics; summary:
+[3-TRADINGVIEW_ALERTS.md](3-TRADINGVIEW_ALERTS.md) for full semantics; summary:
 
 **Required** (schema `required`):
 
@@ -48,7 +48,7 @@ Validated against `schemas/tradingview-alert.schema.json`. See
 | `side` | string | enum `buy` `sell`; legacy. If both present as `buy`/`sell`, they must match |
 
 **Optional**: `strategy_name`, `indicator`, `signal_id` (receiver derives one when absent),
-`extras` (object, observe-only debug context — see ALERT_CONTRACT.md).
+`extras` (object, observe-only debug context — see 3-TRADINGVIEW_ALERTS.md).
 
 There is **no `exchange` field** in the alert schema. Venue routing comes exclusively from
 the strategy file (`strategy.instrument.exchange`, § 4). `normalize()` backfills an
@@ -205,7 +205,7 @@ invertible, so this map is the only way a later reconciled close attributes P&L 
 strategy. The map write is best-effort and can never block the trade.
 
 The order is then dispatched: `executor_factory.create(resolved_config)` → `CcxtExecutor.execute(readiness)`
-(see [CCXT_EXCH_ADAPTER.md](CCXT_EXCH_ADAPTER.md)). An adapter ACK leaves the order
+(see [6-CCXT_EXCH_ADAPTER.md](6-CCXT_EXCH_ADAPTER.md)). An adapter ACK leaves the order
 `SUBMITTED`; only a confirmed fill is `FILLED`; timeouts/exceptions/partial multi-leg submits
 go to `UNKNOWN` (never a fabricated `REJECTED`), and post-submit reconciliation resolves the
 terminal state against the venue.
@@ -226,7 +226,7 @@ terminal state against the venue.
    `X-Webhook-Timestamp`/`X-Webhook-Signature` — TradingView cannot compute a per-request
    HMAC, so that mode requires a signing proxy in front of the receiver.)
 5. **Paste the message JSON** (see § 2, or the ready-made per-strategy templates in
-   [ALERT_CONTRACT.md](ALERT_CONTRACT.md) § *TradingView Message Templates*). Placeholders:
+   [3-TRADINGVIEW_ALERTS.md](3-TRADINGVIEW_ALERTS.md) § *TradingView Message Templates*). Placeholders:
    `{{ticker}}` → `symbol`, `{{strategy.order.action}}` → `side` (emits `buy`/`sell`),
    `{{close}}` → `tv_signal_price`, `{{time}}` → `tv_time`. Hard-code `strategy_id`,
    `timeframe`, and `source`.

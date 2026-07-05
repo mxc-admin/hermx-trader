@@ -5,8 +5,8 @@
 **History:** this file was previously `HERMES_CRON_MONITOR_DESIGN.md`, the design-pass document
 for the pivot away from a custom monitor daemon. The design has since been implemented; this is
 the deep-dive overview of what actually runs.
-**Companion:** `docs/MONITORING_GAPS_BRAINSTORM.md` — the failure-mode map and the gaps this
-system does *not* yet cover.
+**Companion:** the failure-mode map formerly in MONITORING_GAPS_BRAINSTORM.md (doc since
+removed) — the gaps this system does *not* yet cover are summarized in § 8 (limitations) below.
 
 ---
 
@@ -254,7 +254,7 @@ have.
 **Failure mode:** the alert-row family is a *presence* detector over `alerts.jsonl` — it can
 only surface what the receiver actually emits. The ledger-mismatch and rejected-order
 families close the previously documented clean-`REJECTED` blind spot
-(`MONITORING_GAPS_BRAINSTORM.md` Scenario E) by reading the order journal directly; what
+(the former MONITORING_GAPS_BRAINSTORM.md Scenario E) by reading the order journal directly; what
 remains invisible is anything that never reaches the WAL, journal, or alerts ledger at all.
 
 ### 4.3 `hermx-ledger-reconcile` — P&L ledger safety net (every 10 m, `--no-agent`)
@@ -308,8 +308,8 @@ changed, network) or `[SILENT]` if a recent intake is present after all.
 A per-strategy frequency baseline (each strategy's own cadence, learned from history) is the
 planned evolution of this gate but is **intentionally not implemented** — prerequisites (enough
 per-strategy history, a sidecar schema extension, answers on paused/new strategies and WAL
-rotation) are documented in the script's TODO block and in `MONITORING_GAPS_BRAINSTORM.md`
-Scenario A.
+rotation) are documented in the script's TODO block and were mapped in the former
+MONITORING_GAPS_BRAINSTORM.md Scenario A.
 
 ### 4.6 `hermx-daily` — daily digest (08:00 UTC, LLM, ungated)
 
@@ -480,8 +480,8 @@ condition can actually occur.
    the health check that would report the outage. The recommended backstop — an OS-level
    `crontab` entry curling an endpoint independent of the gateway — is designed but not
    installed. Mitigation today: the gateway runs as a managed, auto-restarting service.
-4. **Presence-detector gaps.** The most dangerous uncovered failure modes are catalogued in
-   `docs/MONITORING_GAPS_BRAINSTORM.md`: position drift (strategy-expected vs exchange-actual —
+4. **Presence-detector gaps.** The most dangerous uncovered failure modes were catalogued in
+   the former MONITORING_GAPS_BRAINSTORM.md (doc since removed): position drift (strategy-expected vs exchange-actual —
    undetected on the live path; the rejected-order condition in §4.2 now covers the
    rejected-close slice of it), per-strategy frequency baselines (un-trainable until enough
    history accrues), sustained exchange read outages (current-read only, no

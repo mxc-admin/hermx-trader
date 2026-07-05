@@ -26,7 +26,7 @@ metadata:
 only: **no HTTP request, no file write, no mutation, and it never routes via `/webhook`.**
 
 The payload shape, the venue/mode/sizing split, and every validation gate live in
-[`../../docs/ALERT_CONTRACT.md`](../../docs/ALERT_CONTRACT.md) and the schema
+[`../../docs/3-TRADINGVIEW_ALERTS.md`](../../docs/3-TRADINGVIEW_ALERTS.md) and the schema
 [`../../schemas/tradingview-alert.schema.json`](../../schemas/tradingview-alert.schema.json).
 Resolution semantics live in
 [`../hermx-ops/references/api-contract.md`](../hermx-ops/references/api-contract.md).

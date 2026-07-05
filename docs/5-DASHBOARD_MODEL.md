@@ -1,8 +1,8 @@
 # HermX Dashboard — Operator Guide
 
 How to read the dashboard, track strategies and trades, and use the controls.
-This is an operator guide; for signal semantics see [ALERT_CONTRACT.md](ALERT_CONTRACT.md),
-for CLI/agent controls see [hermx-slash-commands.md](hermx-slash-commands.md).
+This is an operator guide; for signal semantics see [3-TRADINGVIEW_ALERTS.md](3-TRADINGVIEW_ALERTS.md),
+for CLI/agent controls see [../skills/hermx-help/SKILL.md](../skills/hermx-help/SKILL.md).
 
 ---
 

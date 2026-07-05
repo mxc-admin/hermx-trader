@@ -1,6 +1,6 @@
 # CCXT_EXCH_ADAPTER
 
-Deep-dive reference for `src/executors/ccxt_adapter.py` — how HermX uses the CCXT library today and how to extend it. This doc absorbs the former `EXCHANGE_ADAPTERS.md` (venue table, instruction shape, adapter responsibilities); for the per-venue unified-field audit see [CCXT_VENUE_NEUTRALITY_VALIDATION.md](CCXT_VENUE_NEUTRALITY_VALIDATION.md).
+Deep-dive reference for `src/executors/ccxt_adapter.py` — how HermX uses the CCXT library today and how to extend it. This doc absorbs the former `EXCHANGE_ADAPTERS.md` (venue table, instruction shape, adapter responsibilities); the per-venue unified-field audit (formerly CCXT_VENUE_NEUTRALITY_VALIDATION.md, doc since removed) is summarized under § Venue-Specific Normalization below.
 
 ## Overview
 
@@ -140,7 +140,7 @@ Reconciliation (`reconcile_from_order_history`) and the dashboard consume these 
 
 ## Venue-Specific Normalization (CCXT unified-field gaps)
 
-Full audit with CCXT-source line evidence: [CCXT_VENUE_NEUTRALITY_VALIDATION.md](CCXT_VENUE_NEUTRALITY_VALIDATION.md) (validated against installed CCXT 4.5.61 under `.venv`, not web docs). Summary of the ground truth: CCXT's `safe_order` emits `reduceOnly` and `fee` as **unified top-level keys**, but there is **no unified per-order realized-P&L key** — it only ever lives in each venue's raw `info` blob or a separate endpoint.
+The full audit with CCXT-source line evidence lived in CCXT_VENUE_NEUTRALITY_VALIDATION.md (doc since removed; it validated against installed CCXT 4.5.61 under `.venv`, not web docs). Summary of the ground truth: CCXT's `safe_order` emits `reduceOnly` and `fee` as **unified top-level keys**, but there is **no unified per-order realized-P&L key** — it only ever lives in each venue's raw `info` blob or a separate endpoint.
 
 How the adapter handles each gap today:
 
@@ -223,10 +223,10 @@ To add a query verb or a new fill-summary/normalized-order field:
 
 When a venue's number looks unified but isn't (the `info.pnl` vs `info.closedPnl` class of bug):
 
-1. **Ground truth is the installed CCXT source**, `.venv/.../site-packages/ccxt/` — not web docs, not memory (method established in [CCXT_VENUE_NEUTRALITY_VALIDATION.md](CCXT_VENUE_NEUTRALITY_VALIDATION.md)). Check `base/exchange.py::safe_order` (or `parse_position`) for whether the key is a unified top-level field at all, then each venue's `parse_order`/`parse_position`/`parse_trade` for whether and where it's populated.
+1. **Ground truth is the installed CCXT source**, `.venv/.../site-packages/ccxt/` — not web docs, not memory (method established in the former CCXT_VENUE_NEUTRALITY_VALIDATION.md audit). Check `base/exchange.py::safe_order` (or `parse_position`) for whether the key is a unified top-level field at all, then each venue's `parse_order`/`parse_position`/`parse_trade` for whether and where it's populated.
 2. If it's not unified, add a per-venue mapping helper at module level (pattern: `_normalized_realized_pnl`), keyed on `exchange_id`, returning `None` for venues that don't expose it — never a fabricated zero, per the log-and-continue rule.
 3. If it *is* unified but a venue populates it oddly (OKX's string `"true"`/`"false"` `reduceOnly`), read the unified key first with an `info` fallback and type-coerce defensively (pattern: `_normalize_reduce_only`, `ccxt_adapter.py:66-76`).
-4. Document the finding in CCXT_VENUE_NEUTRALITY_VALIDATION.md (or a successor) with CCXT source line references, and pin the behavior with a per-venue unit test so a CCXT version bump that changes the field surfaces as a test failure.
+4. Document the finding here (§ Venue-Specific Normalization, or a successor audit doc) with CCXT source line references, and pin the behavior with a per-venue unit test so a CCXT version bump that changes the field surfaces as a test failure.
 
 ## Testing & Validation
 

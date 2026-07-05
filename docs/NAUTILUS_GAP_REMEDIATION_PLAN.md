@@ -13,7 +13,7 @@
 > every other key in those dicts). **Item B2 remains unstarted**, blocked on the
 > Option 1 vs Option 2 decision per §0.6 step 5 — do not start without that call.
 
-> Ruthless re-validation of the "Top gaps" in `docs/NAUTILUS_TRADER_COMPARISON.md`.
+> Ruthless re-validation of the "Top gaps" in the former NAUTILUS_TRADER_COMPARISON.md (doc since removed).
 > Every claim was re-derived from the current tree (HEAD `be3c0c66`) by independent
 > code reads — citations were NOT trusted. Baseline: the 7 relevant test suites
 > (`test_phase_b_robustness`, `test_order_state_machine`, `test_pnl_ledger`,

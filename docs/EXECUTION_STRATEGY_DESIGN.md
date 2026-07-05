@@ -9,8 +9,9 @@
 > strategy file). Grounded in the current tree (post `225a9103`, REFACTOR_PLAN
 > Phase 4) and a competitive scan of TradersPost + 3Commas.
 >
-> **Scope note:** this document remains a SEPARATE planning thread from
-> `docs/NAUTILUS_TRADER_COMPARISON.md` / `docs/NAUTILUS_GAP_REMEDIATION_PLAN.md`
+> **Scope note:** this document remains a SEPARATE planning thread from the
+> Nautilus thread — formerly NAUTILUS_TRADER_COMPARISON.md (doc since removed),
+> now `docs/NAUTILUS_GAP_REMEDIATION_PLAN.md`
 > (protective SL/TP via venue-native conditional orders). Two deliberate
 > overlaps only: §5, where the execution-loop mechanism is genuinely shared,
 > and #8/#9, which target the same *capability* (protective SL/TP) through a

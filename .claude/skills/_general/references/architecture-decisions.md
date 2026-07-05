@@ -7,7 +7,7 @@
 - **Rationale:** `ExecutionService.execute()` is the money-safety gate. Skill prose is non-authoritative advisory guidance. A rewritten skill cannot widen an agent's authority because authority lives in code.
 
 ### HermesExecutionSkill → rename to HermesRelayAdapter
-- **Decision:** Rename the Python class in `src/skills/hermes_execution.py` and the doc `docs/hermes-execution.md` to "relay adapter".
+- **Decision:** Rename the Python class in `src/skills/hermes_execution.py` and its doc (formerly docs/hermes-execution.md; doc since removed) to "relay adapter".
 - **Alternatives:** Delete it (rejected), keep current name.
 - **Rationale:** "Skill" collides with Hermes SKILL.md terminology. The Python component is an internal HermX relay adapter, not a Hermes Agent skill. The naming collision causes architectural confusion.
 
@@ -138,7 +138,7 @@
 
 ### Hermes built-in cron over a custom monitor daemon
 - **Decision:** Use Hermes' built-in cron (60s tick scheduler + `hermes cron create/edit/run/list`) for all monitors.
-- **Alternatives:** A ~600-line custom monitor daemon (rejected; superseded by `docs/EXECUTION_MONITORING.md`).
+- **Alternatives:** A ~600-line custom monitor daemon (rejected; superseded by `docs/7-EXECUTION_MONITORING.md`).
 - **Rationale:** Built-in cron already provides scheduler, dedup, delivery, and resilience. No new process, no new store.
 
 ### Pre-check gate scripts as the HermX↔Hermes bridge

@@ -4,9 +4,9 @@
 **Author:** Engineering
 **Date:** 2026-07-03
 **Prereq reading (read in order):**
-1. [`docs/SNAPTRADE_RESEARCH.md`](./SNAPTRADE_RESEARCH.md) — feasibility, pricing, go/no-go.
-2. [`docs/SNAPTRADE_API_FINDINGS.md`](./SNAPTRADE_API_FINDINGS.md) — grounded API contract (real endpoints, field names, idempotency, webhooks, rate limits, SDK, sandbox).
-3. [`docs/SNAPTRADE_TECH_DESIGN.md`](./SNAPTRADE_TECH_DESIGN.md) — module boundaries, API contract, security. **This plan assumes you have read it** and references its sections (e.g. "TD §2.7").
+1. [`SNAPTRADE_RESEARCH.md`](./SNAPTRADE_RESEARCH.md) — feasibility, pricing, go/no-go.
+2. [`SNAPTRADE_API_FINDINGS.md`](./SNAPTRADE_API_FINDINGS.md) — grounded API contract (real endpoints, field names, idempotency, webhooks, rate limits, SDK, sandbox).
+3. [`SNAPTRADE_TECH_DESIGN.md`](./SNAPTRADE_TECH_DESIGN.md) — module boundaries, API contract, security. **This plan assumes you have read it** and references its sections (e.g. "TD §2.7").
 
 > **Doc-research update (2026-07-03).** The SnapTrade docs answered most Phase-0 blockers *before* touching a vendor account (findings doc). Net effect on this plan: **Phase 0 shrinks** (idempotency Q1 = YES, rate limits, SDK, webhook scheme, buying-power all known from docs); the residual Phase-0 work is **validating** the doc claims against real payloads + capturing fixtures, not discovering them. One finding reshapes testing: SnapTrade's **sandbox is read-only** — it cannot place/cancel orders — so **order-placement testing must use a real Alpaca Paper connection**, while the sandbox is ideal for Phase-1 read/aggregation fixtures and connection/error scenarios.
 
@@ -64,7 +64,7 @@ Phase 0 is a **spike**, not a shipping phase — it exists to answer TD §10's o
 - (Q6 rate limits, Q7 SDK, Q8 sandbox — **taken as resolved from docs**, no live check needed.)
 
 ### Deliverables
-- `SNAPTRADE_PHASE0_FINDINGS.md` (new, to be created under `docs/`) — one row per question: doc answer + **confirmed?** + evidence (payload snippet). (Cross-reference `docs/SNAPTRADE_API_FINDINGS.md`.)
+- `SNAPTRADE_PHASE0_FINDINGS.md` (new, to be created under `docs/`) — one row per question: doc answer + **confirmed?** + evidence (payload snippet). (Cross-reference `SNAPTRADE_API_FINDINGS.md`.)
 - `tests/fixtures/snaptrade/` — recorded real raw payloads (secrets stripped): a positions response, a balances response, an activities/transactions response, order objects for each status (`EXECUTED`/`PENDING`/`CANCELED`/`REJECTED`/`PARTIAL`), a `POST /trade/place` response, a `POST /trade/impact` response, and a sample webhook body per event type (`TRADE_UPDATE`, `CONNECTION_BROKEN`, `ACCOUNT_HOLDINGS_UPDATED`). Sandbox covers the read fixtures + error scenarios; Alpaca paper covers the place/impact fixtures.
 
 ### Testing / verification
@@ -505,7 +505,7 @@ Phase column: **P1** = read-only, **P2** = paper, **P3** = live/multi-account.
 
 ### Documentation updates
 - Update `CLAUDE.md` / `.claude/CLAUDE.md` Key Files to list `src/snaptrade/` and `snaptrade_adapter.py`.
-- Add SnapTrade venues to `docs/hermx-slash-commands.md` where operator commands (`/hx-positions`, `/hx-close`) now span brokers.
+- Add SnapTrade venues to the slash-command reference (`skills/hermx-help/SKILL.md`) where operator commands (`/hx-positions`, `/hx-close`) now span brokers.
 - Record any new proven pattern in **both** `.claude/rules/code-quality.md` and `.windsurf/rules/code-quality.md` (dual-file rule) — e.g. the backend(`snaptrade`)-vs-venue(`snaptrade:alpaca:acct`) distinction, which is exactly the class of bug the shadow-config regression taught us to guard.
 - Close out `SNAPTRADE_PHASE0_FINDINGS.md` open questions as each is answered; fold Q10 (regulatory) and Q11 (options, deferred) into a future-work note.
 

@@ -67,10 +67,10 @@ skill_count=$(ls skills/hermx-*/SKILL.md 2>/dev/null | wc -l | tr -d ' ')
 info "discovered $skill_count operator skills (skills/hermx-*/SKILL.md + emergency-stop.md)"
 for doc in README.md ARCHITECTURE.md INSTALL.md; do
   if [ ! -f "$doc" ]; then warn "$doc missing"; continue; fi
-  if grep -q 'docs/hermx-slash-commands\.md' "$doc"; then
-    pass "$doc references docs/hermx-slash-commands.md"
+  if grep -q 'skills/hermx-help/SKILL\.md' "$doc"; then
+    pass "$doc references skills/hermx-help/SKILL.md (slash-command reference)"
   else
-    fail "$doc missing reference to docs/hermx-slash-commands.md"
+    fail "$doc missing reference to skills/hermx-help/SKILL.md (slash-command reference)"
   fi
   if grep -qE '/hx-(status|positions|close|emergency-stop|help|trace|restart|upgrade)' "$doc"; then
     pass "$doc references at least one slash command"
@@ -158,7 +158,7 @@ fi
 rm -f "$missing_links"
 
 # ---------------------------------------------------------------------------
-sec "7. Alert schema drift (ALERT_CONTRACT.md vs schema)"
+sec "7. Alert schema drift (3-TRADINGVIEW_ALERTS.md vs schema)"
 if command -v python3 >/dev/null 2>&1; then
   python3 - <<'PY'
 import json, re, sys
@@ -167,9 +167,9 @@ try:
 except FileNotFoundError:
     print("      schema file missing"); sys.exit(2)
 try:
-    contract = open("docs/ALERT_CONTRACT.md").read()
+    contract = open("docs/3-TRADINGVIEW_ALERTS.md").read()
 except FileNotFoundError:
-    print("      docs/ALERT_CONTRACT.md missing"); sys.exit(2)
+    print("      docs/3-TRADINGVIEW_ALERTS.md missing"); sys.exit(2)
 
 enum = schema.get("properties", {}).get("exchange", {}).get("enum", [])
 missing_enum = [v for v in enum if v not in contract]
@@ -185,11 +185,11 @@ sys.exit(1 if missing_enum else 0)
 PY
   rc=$?
   if [ "$rc" -eq 0 ]; then
-    pass "alert venue enum consistent with ALERT_CONTRACT.md (details above)"
+    pass "alert venue enum consistent with 3-TRADINGVIEW_ALERTS.md (details above)"
   elif [ "$rc" -eq 2 ]; then
     fail "alert schema drift check could not run (missing file — see above)"
   else
-    fail "alert schema drift: schema venues missing from ALERT_CONTRACT.md (see DRIFT above)"
+    fail "alert schema drift: schema venues missing from 3-TRADINGVIEW_ALERTS.md (see DRIFT above)"
   fi
 else
   warn "python3 unavailable — skipped alert schema drift check"
@@ -286,12 +286,12 @@ exits non-zero, so it is safe to wire into CI or a pre-release gate.
 | Check | Where to fix |
 |-------|--------------|
 | 1 — dead config refs | Remove/relabel `shadow-config.json` in the flagged `.md`; source is `engine-config.json` via `load_engine_config()`. Delete any stray physical `shadow-config.json`. |
-| 2 — skill-count sync | Add the `docs/hermx-slash-commands.md` pointer + a slash-command example to `README.md`, `ARCHITECTURE.md`, `INSTALL.md`. Skills live in `skills/hermx-*/SKILL.md` and `skills/emergency-stop.md`. |
+| 2 — skill-count sync | Add the `skills/hermx-help/SKILL.md` pointer + a slash-command example to `README.md`, `ARCHITECTURE.md`, `INSTALL.md`. Skills live in `skills/hermx-*/SKILL.md` and `skills/emergency-stop.md`. |
 | 3 — ops-lib ref | Mention `hermx_ops.py` in `ARCHITECTURE.md` / `INSTALL.md`. |
 | 4 — Docker/state | Ensure `HERMX_DATA_DIR` and `hermx-state` (value `/app/data`) appear in `INSTALL.md` + `ARCHITECTURE.md` and match `docker-compose.yml`. |
 | 5 — deploy path | Reference `deploy/deploy.sh` in `INSTALL.md` + `ARCHITECTURE.md` (or `docs/DOCKER_PACKAGE_PLAN.md`). |
 | 6 — dead links | Fix the target path or the link in the flagged `.md`. Paths are checked relative to the file, the repo root, and CWD. |
-| 7 — schema drift | Reconcile the venue enum / required fields between `docs/ALERT_CONTRACT.md` and `schemas/tradingview-alert.schema.json`. |
+| 7 — schema drift | Reconcile the venue enum / required fields between `docs/3-TRADINGVIEW_ALERTS.md` and `schemas/tradingview-alert.schema.json`. |
 | 8 — legacy naming | Remove or annotate `SHADOW_PORT` / `shadow_config` carryover in docs. |
 | 9 — code/doc sync | Update the ARCHITECTURE File Reference table to point at real `src/` paths (or restore the file). |
 | 10 — undocumented modules | Add a File Reference / description entry to `ARCHITECTURE.md` for the flagged module. |

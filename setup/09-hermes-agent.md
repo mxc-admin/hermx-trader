@@ -7,7 +7,7 @@ This is optional. The deterministic system (dashboard, receiver, gate chain) run
 fine without it. The agent only **reads** state and **relays** a TradingView-originated
 or human-instructed signal to the existing local API. It **never** self-initiates,
 never calls an exchange, never sets an order size, and cannot override any gate or the
-kill switch. All money-safety stays in Python. Design: `docs/HERMES_AGENT_DESIGN.md`.
+kill switch. All money-safety stays in Python. Design: `docs/8-HERMES_AGENT_DESIGN.md`.
 What it talks to: `skills/hermx-control/SKILL.md`.
 
 ## What the agent can reach
@@ -127,7 +127,7 @@ needed — ideal on a VPS.
 
 Independent of the Hermes runtime above, the **receiver** can consult an LLM as a
 pre-execution **risk overseer** on each sanctioned strategy signal (Design 1 in
-`docs/HERMES_AGENT_DESIGN.md`). It can only return `proceed` or `skip` (+ a risk note);
+`docs/8-HERMES_AGENT_DESIGN.md`). It can only return `proceed` or `skip` (+ a risk note);
 it can **never** change symbol, side, size, leverage, or strategy — those stay locked in
 code. Any timeout / error / malformed reply **fails open** to deterministic execution, so
 the front door is never down because of the LLM.
