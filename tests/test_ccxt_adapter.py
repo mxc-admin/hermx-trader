@@ -1136,6 +1136,212 @@ def test_balance_check_uses_market_settle_currency_not_hardcoded_usdt(monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# Leverage sync: set_leverage before OPEN (all derivatives venues via the
+# _leverage_params() per-venue table, demo+live, fail-open)
+# ---------------------------------------------------------------------------
+
+
+class _FakeLeverageClient(_FakeFlatClient):
+    """Flat position + setLeverage capability; records leverage calls and ordering."""
+
+    has = {"setLeverage": True}
+
+    def __init__(self, free=None, leverage_error=None):
+        super().__init__(free=free)
+        self.leverage_calls = []
+        self.call_order = []
+        self._leverage_error = leverage_error
+
+    def set_leverage(self, leverage, symbol, params):
+        self.call_order.append("set_leverage")
+        self.leverage_calls.append((leverage, symbol, dict(params or {})))
+        if self._leverage_error is not None:
+            raise self._leverage_error
+
+    def create_order(self, symbol, order_type, side, amount, price, params):
+        self.call_order.append("create_order")
+        return super().create_order(symbol, order_type, side, amount, price, params)
+
+
+class _FakeLeverageShortClient(_FakeClient):
+    """Short position + setLeverage capability, for the close-only path."""
+
+    has = {"setLeverage": True}
+
+    def __init__(self):
+        super().__init__()
+        self.leverage_calls = []
+
+    def set_leverage(self, leverage, symbol, params):
+        self.leverage_calls.append((leverage, symbol, dict(params or {})))
+
+
+class _FakeNoLeverageCapabilityClient(_FakeFlatClient):
+    """set_leverage exists but `has` lacks setLeverage -> must never be called."""
+
+    def __init__(self, free=None):
+        super().__init__(free=free)
+        self.leverage_calls = []
+
+    def set_leverage(self, leverage, symbol, params):
+        self.leverage_calls.append((leverage, symbol, dict(params or {})))
+
+
+def test_live_open_sets_leverage_before_create_order(monkeypatch):
+    ex = _live_executor()
+    fake = _FakeLeverageClient(free={"USDT": 800.0})
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    out = ex.execute(_open_long_readiness(leverage=2))
+
+    assert out["ok"] is True
+    assert fake.leverage_calls == [(2, "BTC/USDT:USDT", {"mgnMode": "cross"})]
+    assert isinstance(fake.leverage_calls[0][0], int)
+    assert fake.call_order == ["set_leverage", "create_order"]
+
+
+def test_demo_open_sets_leverage_too(monkeypatch):
+    # Regression test for the reported bug: OKX demo leverage/margin state is
+    # real, so the sync must NOT be gated behind simulated_trading the way the
+    # balance check is.
+    ex = _executor()  # simulated_trading=True
+    fake = _FakeLeverageClient()
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    out = ex.execute(_open_long_readiness(leverage=2))
+
+    assert out["ok"] is True
+    assert fake.leverage_calls == [(2, "BTC/USDT:USDT", {"mgnMode": "cross"})]
+    assert fake.call_order == ["set_leverage", "create_order"]
+
+
+def test_set_leverage_failure_is_fail_open(monkeypatch):
+    ex = _live_executor()
+    fake = _FakeLeverageClient(free={"USDT": 800.0}, leverage_error=RuntimeError("lever busy"))
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    out = ex.execute(_open_long_readiness(leverage=2))
+
+    assert out["ok"] is True
+    assert len(fake.calls) == 1  # order submitted anyway
+    legs = out["payload"]["executed_orders"]
+    assert [leg["status"] for leg in legs] == ["submitted"]
+
+
+def test_close_only_never_sets_leverage(monkeypatch):
+    ex = _live_executor()
+    fake = _FakeLeverageShortClient()  # reports a short position
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    readiness = {
+        "close_only": True,
+        "inst_id": "BTC-USDT-SWAP",
+        "td_mode": "cross",
+        "leverage": 2,
+        "execution_intent": {
+            "client_order_id": "cid-close-lev",
+            "actions": ["CLOSE_SHORT"],
+        },
+    }
+    out = ex.execute(readiness)
+
+    assert out["ok"] is True
+    assert fake.leverage_calls == []
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["params"].get("reduceOnly") is True
+
+
+def _venue_executor(exchange_id, td_mode="cross") -> CcxtExecutor:
+    cfg = {
+        "execution": {
+            "exchange": "ccxt",
+            "ccxt_exchange": exchange_id,
+            "simulated_trading": True,
+            "td_mode": td_mode,
+        }
+    }
+    return CcxtExecutor(cfg, Path("."))
+
+
+def test_bybit_open_sets_leverage_with_empty_params(monkeypatch):
+    # Non-OKX venues now sync too. Bybit takes NO extra params: ccxt sets
+    # buyLeverage=sellLeverage internally, and a stray mgnMode would leak
+    # into the raw request.
+    ex = _venue_executor("bybit")
+    fake = _FakeLeverageClient()
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    out = ex.execute(_open_long_readiness(leverage=2))
+
+    assert out["ok"] is True
+    assert fake.leverage_calls == [(2, "BTC/USDT:USDT", {})]
+    assert fake.call_order == ["set_leverage", "create_order"]
+
+
+def test_hyperliquid_open_sets_leverage_with_explicit_margin_mode(monkeypatch):
+    # marginMode MUST be explicit for hyperliquid: ccxt defaults its
+    # set_leverage to cross, the opposite of HermX's isolated default.
+    ex = _venue_executor("hyperliquid", td_mode="isolated")
+    fake = _FakeLeverageClient()
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    readiness = _open_long_readiness(leverage=3)
+    readiness["td_mode"] = "isolated"
+    out = ex.execute(readiness)
+
+    assert out["ok"] is True
+    assert fake.leverage_calls == [(3, "BTC/USDT:USDT", {"marginMode": "isolated"})]
+    assert fake.call_order == ["set_leverage", "create_order"]
+
+
+def test_bitget_isolated_open_sets_leverage_with_hold_side(monkeypatch):
+    # Bitget isolated needs per-side leverage: holdSide derives from the
+    # OPEN leg's target direction. Cross takes no extra params.
+    ex = _venue_executor("bitget", td_mode="isolated")
+    fake = _FakeLeverageClient()
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    readiness = _open_long_readiness(leverage=2)
+    readiness["td_mode"] = "isolated"
+    out = ex.execute(readiness)
+
+    assert out["ok"] is True
+    assert fake.leverage_calls == [(2, "BTC/USDT:USDT", {"holdSide": "long"})]
+
+
+def test_leverage_params_table():
+    # Direct unit coverage of the per-venue params table.
+    lp = CcxtExecutor._leverage_params
+    assert lp("okx", "cross", "long") == {"mgnMode": "cross"}
+    assert lp("okx", "isolated", "short") == {"mgnMode": "isolated"}
+    assert lp("bybit", "isolated", "long") == {}
+    assert lp("binance", "cross", "long") == {}
+    assert lp("bitget", "cross", "long") == {}
+    assert lp("bitget", "isolated", "short") == {"holdSide": "short"}
+    assert lp("gate", "isolated", "long") == {"marginMode": "isolated"}
+    assert lp("gateio", "cross", "long") == {"marginMode": "cross"}
+    assert lp("kucoin", "isolated", "long") == {}
+    assert lp("hyperliquid", "isolated", "long") == {"marginMode": "isolated"}
+    assert lp("hyperliquid", "cross", "long") == {"marginMode": "cross"}
+    # Unknown venue -> safe fallback: ccxt's own default takes over.
+    assert lp("someothervenue", "isolated", "long") == {}
+
+
+def test_set_leverage_skipped_without_capability(monkeypatch):
+    # Client has no `has["setLeverage"]` (nor `.has` at all) -> the sync is a
+    # silent no-op and the order still submits.
+    ex = _executor()
+    fake = _FakeNoLeverageCapabilityClient()
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
+
+    out = ex.execute(_open_long_readiness(leverage=2))
+
+    assert out["ok"] is True
+    assert fake.leverage_calls == []
+    assert len(fake.calls) == 1
+
+
+# ---------------------------------------------------------------------------
 # Item A 1.4 -- sub-minimum order disambiguation (below_instrument_min)
 # ---------------------------------------------------------------------------
 

@@ -575,6 +575,34 @@ class CcxtExecutor(BaseExecutor):
 
         return params
 
+    @staticmethod
+    def _leverage_params(exchange_id: str, td_mode: str, target_side: str) -> dict:
+        """Per-venue params for ``client.set_leverage(lev, symbol, params)``.
+
+        okx         -> {"mgnMode": td_mode}
+        bitget      -> {"holdSide": target_side} when isolated (per-side leverage), else {}
+        gate/gateio -> {"marginMode": td_mode}
+        hyperliquid -> {"marginMode": td_mode} — MUST be explicit: ccxt defaults
+                       hyperliquid's set_leverage to cross, the opposite of HermX's
+                       isolated default, so omitting it would be actively wrong.
+        bybit       -> {} — ccxt sets buyLeverage=sellLeverage internally; a stray
+                       mgnMode would leak into the raw request.
+        binance     -> {}
+        kucoin      -> {} — contract set_leverage is cross-only; isolated raises
+                       NotSupported, absorbed by the caller's fail-open except.
+        coinbase    -> never reached (spot-only; filtered by the ``setLeverage``
+                       capability gate at the call site).
+        anything else -> {} (safe fallback: ccxt's own default takes over, and
+                       fail-open protects against a wrong default).
+        """
+        if exchange_id == "okx":
+            return {"mgnMode": td_mode}
+        if exchange_id == "bitget":
+            return {"holdSide": target_side} if td_mode == "isolated" else {}
+        if exchange_id in ("gate", "gateio", "hyperliquid"):
+            return {"marginMode": td_mode}
+        return {}
+
     def _reference_price(self, client, readiness: dict) -> float | None:
         intent = (readiness or {}).get("execution_intent") or {}
         price = (
@@ -925,6 +953,27 @@ class CcxtExecutor(BaseExecutor):
                             "reason": "insufficient_balance",
                         })
                         continue
+
+                    # Leverage sync: push the strategy's configured leverage to the
+                    # venue before the open — venues otherwise keep whatever leverage
+                    # was last set on the instrument, silently diverging position
+                    # leverage/liquidation price from the strategy config. All
+                    # derivatives venues; per-venue params come from
+                    # _leverage_params() (see its table). Spot-only venues
+                    # (coinbase) are filtered by the setLeverage capability gate.
+                    # Runs in demo AND live (unlike the balance check above: demo
+                    # balances are fake, but demo leverage/margin state is real).
+                    # FAIL OPEN: a set_leverage error must never block the open
+                    # (this also absorbs kucoin's NotSupported for isolated).
+                    lev = _to_float((readiness or {}).get("leverage"), None)
+                    if lev and lev > 0 and (getattr(client, "has", {}) or {}).get("setLeverage"):
+                        if float(lev).is_integer():
+                            lev = int(lev)
+                        td_mode = str((readiness or {}).get("td_mode") or self.execution_cfg.get("td_mode") or "isolated").lower()
+                        try:
+                            client.set_leverage(lev, symbol, params=self._leverage_params(exchange_id, td_mode, target_side))
+                        except Exception as exc:
+                            logger.warning("set_leverage failed (fail-open): %s", redact_secrets(str(exc)))
 
                     open_side = "buy" if target_side == "long" else "sell"
                     params = self._order_params(
