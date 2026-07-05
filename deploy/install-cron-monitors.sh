@@ -175,7 +175,7 @@ ensure_job "hermx-ledger-reconcile" \
 # on the shared .hermx-reconcile.state sidecar. Superseded by the ledger_mismatch and
 # rejected_order conditions in hermx-reconcile-gate.py. Script + tests kept in the repo,
 # unwired (the hermx-risk-watch precedent). NOTE: ensure_job never deletes an existing job —
-# on an already-provisioned host run 'hermes cron delete "hermx-reconcile-lag"' manually.
+# on an already-provisioned host run 'hermes cron remove "hermx-reconcile-lag"' manually.
 
 ensure_job "hermx-signal-late" \
   "\"every 30m\" \"$SIGNAL_LATE_PROMPT\" \

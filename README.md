@@ -62,7 +62,7 @@ The fastest way to get running is to let the **Hermes Agent** guide you interact
 
 ```bash
 curl -fsSL https://hermes-agent.nousresearch.com/install.sh | sh
-hermes provider setup     # Choose your LLM (xAI, OpenAI, Anthropic, Ollama, etc.)
+hermes setup              # Choose your LLM (xAI, OpenAI, Anthropic, Ollama, etc.)
 ```
 
 ### 2. Register HermX and run the guided install

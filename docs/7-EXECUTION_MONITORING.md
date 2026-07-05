@@ -292,7 +292,7 @@ The reserved `stuck_unknown_count` / `ageout_fires` metrics remain TODOs in the 
 script until their `/api` fields and an alert counter exist.
 
 **On an already-provisioned host** the installer never deletes an existing job — run
-`hermes cron delete "hermx-reconcile-lag"` (or pause it) manually.
+`hermes cron remove "hermx-reconcile-lag"` (or pause it) manually.
 
 ### 4.5 `hermx-signal-late` — zero-intake absence detection (every 30 m, gate + LLM)
 

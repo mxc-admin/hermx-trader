@@ -6,7 +6,7 @@
 1. Install Hermes Agent: `curl -fsSL https://hermes-agent.nousresearch.com/install.sh | sh`
 2. Configure your LLM provider:
    ```
-   hermes provider setup
+   hermes setup
    ```
    Follow the prompts — supports xAI/Grok, OpenAI, Anthropic, Ollama, and others.
    You will need an API key for your chosen provider.
@@ -749,7 +749,7 @@ hermes --version
 ```bash
 mkdir -p ~/.hermes
 # Configure your LLM provider (xAI/Grok, OpenAI, Anthropic, Ollama, etc.):
-hermes provider setup
+hermes setup
 # Then add your Telegram values:
 cat >> ~/.hermes/.env <<'EOF'
 TELEGRAM_BOT_TOKEN=123456789:ABC...

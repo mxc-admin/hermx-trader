@@ -581,7 +581,7 @@ if ask "Set up Hermes Agent + Telegram (natural-language operator bot)?" "n"; th
 
   # 2. Provider key (one-time; safe default is manual).
   if ask "Configure a model provider (xAI/OpenAI/Anthropic) for Hermes?" "y"; then
-    hermes provider setup || warn "Provider setup failed or was skipped."
+    hermes setup || warn "Provider setup failed or was skipped."
   fi
 
   # 3. Telegram credentials.
@@ -621,7 +621,7 @@ if ask "Set up Hermes Agent + Telegram (natural-language operator bot)?" "n"; th
       if hermes skills list 2>/dev/null | grep -q "$skill_name"; then
         ok "$skill_name skill registered"
       else
-        warn "$skill_name skill not yet discovered by Hermes. Try: hermes skills refresh"
+        warn "$skill_name skill not yet discovered by Hermes. Try: hermes skills update"
       fi
     done
   else
