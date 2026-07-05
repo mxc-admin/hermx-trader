@@ -91,6 +91,17 @@ def lag_conditions(repo: str, now_ms: int) -> list:
     }]
 
 
+def run(conds, now_epoch):
+    sp = g.state_path("reconcile")
+    state = g.load_state(sp)
+    fresh, new_state = g.evaluate(conds, state, g.WINDOW["reconcile"], now_epoch)
+    for c in fresh:
+        print(c["title"])
+    if fresh:
+        g.save_state(sp, new_state)
+    return fresh
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-agent", action="store_true", help="non-LLM job marker")
@@ -102,7 +113,7 @@ def main() -> None:
     # TODO(P1-2): stuck_unknown_count — consume api['reconcile_health']['stuck_unknown']
     #   once the /api field carries the journal UNKNOWN census.
     # TODO(P1-2): ageout_fires — needs a P0-1 alert counter over the window.
-    g.run_gate("reconcile", conds, now)
+    run(conds, now)
 
 
 if __name__ == "__main__":

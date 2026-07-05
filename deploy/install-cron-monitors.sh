@@ -3,7 +3,7 @@
 #
 # Idempotent. Registers the read-only skills, installs the bridge scripts into the
 # gateway's script dir, ensures the Telegram delivery target, and creates/updates the
-# five monitor cron jobs. Safe to re-run.
+# six monitor cron jobs. Safe to re-run.
 #
 #   bash deploy/install-cron-monitors.sh            # provision + smoke-test
 #   HERMX_CRON_DRY_RUN=1 bash deploy/install-cron-monitors.sh     # print actions only
@@ -30,7 +30,13 @@ WORKDIR="$REPO_ROOT"
 DELIVER="telegram"
 
 READONLY_SKILLS=(hermx-status hermx-positions hermx-trace signal-memory)
-BRIDGE_SCRIPTS=(hermx_gate_lib.py hermx-reconcile-gate.py hermx-health-watch.py hermx-intake-gate.py hermx-ledger-reconcile.py hermx-reconcile-lag-gate.py)
+# hermx-reconcile-lag-gate.py intentionally NOT installed: superseded by the
+# ledger_mismatch/rejected_order conditions inside hermx-reconcile-gate.py (its wall-clock
+# lag threshold was miscalibrated, and its run_gate("reconcile") shared the reconcile
+# sidecar with hermx-reconcile-gate.py — an unlocked read-modify-write race between two
+# independent crons). The script and its tests are kept in the repo but unwired, like
+# hermx-risk-gate.py.
+BRIDGE_SCRIPTS=(hermx_gate_lib.py hermx-reconcile-gate.py hermx-health-watch.py hermx-intake-gate.py hermx-ledger-reconcile.py)
 
 DRY_RUN="${HERMX_CRON_DRY_RUN:-0}"
 DO_SMOKE="${HERMX_CRON_SMOKE:-1}"
@@ -97,7 +103,7 @@ warn "TELEGRAM_CRON_THREAD_ID intentionally NOT set (cron topic deferred)."
 warn "Gateway must be restarted to pick up new env: 'hermes gateway restart' (or your service manager)."
 
 # --------------------------------------------------------------------------- #
-# 5. Create / update the five monitor cron jobs                               #
+# 5. Create / update the six monitor cron jobs                                #
 # --------------------------------------------------------------------------- #
 # Provider/model intentionally NOT pinned (use default; accepts fail-closed skip risk).
 # hermx-risk-watch intentionally OMITTED: its gate keys on `risk_index_gate_enabled`, a flag
@@ -141,7 +147,7 @@ ensure_job "hermx-weekly" \
 ensure_job "hermx-reconcile" \
   "\"every 5m\" \"$RECONCILE_PROMPT\" \
    --script hermx-reconcile-gate.py \
-   --skill hermx-trace --skill hermx-positions \
+   --skill hermx-trace --skill hermx-positions --skill hermx-status \
    --workdir \"$WORKDIR\" --deliver $DELIVER"
 
 ensure_job "hermx-daily" \
@@ -163,14 +169,13 @@ ensure_job "hermx-ledger-reconcile" \
    --script hermx-ledger-reconcile.py \
    --workdir \"$WORKDIR\" --deliver $DELIVER"
 
-# Reconcile-lag observability gate (P1-2). Non-LLM (--no-agent): reads the ledger's
-# newest recorded_at_ms (schema v3) and wakes the operator when now - max(recorded_at_ms)
-# exceeds HERMX_MAX_RECONCILE_LAG_MS (default 20m > this 15m cadence). Fail-open on a
-# missing ledger / unreachable dashboard, like hermx-ledger-reconcile.
-ensure_job "hermx-reconcile-lag" \
-  "\"every 15m\" --no-agent \
-   --script hermx-reconcile-lag-gate.py \
-   --workdir \"$WORKDIR\" --deliver $DELIVER"
+# hermx-reconcile-lag intentionally REMOVED (was: every 15m --no-agent
+# hermx-reconcile-lag-gate.py). Its wall-clock "20m since last close" threshold was
+# miscalibrated (healthy inter-close gaps run to 48h), and it raced hermx-reconcile-gate.py
+# on the shared .hermx-reconcile.state sidecar. Superseded by the ledger_mismatch and
+# rejected_order conditions in hermx-reconcile-gate.py. Script + tests kept in the repo,
+# unwired (the hermx-risk-watch precedent). NOTE: ensure_job never deletes an existing job —
+# on an already-provisioned host run 'hermes cron delete "hermx-reconcile-lag"' manually.
 
 ensure_job "hermx-signal-late" \
   "\"every 30m\" \"$SIGNAL_LATE_PROMPT\" \
@@ -186,7 +191,7 @@ run "hermes -z \"ping\" --skills hermx-status >/dev/null && echo '  hermx-status
 
 if [ "$DO_SMOKE" = "1" ]; then
   say "Firing each job once ('hermes cron run'); inspect ~/.hermes/cron/output/<job_id>/"
-  for name in hermx-weekly hermx-reconcile hermx-daily hermx-health-check hermx-signal-late hermx-ledger-reconcile hermx-reconcile-lag; do
+  for name in hermx-weekly hermx-reconcile hermx-daily hermx-health-check hermx-signal-late hermx-ledger-reconcile; do
     run "hermes cron run \"$name\"" || warn "  'cron run $name' failed — inspect manually"
   done
 else

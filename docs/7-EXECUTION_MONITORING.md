@@ -170,19 +170,20 @@ functions (never a re-implementation of them) and runs in the offline pytest gat
 
 ## 4. The monitor jobs
 
-`deploy/install-cron-monitors.sh` provisions **seven** jobs. Summary, then detail per job:
+`deploy/install-cron-monitors.sh` provisions **six** jobs. Summary, then detail per job:
 
 | Job name | Cadence | Type | Script | Watches |
 |---|---|---|---|---|
 | `hermx-health-check` | every 5 m | `--no-agent` | `hermx-health-watch.py` | receiver/dashboard liveness, kill switch |
-| `hermx-reconcile` | every 5 m | gate + LLM | `hermx-reconcile-gate.py` | reconcile/watchdog alerts, stuck orders |
+| `hermx-reconcile` | every 5 m | gate + LLM | `hermx-reconcile-gate.py` | reconcile/watchdog alerts, stuck orders, ledger mismatches, rejected orders |
 | `hermx-ledger-reconcile` | every 10 m | `--no-agent` | `hermx-ledger-reconcile.py` | drives the P&L ledger reconcile |
-| `hermx-reconcile-lag` | every 15 m | `--no-agent` | `hermx-reconcile-lag-gate.py` | ledger feed staleness |
 | `hermx-signal-late` | every 30 m | gate + LLM | `hermx-intake-gate.py` | zero TradingView intake (absence) |
 | `hermx-daily` | 08:00 UTC | LLM | — | daily operator digest |
 | `hermx-weekly` | Mon 09:00 UTC | LLM | — | weekly operator summary |
 
-One job was specified and deliberately **removed** — `hermx-risk-watch` (§4.8).
+Two jobs are deliberately **not installed**: `hermx-risk-watch`, specified but cut before it
+ever shipped (§4.8), and `hermx-reconcile-lag`, retired in favor of the
+ledger-mismatch/rejected-order conditions inside `hermx-reconcile` (§4.4).
 
 ### 4.1 `hermx-health-check` — process liveness (every 5 m, `--no-agent`, $0)
 
@@ -205,7 +206,7 @@ condition, so this monitor cannot go inert by a missing dependency.
 
 ### 4.2 `hermx-reconcile` — reconcile/watchdog conditions (every 5 m, gate + LLM)
 
-`hermx-reconcile-gate.py` derives two families of conditions:
+`hermx-reconcile-gate.py` derives four families of conditions:
 
 - **Alert rows:** `logs/alerts.jsonl` rows with `kind ∈ {reconcile, state, operator}`,
   severity ≥ `warning`, within the lookback (`HERMX_RECONCILE_LOOKBACK_SECONDS`, default = the
@@ -217,15 +218,44 @@ condition, so this monitor cannot go inert by a missing dependency.
   `reconcile:stuck_order:{cl_ord_id}` (warning), with a `/hx-troubleshoot` hint in the title.
   An unreachable dashboard yields nothing (fail-open — reachability is the health watchdog's
   job; never a false all-clear on trading state).
+- **Ledger mismatch:** a strategy's most recent *close-implying* intake signal (an
+  `action == "close"` payload, or a buy/sell that flips the strategy's running side —
+  every signal implies `CLOSE_OPPOSITE_IF_ANY` per `strategy/readiness.py`) resulted in a
+  `FILLED` order at the venue, yet no matching `closed-trades.jsonl` row exists →
+  `reconcile:ledger_mismatch:{strategy_id}` (warning). Correlation is file-only, no `src/`
+  imports: signal → cl_ord_ids via the submit-time map `cl-ord-strategy-map.jsonl`,
+  cl_ord_id → terminal state via the live order-journal segment
+  (`logs/order-journal.jsonl`), cl_ord_id/strategy → ledger row via `closed-trades.jsonl`.
+  It fires only past a grace window (`HERMX_LEDGER_MISMATCH_GRACE_SECONDS`, default
+  1800 s). The grace is bounded by the system's **own order-resolution ceiling** —
+  `UNKNOWN_RESOLVER_ORDER_TIMEOUT_SECONDS` (900 s) plus one `hermx-ledger-reconcile` tick
+  (600 s) plus buffer — *not* by a market-activity estimate (that mistake is what
+  miscalibrated the retired `hermx-reconcile-lag` gate, §4.4). A signal whose order ended
+  `REJECTED` is skipped (the rejected-order family owns it); no terminal state yet is
+  skipped (still resolving, or already surfaced as a stuck order).
+- **Rejected orders:** live order-journal rows with terminal `state == "REJECTED"` within
+  the lookback → `reconcile:rejected_order:{cl_ord_id}` (warning). This closes a genuine
+  gap: a rejected close/flip leg leaves the position open, and nothing else alerts on it —
+  the periodic unknown-resolver journals a `REJECTED` resolution silently, and
+  `reconcile_position_drift` is unwired code.
 
-Fresh conditions wake an LLM agent (skills: `hermx-trace`, `hermx-positions`) that traces the
-affected signal end-to-end, confirms current exposure, and either reports a short operator
-summary or replies `[SILENT]` if the condition is already resolved — the second-opinion layer
-that pure threshold monitors don't have.
+Both journal-reading families scan only the **live** segment via the tolerant line reader.
+Segment rotation seals the live file after 1000 records — orders of magnitude beyond what a
+30–60 min window produces at HermX signal cadence — and a record missed to rotation degrades
+to no alert (fail-open, consistent with the gate's read-gap posture elsewhere), never a
+false one.
 
-**Failure mode:** this gate is a *presence* detector over `alerts.jsonl` — it can only surface
-what the receiver actually emits. Failures the receiver logs but never alerts on (e.g. a clean
-`REJECTED` order) are invisible to it; see `MONITORING_GAPS_BRAINSTORM.md` Scenario E.
+Fresh conditions wake an LLM agent (skills: `hermx-trace`, `hermx-positions`,
+`hermx-status`) that traces the affected signal end-to-end, confirms current exposure and
+trading/arm state, and either reports a short operator summary or replies `[SILENT]` if the
+condition is already resolved — the second-opinion layer that pure threshold monitors don't
+have.
+
+**Failure mode:** the alert-row family is a *presence* detector over `alerts.jsonl` — it can
+only surface what the receiver actually emits. The ledger-mismatch and rejected-order
+families close the previously documented clean-`REJECTED` blind spot
+(`MONITORING_GAPS_BRAINSTORM.md` Scenario E) by reading the order journal directly; what
+remains invisible is anything that never reaches the WAL, journal, or alerts ledger at all.
 
 ### 4.3 `hermx-ledger-reconcile` — P&L ledger safety net (every 10 m, `--no-agent`)
 
@@ -239,14 +269,30 @@ Unreachable dashboard → prints a JSON status line and exits 0 (fail-open). Dis
 LLM `hermx-reconcile` watchdog and the receiver's `HERMX_RECONCILE_ENABLED` post-submit
 reconcile.
 
-### 4.4 `hermx-reconcile-lag` — ledger feed staleness (every 15 m, `--no-agent`)
+### 4.4 Retired: `hermx-reconcile-lag` — superseded by the §4.2 conditions
 
-`hermx-reconcile-lag-gate.py` reads `closed-trades.jsonl` (corrupt-tolerant), takes
-`max(recorded_at_ms)` across schema-v3 rows, and emits one `reconcile:lag` condition (warning)
-when `now − max(recorded_at_ms)` exceeds `HERMX_MAX_RECONCILE_LAG_MS` (default 20 min — greater
-than its own 15 min cadence, so a single missed run cannot trip it). No v3 rows yet, or a missing
-ledger → nothing to measure → no wake. Two further metrics (`stuck_unknown_count`,
-`ageout_fires`) are reserved as TODOs until the `/api` fields and an alert counter exist.
+`hermx-reconcile-lag-gate.py` read `closed-trades.jsonl`, took `max(recorded_at_ms)` across
+schema-v3 rows, and emitted one `reconcile:lag` condition when the newest row was more than
+`HERMX_MAX_RECONCILE_LAG_MS` (20 min) behind wall-clock. It was **retired from the
+installer** for two reasons:
+
+1. **Miscalibrated threshold.** "Time since the last close" measures market activity, not
+   pipeline health — real intake data shows healthy inter-close gaps up to 48 h, so a
+   20-minute wall-clock threshold pages on quiet markets and says nothing about whether a
+   close that *did* happen was ledgered.
+2. **Sidecar race.** Its `run_gate("reconcile", …)` shared the `.hermx-reconcile.state`
+   sidecar with `hermx-reconcile-gate.py` — an unlocked read-modify-write race between two
+   independent crons (5 m and 15 m ticks) that could drop or resurrect suppression entries.
+
+Both genuine failure modes it gestured at are now detected precisely by the
+`ledger_mismatch` and `rejected_order` conditions inside `hermx-reconcile-gate.py` (§4.2) —
+one job, one sidecar owner, so the race is gone by construction. Per the `hermx-risk-watch`
+precedent (§4.8), the script and its tests are kept in the repo but deliberately unwired.
+The reserved `stuck_unknown_count` / `ageout_fires` metrics remain TODOs in the unwired
+script until their `/api` fields and an alert counter exist.
+
+**On an already-provisioned host** the installer never deletes an existing job — run
+`hermes cron delete "hermx-reconcile-lag"` (or pause it) manually.
 
 ### 4.5 `hermx-signal-late` — zero-intake absence detection (every 30 m, gate + LLM)
 
@@ -328,7 +374,7 @@ job.**
 > **Current state (known deviation):** `deploy/install-cron-monitors.sh` does **not** yet pin
 > provider/model on the four LLM jobs (`hermx-weekly`, `hermx-reconcile`, `hermx-daily`,
 > `hermx-signal-late`) — the installer comment explicitly accepts the fail-closed-skip risk.
-> This contradicts the rule above and is an open follow-up (§8). The three `--no-agent` jobs
+> This contradicts the rule above and is an open follow-up (§8). The two `--no-agent` jobs
 > never invoke a model, so no pin applies to them.
 
 **Cost control** is layered so LLM spend stays rare even at 5-minute cadences: the `wakeAgent`
@@ -352,7 +398,7 @@ Idempotent; safe to re-run. Steps:
 3. **Ensure gateway env** — `TELEGRAM_HOME_CHANNEL` (operator DM) and `HERMX_DATA_DIR` (the repo
    path) in `~/.hermes/.env`; existing values are left as-is. The gateway must be restarted to
    pick up new env.
-4. **Create/update the seven jobs** by name (`ensure_job`). Two modes:
+4. **Create/update the six jobs** by name (`ensure_job`). Two modes:
    - **default** (human-run): create missing jobs; `hermes cron edit` existing ones to enforce
      the checked-in definition.
    - **`HERMX_CRON_CREATE_ONLY=1`** (used by `deploy/deploy.sh` on every upgrade): create
@@ -382,8 +428,10 @@ condition can actually occur.
 - Never hand-edit `~/.hermes/cron/jobs.json` — it is an atomic-write file owned by the
   scheduler; use the CLI/chat surfaces.
 - Tuning knobs are env vars read by the scripts at run time: `HERMX_INTAKE_MAX_AGE_SECONDS`,
-  `HERMX_MAX_RECONCILE_LAG_MS`, `HERMX_RECONCILE_LOOKBACK_SECONDS`, `HERMX_LIVE_TRADING`,
-  `HERMX_HEALTH_REQUIRE_ARMED`, `HERMX_SCRIPTS_DIR` (sidecar location, used by tests).
+  `HERMX_RECONCILE_LOOKBACK_SECONDS`, `HERMX_LEDGER_MISMATCH_GRACE_SECONDS`,
+  `HERMX_LIVE_TRADING`, `HERMX_HEALTH_REQUIRE_ARMED`, `HERMX_SCRIPTS_DIR` (sidecar location,
+  used by tests). (`HERMX_MAX_RECONCILE_LAG_MS` belonged to the retired reconcile-lag gate,
+  §4.4.)
 
 ---
 
@@ -434,12 +482,14 @@ condition can actually occur.
    installed. Mitigation today: the gateway runs as a managed, auto-restarting service.
 4. **Presence-detector gaps.** The most dangerous uncovered failure modes are catalogued in
    `docs/MONITORING_GAPS_BRAINSTORM.md`: position drift (strategy-expected vs exchange-actual —
-   undetected on the live path), clean order rejections (journaled but never alerted),
-   per-strategy frequency baselines (un-trainable until enough history accrues), sustained
-   exchange read outages (current-read only, no consecutive-failure escalation), and stale
-   pauses. Each maps to a new gate script or a small producer change.
+   undetected on the live path; the rejected-order condition in §4.2 now covers the
+   rejected-close slice of it), per-strategy frequency baselines (un-trainable until enough
+   history accrues), sustained exchange read outages (current-read only, no
+   consecutive-failure escalation), and stale pauses. Clean order rejections — formerly
+   Scenario E — are now covered by §4.2's `rejected_order` condition. Each remaining gap maps
+   to a new gate script or a small producer change.
 5. **Reserved reconcile-lag metrics.** `stuck_unknown_count` and `ageout_fires` in the
-   reconcile-lag gate await their `/api` fields and an alert counter (§4.4).
+   retired reconcile-lag gate script await their `/api` fields and an alert counter (§4.4).
 6. **Digest jobs are unconditional LLM spend.** `hermx-daily`/`hermx-weekly` always run their
    agent (by design — a digest that only appears on change is not a digest), so they are the
    jobs most exposed to limitation 1.

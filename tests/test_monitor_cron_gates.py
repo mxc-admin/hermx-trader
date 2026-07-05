@@ -40,6 +40,8 @@ reconcile = _load("hermx_reconcile_gate", "hermx-reconcile-gate.py")
 risk = _load("hermx_risk_gate", "hermx-risk-gate.py")
 health = _load("hermx_health_watch", "hermx-health-watch.py")
 intake = _load("hermx_intake_gate", "hermx-intake-gate.py")
+ledger = _load("hermx_ledger_reconcile", "hermx-ledger-reconcile.py")
+lag = _load("hermx_reconcile_lag_gate", "hermx-reconcile-lag-gate.py")
 
 
 # --------------------------------------------------------------------------- #
@@ -236,6 +238,174 @@ def test_reconcile_gate_end_to_end_wake_then_sleep(monkeypatch, tmp_path):
 
     second = g.run_gate("reconcile", conds, NOW + 100)  # inside window
     assert second["wakeAgent"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Reconcile gate: ledger-mismatch + rejected-order conditions                  #
+# --------------------------------------------------------------------------- #
+def _write_intake_wal(tmp_path, rows):
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    text = "".join(json.dumps(r) + "\n" for r in rows)
+    (tmp_path / "logs" / "raw-webhooks.jsonl").write_text(text)
+
+
+def _intake(now_offset, strategy_id, side=None, action=None):
+    payload = {"strategy_id": strategy_id}
+    if side is not None:
+        payload["side"] = side
+    if action is not None:
+        payload["action"] = action
+    return {"phase": "intake", "received_at": _iso(NOW + now_offset), "payload": payload}
+
+
+def _write_journal(tmp_path, rows):
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    text = "".join(json.dumps(r) + "\n" for r in rows)
+    (tmp_path / "logs" / "order-journal.jsonl").write_text(text)
+
+
+def _write_submit_map(tmp_path, rows):
+    text = "".join(json.dumps(r) + "\n" for r in rows)
+    (tmp_path / "cl-ord-strategy-map.jsonl").write_text(text)
+
+
+def _write_trades(tmp_path, rows):
+    text = "".join(json.dumps(r) + "\n" for r in rows)
+    (tmp_path / "closed-trades.jsonl").write_text(text)
+
+
+def _flip_fixture(tmp_path, journal_state="FILLED"):
+    """buy at NOW-7200, sell flip at NOW-3600 (close-implying, past the 1800s grace),
+    submit-map entry + journal terminal state for the flip's order, no ledger row."""
+    _write_intake_wal(tmp_path, [
+        _intake(-7200, "s1", side="buy"),
+        _intake(-3600, "s1", side="sell"),
+    ])
+    _write_submit_map(tmp_path, [
+        {"cl_ord_id": "c2", "strategy_id": "s1", "ts_ms": int((NOW - 3600 + 2) * 1000)},
+    ])
+    _write_journal(tmp_path, [
+        {"seq": 1, "ts": _iso(NOW - 3600 + 3), "cl_ord_id": "c2", "state": "SUBMITTED",
+         "prev_state": "PLANNED", "intent": {"symbol": "BTCUSDT", "side": "sell"}},
+        {"seq": 2, "ts": _iso(NOW - 3600 + 5), "cl_ord_id": "c2", "state": journal_state,
+         "prev_state": "SUBMITTED", "intent": {"symbol": "BTCUSDT", "side": "sell"}},
+    ])
+
+
+def test_ledger_mismatch_missing_wal_fail_open(tmp_path):
+    assert reconcile.ledger_mismatch_conditions(hermx_ops, str(tmp_path), NOW) == []
+
+
+def test_ledger_mismatch_no_submit_map_fail_open(tmp_path):
+    _write_intake_wal(tmp_path, [
+        _intake(-7200, "s1", side="buy"),
+        _intake(-3600, "s1", side="sell"),
+    ])
+    assert reconcile.ledger_mismatch_conditions(hermx_ops, str(tmp_path), NOW) == []
+
+
+def test_ledger_mismatch_no_journal_fail_open(tmp_path):
+    # Candidates exist but no journal → no terminal state → skip (still resolving).
+    _write_intake_wal(tmp_path, [
+        _intake(-7200, "s1", side="buy"),
+        _intake(-3600, "s1", side="sell"),
+    ])
+    _write_submit_map(tmp_path, [
+        {"cl_ord_id": "c2", "strategy_id": "s1", "ts_ms": int((NOW - 3600 + 2) * 1000)},
+    ])
+    assert reconcile.ledger_mismatch_conditions(hermx_ops, str(tmp_path), NOW) == []
+
+
+def test_ledger_mismatch_fires_on_filled_no_ledger_row_past_grace(tmp_path):
+    _flip_fixture(tmp_path, journal_state="FILLED")
+    conds = reconcile.ledger_mismatch_conditions(hermx_ops, str(tmp_path), NOW)
+    assert [c["fingerprint"] for c in conds] == ["reconcile:ledger_mismatch:s1"]
+    (c,) = conds
+    assert c["severity"] == "warning"
+    assert c["title"] == "ledger mismatch: s1 closed at venue, missing from ledger"
+    assert c["detail"]["strategy_id"] == "s1"
+    assert c["detail"]["cl_ord_id"] == "c2"
+    assert c["detail"]["signal_received_at"] == _iso(NOW - 3600)
+    assert c["detail"]["grace_seconds"] == 1800.0
+
+
+def test_ledger_mismatch_skips_rejected_order(tmp_path):
+    # REJECTED is owned by rejected_order_conditions, not the mismatch gate.
+    _flip_fixture(tmp_path, journal_state="REJECTED")
+    assert reconcile.ledger_mismatch_conditions(hermx_ops, str(tmp_path), NOW) == []
+
+
+def test_ledger_mismatch_silent_within_grace(tmp_path):
+    # Close-implying `action=="close"` signal only 600s old (< 1800s grace) → no alert.
+    _write_intake_wal(tmp_path, [
+        _intake(-7200, "s1", side="buy"),
+        _intake(-600, "s1", action="close"),
+    ])
+    _write_submit_map(tmp_path, [
+        {"cl_ord_id": "c2", "strategy_id": "s1", "ts_ms": int((NOW - 600 + 2) * 1000)},
+    ])
+    _write_journal(tmp_path, [
+        {"seq": 1, "ts": _iso(NOW - 600 + 5), "cl_ord_id": "c2", "state": "FILLED",
+         "prev_state": "SUBMITTED", "intent": {"symbol": "BTCUSDT", "side": "sell"}},
+    ])
+    assert reconcile.ledger_mismatch_conditions(hermx_ops, str(tmp_path), NOW) == []
+
+
+def test_ledger_mismatch_satisfied_by_ledger_row(tmp_path):
+    _flip_fixture(tmp_path, journal_state="FILLED")
+    _write_trades(tmp_path, [
+        {"cl_ord_id": "c2", "strategy_id": "s1",
+         "recorded_at_ms": int((NOW - 3600 + 60) * 1000)},
+    ])
+    assert reconcile.ledger_mismatch_conditions(hermx_ops, str(tmp_path), NOW) == []
+
+
+def test_rejected_order_missing_journal_fail_open(tmp_path):
+    assert reconcile.rejected_order_conditions(hermx_ops, str(tmp_path), NOW) == []
+
+
+def test_rejected_order_fires_within_lookback(tmp_path):
+    _write_journal(tmp_path, [
+        {"seq": 1, "ts": _iso(NOW - 20), "cl_ord_id": "c9", "state": "SUBMITTED",
+         "prev_state": "PLANNED", "intent": {"symbol": "BTCUSDT", "side": "sell"}},
+        {"seq": 2, "ts": _iso(NOW - 10), "cl_ord_id": "c9", "state": "REJECTED",
+         "prev_state": "SUBMITTED", "intent": {"symbol": "BTCUSDT", "side": "sell"}},
+    ])
+    conds = reconcile.rejected_order_conditions(hermx_ops, str(tmp_path), NOW)
+    assert [c["fingerprint"] for c in conds] == ["reconcile:rejected_order:c9"]
+    (c,) = conds
+    assert c["severity"] == "warning"
+    assert c["title"] == "order rejected: c9 -- position may still be open"
+    assert c["detail"] == {"cl_ord_id": "c9", "symbol": "BTCUSDT", "side": "sell",
+                           "prev_state": "SUBMITTED"}
+
+
+def test_rejected_order_stale_row_excluded(tmp_path):
+    _write_journal(tmp_path, [
+        {"seq": 1, "ts": _iso(NOW - 5000), "cl_ord_id": "c9", "state": "REJECTED",
+         "prev_state": "SUBMITTED", "intent": {}},
+    ])
+    assert reconcile.rejected_order_conditions(hermx_ops, str(tmp_path), NOW) == []
+
+
+def test_collect_includes_new_condition_families(monkeypatch, tmp_path):
+    # One rejected order + one ledger mismatch, empty alerts/api → both surface
+    # through collect() alongside the existing families.
+    _flip_fixture(tmp_path, journal_state="FILLED")
+    _write_journal(tmp_path, [
+        {"seq": 1, "ts": _iso(NOW - 3600 + 3), "cl_ord_id": "c2", "state": "SUBMITTED",
+         "prev_state": "PLANNED", "intent": {"symbol": "BTCUSDT", "side": "sell"}},
+        {"seq": 2, "ts": _iso(NOW - 3600 + 5), "cl_ord_id": "c2", "state": "FILLED",
+         "prev_state": "SUBMITTED", "intent": {"symbol": "BTCUSDT", "side": "sell"}},
+        {"seq": 3, "ts": _iso(NOW - 10), "cl_ord_id": "c9", "state": "REJECTED",
+         "prev_state": "SUBMITTED", "intent": {"symbol": "ETHUSDT", "side": "buy"}},
+    ])
+    _install_urlopen(monkeypatch, {"/api": {"open_orders": {"rows": []}}})
+    conds = reconcile.collect(hermx_ops, str(tmp_path), NOW)
+    assert [c["fingerprint"] for c in conds] == [
+        "reconcile:ledger_mismatch:s1",
+        "reconcile:rejected_order:c9",
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -538,6 +708,67 @@ def test_intake_gate_end_to_end_wake_then_sleep(monkeypatch, tmp_path):
 
     second = g.run_gate("signal_late", conds, NOW + 100)  # inside 3600s window
     assert second["wakeAgent"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Ledger reconcile (no-agent): stdout contract                                 #
+# --------------------------------------------------------------------------- #
+def test_ledger_reconcile_success_silent(monkeypatch, capsys):
+    _install_urlopen(monkeypatch, {"/api": {
+        "strategies": [{"venue": "okx", "okx_account_source": "demo"}],
+        "generated_at": _iso(NOW),
+    }})
+    monkeypatch.setattr(ledger.g, "import_hermx_ops", lambda: hermx_ops)
+    assert ledger.main() == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_ledger_reconcile_unreachable_prints_error(monkeypatch, capsys):
+    _install_urlopen(monkeypatch, {"/api": urllib.error.URLError("down")})
+    monkeypatch.setattr(ledger.g, "import_hermx_ops", lambda: hermx_ops)
+    assert ledger.main() == 0
+    out = capsys.readouterr().out
+    assert out != ""
+    payload = json.loads(out)
+    assert payload["ok"] is False
+    assert payload["reconciled"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Reconcile-lag gate (no-agent): stdout contract + suppression                 #
+# --------------------------------------------------------------------------- #
+def _write_ledger(tmp_path, recorded_at_ms):
+    (tmp_path / "closed-trades.jsonl").write_text(
+        json.dumps({"recorded_at_ms": recorded_at_ms}) + "\n")
+
+
+def test_reconcile_lag_no_lag_silent(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMX_SCRIPTS_DIR", str(tmp_path))
+    now_ms = int(NOW * 1000)
+    _write_ledger(tmp_path, now_ms - 60_000)  # 1m old, well inside the 20m threshold
+
+    conds = lag.lag_conditions(str(tmp_path), now_ms)
+    assert conds == []
+    assert lag.run(conds, NOW) == []
+    assert capsys.readouterr().out == ""
+    assert not (tmp_path / ".hermx-reconcile.state").exists()
+
+
+def test_reconcile_lag_condition_prints_and_suppresses(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMX_SCRIPTS_DIR", str(tmp_path))
+    now_ms = int(NOW * 1000)
+    _write_ledger(tmp_path, now_ms - 30 * 60 * 1000)  # 30m > 20m default threshold
+    conds = lag.lag_conditions(str(tmp_path), now_ms)
+
+    fresh = lag.run(conds, NOW)
+    assert [c["fingerprint"] for c in fresh] == ["reconcile:lag"]
+    out = capsys.readouterr().out.splitlines()
+    assert out.count("reconcile lag exceeds threshold") == 1
+    assert (tmp_path / ".hermx-reconcile.state").exists()
+
+    # Second tick inside the 1800s window: silent (no flood).
+    assert lag.run(conds, NOW + 100) == []
+    assert capsys.readouterr().out == ""
 
 
 # --------------------------------------------------------------------------- #

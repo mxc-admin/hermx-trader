@@ -46,18 +46,6 @@ def main() -> int:
         # concern, never a false trading-state signal here.
         print(json.dumps({"ok": False, "reconciled": False, "reason": err or "no_api"}))
         return 0
-    strategies = api.get("strategies") or []
-    envs = sorted({
-        f"{s.get('venue')}:{s.get('okx_account_source')}"
-        for s in strategies if isinstance(s, dict)
-    })
-    print(json.dumps({
-        "ok": True,
-        "reconciled": True,
-        "strategies": len(strategies),
-        "environments": envs,
-        "generated_at": api.get("generated_at"),
-    }))
     return 0
 
 
