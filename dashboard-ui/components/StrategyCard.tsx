@@ -2,7 +2,7 @@
 import type { CSSProperties } from 'react'
 import { useState, useCallback } from 'react'
 import type { Strategy, LivePosition } from '../lib/types'
-import { money, num, sideColor, sideKind } from '../lib/format'
+import { money, num, pct, sideColor, sideKind } from '../lib/format'
 import { Badge } from './Badge'
 import { setStrategyMode } from '../lib/api'
 
@@ -100,6 +100,35 @@ export function StrategyCard({ strategy, position, alertCount, liveEnabled, onMo
   const realized = position?.realized_pnl ?? 0
   const upl = position?.upl ?? 0
   const equityNow = budget + realized + upl
+
+  // Durable per-strategy P&L (Phase 4). Prefer it over the local position-derived
+  // calc so the Equity tile and the Performance % read from one source and never
+  // disagree in production.
+  const pnl = strategy.strategy_pnl
+  const closes = pnl?.trade_count ?? 0
+  // Equity now: read the durable value; fall back to the local formula only when
+  // strategy_pnl is entirely absent.
+  const equityNowDisplay = pnl ? pnl.equity_now_usd : equityNow
+  // UPnL %: numerator is the displayed dollar upl; denominator is capital-at-risk
+  // (equity_now - upl = budget + closed_net), NOT seed budget — reinvest=true
+  // overstates seed by ~2x. Fall back to local budget only when strategy_pnl is
+  // absent; suppress (null) when the denominator is <= 0 so we never emit NaN/Inf.
+  const capitalAtRisk = pnl ? (pnl.equity_now_usd ?? 0) - (pnl.upl ?? 0) : budget
+  const uplPct = capitalAtRisk > 0 ? (upl / capitalAtRisk) * 100 : null
+  // Performance: growth of durable equity over seed budget, sourced from
+  // strategy_pnl (same source as the Equity tile). Guard divide-by-zero.
+  const perfPct =
+    pnl && (pnl.budget_usd ?? 0) > 0 && pnl.equity_now_usd !== undefined
+      ? ((pnl.equity_now_usd - (pnl.budget_usd ?? 0)) / (pnl.budget_usd ?? 0)) * 100
+      : null
+  const perfColor =
+    perfPct === null
+      ? undefined
+      : perfPct > 0
+        ? 'var(--positive)'
+        : perfPct < 0
+          ? 'var(--negative)'
+          : 'var(--text-muted)'
 
   const logo = `https://assets.coincap.io/assets/icons/${sym
     .replace(/USDT?$/i, '')
@@ -206,14 +235,17 @@ export function StrategyCard({ strategy, position, alertCount, liveEnabled, onMo
         }}
       >
         <Metric label="Budget" value={money(budget, 0)} />
-        <Metric label="Equity now" value={money(equityNow, 2)} />
+        <Metric label="Equity now" value={money(equityNowDisplay, 2)} />
         <Metric
           label="UPnL"
-          value={`${upl > 0 ? '+' : ''}${money(upl, 2)}`}
+          value={`${upl > 0 ? '+' : ''}${money(upl, 2)}${
+            uplPct !== null ? ` (${pct(uplPct)})` : ''
+          }`}
           color={uplColor}
         />
         <Metric label="Mark price" value={num(position?.last, 4)} />
-        <Metric label="Alerts" value={String(alertCount)} />
+        <Metric label="Alerts | Closes" value={`${alertCount} | ${closes}`} />
+        <Metric label="Performance" value={pct(perfPct)} color={perfColor} />
       </div>
     </section>
   )
