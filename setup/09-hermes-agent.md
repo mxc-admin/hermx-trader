@@ -141,6 +141,45 @@ needed — ideal on a VPS.
 > **Money-safety must:** always set the `*_ALLOWED_USERS` allowlist to *only you*. Without
 > it the gateway denies all (safe default); never allow-all on a trading agent.
 
+4. **Surface the `hx-*` commands in the Telegram `/` menu (optional).** By default the
+   `hx-*` skill commands do **not** show in the `/` menu. Hermes registers its ~50
+   built-in commands first and ranks skill commands below them, so at the default
+   `max_commands: 60` cap they fall into the hidden overflow — they still work when typed,
+   but aren't discoverable. Note the name transform: skill `hx-status` becomes the Telegram
+   command **`/hx_status`** (hyphens become underscores).
+
+   To pin the operator commands into the visible menu, add to `~/.hermes/config.yaml`:
+
+   ```yaml
+   platforms:
+     telegram:
+       extra:
+         command_menu:
+           # 100 (Telegram's max) is required here: skill commands rank below the
+           # built-ins, so the default 60 leaves no room for them in the menu.
+           max_commands: 100
+           priority_mode: prepend   # our commands first, then Hermes' built-ins
+           priority:
+             - hx-status
+             - hx-positions
+             - hx-strategy-list
+             - hx-strategy-mode
+             - hx-strategy
+             - hx-trace
+             - hx-tv-alerts
+             - hx-close
+             - hx-emergency-stop
+             - hx-restart
+             - hx-upgrade
+             - hx-exchange
+             - hx-troubleshoot
+             - hx-help
+             - hermx-control
+   ```
+
+   Then `hermes gateway restart`. Verify with `/commands` in the bot (or the Telegram
+   `getMyCommands` API); the registered commands are `/hx_status`, `/hx_positions`, etc.
+
 ## Pre-execution advisor (in-loop veto) — OPTIONAL, default OFF
 
 Independent of the Hermes runtime above, the **receiver** can consult an LLM as a

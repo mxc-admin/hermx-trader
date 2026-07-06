@@ -815,6 +815,12 @@ guarded loopback mutations) and speak the contract in
 `skills/hermx-ops/references/api-contract.md`. Full command reference:
 `skills/hx-help/SKILL.md`.
 
+> **Telegram note:** in the Telegram gateway these commands appear with **underscores**
+> (`/hx_status`, `/hx_positions`, …) since Telegram forbids hyphens, and by default they are
+> **not** shown in the `/` menu (Hermes ranks built-ins ahead of skill commands under its
+> menu cap). To surface them, add the `command_menu` block from
+> [`setup/09-hermes-agent.md`](setup/09-hermes-agent.md) and restart the gateway.
+
 ### 6.5 Start the Telegram gateway
 
 ```bash
