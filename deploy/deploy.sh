@@ -35,6 +35,7 @@
 #   bash deploy/deploy.sh --no-pull   # zero git network: skip self-update + pull (pip STILL runs)
 #   bash deploy/deploy.sh --no-tests  # skip pytest (hotfix only)
 #   bash deploy/deploy.sh --no-ui     # skip React build (UI unchanged)
+#   bash deploy/deploy.sh --check-drift-only  # report un-pulled local drift (exit 3 if any) then exit; no venv/network
 set -euo pipefail
 
 # Repo root is the parent of deploy/
@@ -98,7 +99,9 @@ err()    { printf '  %sx%s %s\n' "$RED" "$RESET" "$1"; }
 # lives in an `if`, never a bare failing test.
 SELF_UPDATE=true
 for _arg in "$@"; do
-  if [[ "$_arg" == "--no-pull" ]]; then SELF_UPDATE=false; break; fi
+  # --check-drift-only is a read-only probe: it must never trigger a network
+  # fetch/re-exec either, so it suppresses self-update exactly like --no-pull.
+  if [[ "$_arg" == "--no-pull" || "$_arg" == "--check-drift-only" ]]; then SELF_UPDATE=false; break; fi
 done
 if [[ "${HERMX_DEPLOY_REEXECED:-}" != "1" && "$SELF_UPDATE" == true ]]; then
   if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -135,27 +138,64 @@ if [[ "${HERMX_DEPLOY_REEXECED:-}" != "1" && "$SELF_UPDATE" == true ]]; then
   fi
 fi
 
-NO_PULL=false; NO_TESTS=false; NO_UI=false
+NO_PULL=false; NO_TESTS=false; NO_UI=false; CHECK_DRIFT_ONLY=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --no-pull)  NO_PULL=true; shift ;;
-    --no-tests) NO_TESTS=true; shift ;;
-    --no-ui)    NO_UI=true; shift ;;
-    -h|--help)  sed -n '/^# Usage:/,/--no-ui/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --no-pull)          NO_PULL=true; shift ;;
+    --no-tests)         NO_TESTS=true; shift ;;
+    --no-ui)            NO_UI=true; shift ;;
+    --check-drift-only) CHECK_DRIFT_ONLY=true; shift ;;
+    -h|--help)  sed -n '/^# Usage:/,/--check-drift-only/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)          err "Unknown argument: $1"; exit 2 ;;
   esac
 done
+
+# Operator-editable, git-TRACKED config. These conflict on pull and must be
+# restored after a hard reset on rollback. control-state.json is gitignored, so
+# it is NOT here (it never conflicts and must never be reverted).
+# Defined BEFORE the venv check so the drift probe below can run on a host that
+# has no .venv yet (the --check-drift-only path must not require Python).
+CONFIG_PATHS=(engine-config.json strategies config)
+
+# --- Drift detection -----------------------------------------------------------
+# "Drift" = tracked, non-config files that differ from HEAD in the working tree.
+# It matters because a failed deploy rolls back with `git reset --hard START_SHA`,
+# which would DESTROY such local edits. Operator config (CONFIG_PATHS) and the
+# live P&L ledger (closed-trades.jsonl) are exempt: config is snapshotted+restored
+# across rollback, and the ledger is handled by its own untrack migration.
+detect_drift() {
+  # `git diff --name-only HEAD` = staged+unstaged changes vs HEAD (not untracked).
+  # The unquoted $(printf ...) is intentional word-splitting to expand one
+  # ':(exclude)<path>' pathspec per CONFIG_PATHS entry. `|| true` keeps set -e
+  # happy (a non-repo / no-diff still returns empty, never aborts the deploy).
+  git diff --name-only HEAD -- . $(printf ':(exclude)%s ' "${CONFIG_PATHS[@]}") ':(exclude)closed-trades.jsonl' 2>/dev/null || true
+}
+
+print_drift() {
+  # Space-tolerant line-by-line print of a newline-delimited drift list.
+  while IFS= read -r _line; do [[ -n "$_line" ]] && printf '  %s\n' "$_line"; done <<< "$1"
+}
+
+# --check-drift-only: read-only probe. Report drift and exit 3; else exit 0.
+# Runs BEFORE the venv check on purpose — it needs neither Python nor network.
+if [[ "$CHECK_DRIFT_ONLY" == true ]]; then
+  _drift="$(detect_drift)"
+  if [[ -n "$_drift" ]]; then
+    err "Local drift detected — tracked non-config files differ from HEAD:"
+    print_drift "$_drift"
+    err "A deploy would refuse this (rollback resets to HEAD and would destroy the edits)."
+    err "Commit or revert them, then retry."
+    exit 3
+  fi
+  ok "No drift"
+  exit 0
+fi
 
 PIP="$ROOT/.venv/bin/pip"
 PYTHON="$ROOT/.venv/bin/python"
 if [[ ! -x "$PIP" || ! -x "$PYTHON" ]]; then
   err "venv missing at $ROOT/.venv — create it first (python -m venv .venv)"; exit 1
 fi
-
-# Operator-editable, git-TRACKED config. These conflict on pull and must be
-# restored after a hard reset on rollback. control-state.json is gitignored, so
-# it is NOT here (it never conflicts and must never be reverted).
-CONFIG_PATHS=(engine-config.json strategies config)
 
 # --- Snapshot ------------------------------------------------------------------
 # Backup dir for this run: operator config (restored on rollback) + a copy of
@@ -306,6 +346,23 @@ if [[ "$NO_PULL" != true ]] && git ls-files --error-unmatch closed-trades.jsonl 
   git checkout -- closed-trades.jsonl 2>/dev/null || true
   LEDGER_MIGRATED=true
   info "Working tree cleaned for closed-trades.jsonl; the pull will untrack it"
+fi
+
+# --- 0.75/7 Drift gate (refuse to deploy over un-pulled local edits) -----------
+# Hard stop BEFORE the pull. If a deploy proceeds and later fails its health
+# check, rollback runs `git reset --hard START_SHA`, which permanently DESTROYS
+# any local edits to tracked non-config files. Operator config and the P&L ledger
+# are exempt (snapshotted/migrated); everything else is drift and must be
+# committed or reverted first. Runs regardless of --no-pull, since rollback (and
+# thus the data-loss risk) can happen on a --no-pull run too.
+_drift="$(detect_drift)"
+if [[ -n "$_drift" ]]; then
+  phase "Drift gate — refusing to deploy"
+  err "Tracked non-config files have un-pulled local edits:"
+  print_drift "$_drift"
+  err "Refusing to deploy: a rollback (git reset --hard) would DESTROY these edits."
+  err "Commit or revert them, then retry."
+  exit 3
 fi
 
 # --- 1/7 Config-safe pull ------------------------------------------------------

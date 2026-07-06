@@ -628,6 +628,105 @@ if ask "Set up Hermes Agent + Telegram (natural-language operator bot)?" "n"; th
     warn "Skill directory not found: $REPO_ROOT/skills"
   fi
 
+  # 4b. Register the skills-guard pre_tool_call hook in ~/.hermes/config.yaml.
+  #     Hermes has no "hooks add" subcommand (`hermes hooks` only lists/tests/
+  #     revokes) and `hermes config set` takes only scalar dotted keys, so we
+  #     merge the entry into config.yaml directly. The merge preserves every
+  #     other top-level key and the file mode, and is idempotent: the hook is
+  #     identified by the script basename (skills-guard.py), so re-running the
+  #     installer — even after REPO_ROOT moves — upserts the entry instead of
+  #     appending a duplicate. PyYAML lives in Hermes' own venv, which the
+  #     installer's generic $PY often lacks, so we prefer the bundled venv
+  #     python when it exists AND can import yaml; otherwise we fall back to
+  #     $PY. If neither yields yaml the merge snippet exits 3 and we print a
+  #     manual snippet rather than hard-fail.
+  guard_hook="$REPO_ROOT/setup/hermes/skills-guard.py"
+  if [[ -x "$guard_hook" ]]; then
+    # Interpreter preference: Hermes' bundled venv python (ships PyYAML) first,
+    # then the installer's $PY. The snippet itself exits 3 if the chosen
+    # interpreter can't import yaml, driving the manual-snippet fallback below.
+    hook_py=""
+    bundled_py="$HOME/.hermes/hermes-agent/venv/bin/python3"
+    if [[ -x "$bundled_py" ]] && "$bundled_py" -c 'import yaml' >/dev/null 2>&1; then
+      hook_py="$bundled_py"
+    elif [[ -n "$PY" ]]; then
+      hook_py="$PY"
+    fi
+    if [[ -z "$hook_py" ]]; then
+      hook_rc=3; hook_status=""
+    else
+      hook_status="$("$hook_py" - "$HOME/.hermes/config.yaml" "$guard_hook" <<'PYEOF'
+import sys, os
+cfg_path, cmd = sys.argv[1], sys.argv[2]
+try:
+    import yaml
+except Exception:
+    sys.exit(3)   # PyYAML unavailable -> caller prints a manual snippet
+data = {}
+orig_mode = None
+if os.path.exists(cfg_path):
+    orig_mode = os.stat(cfg_path).st_mode & 0o777
+    with open(cfg_path) as fh:
+        loaded = yaml.safe_load(fh)
+    if isinstance(loaded, dict):
+        data = loaded
+hooks = data.get("hooks")
+if not isinstance(hooks, dict):
+    hooks = {}
+    data["hooks"] = hooks
+lst = hooks.get("pre_tool_call")
+if not isinstance(lst, list):
+    lst = []
+    hooks["pre_tool_call"] = lst
+entry = {"matcher": "write_file|patch|terminal", "command": cmd, "timeout": 5}
+# Identity is the script basename, not the full path, so a moved REPO_ROOT
+# upserts the existing entry rather than appending a duplicate one.
+ident = os.path.basename(cmd)
+status = "appended"
+for i, item in enumerate(lst):
+    if isinstance(item, dict) and isinstance(item.get("command"), str) \
+            and os.path.basename(item["command"]) == ident:
+        status = "unchanged" if item == entry else "updated"
+        lst[i] = entry
+        break
+else:
+    lst.append(entry)
+if status != "unchanged":
+    parent = os.path.dirname(cfg_path) or "."
+    os.makedirs(parent, exist_ok=True)
+    tmp = cfg_path + ".tmp"
+    with open(tmp, "w") as fh:
+        yaml.safe_dump(data, fh, default_flow_style=False, sort_keys=False,
+                       allow_unicode=True)
+    os.chmod(tmp, orig_mode if orig_mode is not None else 0o600)
+    os.replace(tmp, cfg_path)
+print(status)
+PYEOF
+)"
+      hook_rc=$?
+    fi
+    if [[ $hook_rc -eq 3 ]]; then
+      warn "python+PyYAML unavailable — skills-guard hook not auto-registered."
+      info "Add this to ~/.hermes/config.yaml by hand, then restart Hermes:"
+      info "  hooks:"
+      info "    pre_tool_call:"
+      info "      - matcher: \"write_file|patch|terminal\""
+      info "        command: \"$guard_hook\""
+      info "        timeout: 5"
+    elif [[ $hook_rc -ne 0 ]]; then
+      warn "Could not register skills-guard hook (config merge failed, rc=$hook_rc)."
+    else
+      case "$hook_status" in
+        unchanged) ok "skills-guard hook already registered — no change" ;;
+        updated)   ok "skills-guard hook path updated in ~/.hermes/config.yaml" ;;
+        *)         ok "skills-guard hook registered in ~/.hermes/config.yaml" ;;
+      esac
+      info "First real use prompts Hermes for hook consent (set HERMES_ACCEPT_HOOKS=1 for headless)."
+    fi
+  else
+    warn "skills-guard hook script missing or not executable: $guard_hook"
+  fi
+
   # 5. Health check and start gateway.
   hermes doctor 2>/dev/null || warn "hermes doctor reported an issue."
   if ask "Start the Hermes messaging gateway now?" "y"; then
