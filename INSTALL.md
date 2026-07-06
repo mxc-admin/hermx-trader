@@ -819,7 +819,9 @@ guarded loopback mutations) and speak the contract in
 > (`/hx_status`, `/hx_positions`, …) since Telegram forbids hyphens, and by default they are
 > **not** shown in the `/` menu (Hermes ranks built-ins ahead of skill commands under its
 > menu cap). To surface them, add the `command_menu` block from
-> [`setup/09-hermes-agent.md`](setup/09-hermes-agent.md) and restart the gateway.
+> [`setup/09-hermes-agent.md`](setup/09-hermes-agent.md) and restart the gateway — check
+> `grep -n '^telegram:' ~/.hermes/config.yaml` first, since the block nests under the
+> existing top-level `telegram:` key (`telegram.extra.command_menu`), not under `platforms:`.
 
 ### 6.5 Start the Telegram gateway
 

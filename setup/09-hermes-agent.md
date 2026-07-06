@@ -148,33 +148,40 @@ needed — ideal on a VPS.
    but aren't discoverable. Note the name transform: skill `hx-status` becomes the Telegram
    command **`/hx_status`** (hyphens become underscores).
 
-   To pin the operator commands into the visible menu, add to `~/.hermes/config.yaml`:
+   To pin the operator commands into the visible menu, add `command_menu` under the
+   existing top-level `telegram:` key's `extra:` block in `~/.hermes/config.yaml`
+   (`telegram.extra.command_menu` — **not** nested under a `platforms:` key; this repo's
+   installed Hermes config schema has `telegram:` as a top-level key). Check
+   `grep -n '^telegram:' ~/.hermes/config.yaml` first and merge into that block rather
+   than pasting a duplicate top-level key:
 
    ```yaml
-   platforms:
-     telegram:
-       extra:
-         command_menu:
-           # 100 (Telegram's max) is required here: skill commands rank below the
-           # built-ins, so the default 60 leaves no room for them in the menu.
-           max_commands: 100
-           priority_mode: prepend   # our commands first, then Hermes' built-ins
-           priority:
-             - hx-status
-             - hx-positions
-             - hx-strategy-list
-             - hx-strategy-mode
-             - hx-strategy
-             - hx-trace
-             - hx-tv-alerts
-             - hx-close
-             - hx-emergency-stop
-             - hx-restart
-             - hx-upgrade
-             - hx-exchange
-             - hx-troubleshoot
-             - hx-help
-             - hermx-control
+   telegram:
+     # ...existing keys (reactions, channel_prompts, allowed_chats)...
+     extra:
+       # ...existing extra keys (rich_messages, rich_drafts)...
+       command_menu:
+         # 100 (Telegram's max) is required here: skill commands rank below the
+         # built-ins, so the default 60 leaves no room for them in the menu.
+         max_commands: 100
+         priority_mode: prepend   # our commands first, then Hermes' built-ins
+         priority:
+           - hx-status
+           - hx-positions
+           - hx-strategy-list
+           - hx-strategy-mode
+           - hx-strategy
+           - hx-trace
+           - hx-tv-alerts
+           - hx-close
+           - hx-emergency-stop
+           - hx-restart
+           - hx-upgrade
+           - hx-exchange
+           - hx-telegram
+           - hx-troubleshoot
+           - hx-help
+           - hermx-control
    ```
 
    Then `hermes gateway restart`. Verify with `/commands` in the bot (or the Telegram
