@@ -155,7 +155,7 @@ def test_dashboard_reads_canonical_executions_ledger(monkeypatch, tmp_path):
     monkeypatch.setattr(dash, "LOGS", logs)
     monkeypatch.setattr(dash, "okx_order_history_snapshot", lambda config: {"ok": False})
 
-    recs = dash.okx_execution_records({})
+    recs = dash.exchange_execution_records({})
     assert recs, "expected one execution record"
     rec = recs[0]
     assert rec["mode"] == "submit_enabled"
@@ -175,10 +175,85 @@ def test_dashboard_reads_canonical_executions_ledger(monkeypatch, tmp_path):
     assert rec["position_after"] == "LONG"
 
 
+def test_dashboard_reads_new_exec_result_key_via_dual_read(monkeypatch, tmp_path):
+    """Forward-compat dual-read: a pipeline row that carries the NEW ``exec_result``
+    envelope key (instead of the legacy ``okx_execution`` key) must resolve
+    identically through exchange_execution_records. The reader prefers ``exec_result``
+    and falls back to ``okx_execution`` for historical rows, so both key names work."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    adapter_result = {
+        "ok": True,
+        "mode": "submit_enabled",
+        "exchange": "okx_demo",
+        "elapsed_ms": 812,
+        "fill_summary": {
+            "status": "submitted",
+            "order_id": "ORD-9",
+            "client_order_id": "mxc-btc-9",
+            "avg_fill_price": 65010.0,
+            "filled_size": 0.05,
+            "position_after_order": {"side": "long", "contracts": 0.05},
+        },
+        "payload": {
+            "executed_orders": [
+                {
+                    "action": "OPEN_LONG",
+                    "submitted": True,
+                    "status": "submitted",
+                    "requested_amount": 0.05,
+                    "order": {
+                        "id": "ORD-9",
+                        "clientOrderId": "mxc-btc-9",
+                        "side": "buy",
+                        "status": "closed",
+                        "average": 65010.0,
+                        "filled": 0.05,
+                        "cost": 3250.5,
+                        "fee": {"cost": 1.5, "currency": "USDT"},
+                    },
+                }
+            ],
+            "symbol": "BTC/USDT:USDT",
+            "reference_price": 65000.0,
+            "target_direction": "long",
+        },
+    }
+    (logs / "pipeline.jsonl").write_text(
+        json.dumps({
+            "ts": "2026-06-28T03:00:00Z",
+            "stage": "execution",
+            "signal_id": None,
+            "received_at": "2026-06-28T03:00:00Z",
+            # NEW key name -- reader must dual-read this identically to okx_execution.
+            "exec_result": {
+                "mode": "submit_enabled",
+                "ok": True,
+                "elapsed_ms": 812,
+                "payload": adapter_result,
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dash, "LOGS", logs)
+    monkeypatch.setattr(dash, "okx_order_history_snapshot", lambda config: {"ok": False})
+
+    recs = dash.exchange_execution_records({})
+    assert recs, "expected one execution record resolved via the new exec_result key"
+    rec = recs[0]
+    assert rec["mode"] == "submit_enabled"
+    assert rec["ok"] is True
+    assert rec["symbol"] == "BTC/USDT:USDT"
+    assert rec["okx_side"] == "buy"
+    assert rec["okx_action"] == "OPEN_LONG"
+    assert rec["order_id"] == "ORD-9"
+    assert rec["okx_price"] == 65010.0
+
+
 def test_dashboard_backfills_sparse_gate_blocked_row_from_journal(monkeypatch, tmp_path):
     """A gate-blocked (no-payload) execution row carries no CCXT payload, so symbol/side/
     notional are blank. When a cl_ord_id is present (the idempotency gate stamps one on the
-    result), okx_execution_records backfills the missing fields from the order journal's
+    result), exchange_execution_records backfills the missing fields from the order journal's
     submit-time intent via the fail-open latest_order_record enrichment path."""
     logs = tmp_path / "logs"
     logs.mkdir()
@@ -217,7 +292,7 @@ def test_dashboard_backfills_sparse_gate_blocked_row_from_journal(monkeypatch, t
     monkeypatch.setattr(dash, "latest_order_record",
                         lambda cl: journal_rec if cl == "mxc-eth-9" else None)
 
-    recs = dash.okx_execution_records({})
+    recs = dash.exchange_execution_records({})
     assert recs, "expected one execution record"
     rec = recs[0]
     assert rec["mode"] == "not_submitted"
@@ -259,7 +334,7 @@ def test_dashboard_sparse_row_without_cl_ord_id_left_blank(monkeypatch, tmp_path
 
     monkeypatch.setattr(dash, "latest_order_record", _must_not_be_called)
 
-    recs = dash.okx_execution_records({})
+    recs = dash.exchange_execution_records({})
     assert recs and recs[0]["mode"] == "not_submitted"
     assert not recs[0].get("symbol")
     assert not recs[0].get("cl_ord_id")

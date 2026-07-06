@@ -749,7 +749,7 @@ def _enrich_execution_row_from_journal(row, result, fill):
     return row
 
 
-def okx_execution_records(config, limit=500):
+def exchange_execution_records(config, limit=500):
     import dashboard as _dash
     # Execution outcomes live in the unified pipeline.jsonl under stage="execution". Each
     # row is {received_at, okx_execution, ...}. The service (execution/service.py) wraps
@@ -765,7 +765,9 @@ def okx_execution_records(config, limit=500):
     out = []
     for row in rows:
         received_at = row.get("received_at")
-        result = row.get("okx_execution") or {}
+        # Dual-read: prefer the new ``exec_result`` key, fall back to the legacy
+        # ``okx_execution`` key so historical ledger rows keep resolving forever.
+        result = row.get("exec_result") or row.get("okx_execution") or {}
         adapter = result.get("payload") or {}
         fill = adapter.get("fill_summary") or {}
         inner = adapter.get("payload") or {}
@@ -832,7 +834,7 @@ def okx_execution_records(config, limit=500):
     return out
 
 
-def okx_status_label(row):
+def exchange_status_label(row):
     status = row.get("order_status") or row.get("status") or "-"
     action = str(row.get("okx_action") or "").upper()
     if str(status).lower() == "skipped" and action.startswith("CLOSE_"):
@@ -842,9 +844,9 @@ def okx_status_label(row):
     return status
 
 
-def okx_status_kind(row):
+def exchange_status_kind(row):
     import dashboard as _dash
-    label = str(_dash.okx_status_label(row)).lower()
+    label = str(_dash.exchange_status_label(row)).lower()
     if label == "filled":
         return "good"
     if "no position" in label or label == "not sent":
@@ -854,7 +856,7 @@ def okx_status_kind(row):
     return "neutral"
 
 
-def okx_leg_label(row):
+def exchange_leg_label(row):
     action = str(row.get("okx_action") or "").upper()
     labels = {
         "OPEN_LONG": "Open Long",
@@ -865,7 +867,7 @@ def okx_leg_label(row):
     return labels.get(action, action.replace("_", " ").title() if action else "-")
 
 
-def okx_leg_kind(row):
+def exchange_leg_kind(row):
     action = str(row.get("okx_action") or "").upper()
     if action.startswith("OPEN_LONG") or action.startswith("CLOSE_SHORT"):
         return "good"
@@ -874,7 +876,7 @@ def okx_leg_kind(row):
     return "neutral"
 
 
-def okx_reduce_only_label(row):
+def exchange_reduce_only_label(row):
     action = str(row.get("okx_action") or "").upper()
     if action.startswith("CLOSE_"):
         return "Yes"
@@ -883,18 +885,18 @@ def okx_reduce_only_label(row):
     return "-"
 
 
-def okx_display_status(row, is_live=False):
+def exchange_display_status(row, is_live=False):
     import dashboard as _dash
     if is_live:
         return "LIVE"
-    return str(_dash.okx_status_label(row) or "-").upper()
+    return str(_dash.exchange_status_label(row) or "-").upper()
 
 
-def okx_display_status_kind(row, is_live=False):
+def exchange_display_status_kind(row, is_live=False):
     import dashboard as _dash
     if is_live:
         return "good"
-    return _dash.okx_status_kind(row)
+    return _dash.exchange_status_kind(row)
 
 
 def okx_row_details(row, is_live=False):
@@ -906,8 +908,8 @@ def okx_row_details(row, is_live=False):
         "policy": row.get("policy"),
         "action": row.get("okx_action"),
         "side": row.get("okx_side"),
-        "status": _dash.okx_display_status(row, is_live),
-        "reduce_only": _dash.okx_reduce_only_label(row),
+        "status": _dash.exchange_display_status(row, is_live),
+        "reduce_only": _dash.exchange_reduce_only_label(row),
         "position_after": row.get("position_after"),
         "order_id": row.get("order_id"),
         "client_order_id": row.get("client_order_id"),

@@ -229,7 +229,7 @@ def test_read_closed_trades_deduplicates_duplicate_rows_on_disk(ledger_dir):
 # H1 — legacy hardcoded ("okx","demo") reconcile literal
 # ---------------------------------------------------------------------------
 
-def test_okx_execution_records_does_not_reconcile_to_okx_demo_literal(tmp_path, monkeypatch):
+def test_exchange_execution_records_does_not_reconcile_to_okx_demo_literal(tmp_path, monkeypatch):
     """Proves: the order-history snapshot must NOT reconcile with hardcoded
     ("okx","demo") literals — that mislabels every non-OKX / live close.
 

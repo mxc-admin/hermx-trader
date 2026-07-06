@@ -177,7 +177,9 @@ def _signal_projection(row):
     target_direction, executed_orders, ...) one level deeper under its own ``payload``
     and fill_summary at its top level. The former OKX-native ``payload.plan`` shape is
     gone; gate-blocked rows have no adapter envelope at all (falsey lookups)."""
-    okx = row.get("okx_execution") or {}
+    # Dual-read: prefer the new ``exec_result`` key, fall back to the legacy
+    # ``okx_execution`` key so historical ledger rows keep resolving forever.
+    okx = row.get("exec_result") or row.get("okx_execution") or {}
     adapter = okx.get("payload") or {}
     fill = adapter.get("fill_summary") or {}
     inner = adapter.get("payload") or {}
@@ -254,7 +256,7 @@ def strategy_alert_rows(limit=500):
             "duplicate": bool(row.get("duplicate")),
             "decision": _dash.nested_get(row, "strategy_decision", "decision") or _dash.nested_get(row, "decision", "decision"),
             "mode": row.get("mode"),
-            "okx_mode": _dash.nested_get(row, "okx_execution", "mode"),
+            "okx_mode": _dash.nested_get(row, "exec_result", "mode") or _dash.nested_get(row, "okx_execution", "mode"),
             "block_reason": _dash.nested_get(row, "execution_readiness", "block_reason"),
             "latency": _dash.nested_get(row, "latency", "latency_seconds"),
         })
@@ -488,7 +490,7 @@ def _build_dashboard_model() -> DashboardModel:
         "okx_live": okx_live,
         "okx_live_by_mode": okx_live_by_mode,
         "exch_live_by_env": exch_live_by_env,
-        "okx_executions": _dash.okx_execution_records(cfg),
+        "okx_executions": _dash.exchange_execution_records(cfg),
         "strategies": strategies,
         "active_strategies": _dash.active_strategies(strategies),
         "strategy_alerts": _dash.strategy_alert_rows(),

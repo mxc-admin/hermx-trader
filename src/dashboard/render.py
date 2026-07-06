@@ -357,9 +357,9 @@ def okx_live_card(config, okx_live, sym, first_trade_time=None):
 def okx_execution_table(rows, live_info=None):
     import dashboard as _dash
     esc, num, badge, money, pct, side_kind = _dash.esc, _dash.num, _dash.badge, _dash.money, _dash.pct, _dash.side_kind
-    okx_leg_label, okx_leg_kind = _dash.okx_leg_label, _dash.okx_leg_kind
-    okx_display_status, okx_display_status_kind = _dash.okx_display_status, _dash.okx_display_status_kind
-    okx_reduce_only_label, okx_row_details = _dash.okx_reduce_only_label, _dash.okx_row_details
+    exchange_leg_label, exchange_leg_kind = _dash.exchange_leg_label, _dash.exchange_leg_kind
+    exchange_display_status, exchange_display_status_kind = _dash.exchange_display_status, _dash.exchange_display_status_kind
+    exchange_reduce_only_label, okx_row_details = _dash.exchange_reduce_only_label, _dash.okx_row_details
     if not rows:
         return '<table><tbody><tr><td>No OKX demo executions logged yet.</td></tr></tbody></table>'
     live_info = live_info or {}
@@ -376,14 +376,14 @@ def okx_execution_table(rows, live_info=None):
           <td>{esc(row.get('received_colombia'))}</td>
           <td><b>{esc(row.get('symbol'))}</b></td>
           <td>{badge(row.get('signal'), side_kind(row.get('signal')))}</td>
-          <td>{badge(okx_leg_label(row), okx_leg_kind(row))}</td>
-          <td>{badge(okx_display_status(row, is_live), okx_display_status_kind(row, is_live))}</td>
+          <td>{badge(exchange_leg_label(row), exchange_leg_kind(row))}</td>
+          <td>{badge(exchange_display_status(row, is_live), exchange_display_status_kind(row, is_live))}</td>
           <td>{num(row.get('alert_price'), 4)}</td>
           <td>{num(row.get('okx_price'), 4)}</td>
           <td>{pct(row.get('slippage_pct'))}</td>
           <td>{num(row.get('contracts'), 4)}</td>
           <td>{money(row.get('notional'), 0)}</td>
-          <td>{badge(okx_reduce_only_label(row), 'muted' if okx_reduce_only_label(row) == 'Yes' else 'neutral')}</td>
+          <td>{badge(exchange_reduce_only_label(row), 'muted' if exchange_reduce_only_label(row) == 'Yes' else 'neutral')}</td>
           <td>{money(row.get('fee'), 4)}</td>
           <td>{badge(money(pnl, 2) if show_pnl and pnl is not None else "-", pnl_kind)}</td>
           <td>{esc(row.get('margin_mode') or '-')} / {esc(row.get('leverage') or '-')}x</td>

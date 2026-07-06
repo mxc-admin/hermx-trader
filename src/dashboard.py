@@ -35,7 +35,7 @@ try:
 except Exception:
     ExecutorFactory = None
 
-# Order-journal lookup used by okx_execution_records to backfill sparse (gate-blocked,
+# Order-journal lookup used by exchange_execution_records to backfill sparse (gate-blocked,
 # no-payload) execution rows. Re-exported here so snapshot readers reach it via
 # ``import dashboard as _dash`` (and tests can monkeypatch ``dash.latest_order_record``).
 # Fail-open: if the journal module can't import, the enrichment simply finds nothing.
@@ -401,14 +401,14 @@ from dashboard.snapshots import (  # noqa: E402  re-export shim
     bool_text,
     order_history_notional,
     enrich_close_rows_with_okx_history,
-    okx_execution_records,
-    okx_status_label,
-    okx_status_kind,
-    okx_leg_label,
-    okx_leg_kind,
-    okx_reduce_only_label,
-    okx_display_status,
-    okx_display_status_kind,
+    exchange_execution_records,
+    exchange_status_label,
+    exchange_status_kind,
+    exchange_leg_label,
+    exchange_leg_kind,
+    exchange_reduce_only_label,
+    exchange_display_status,
+    exchange_display_status_kind,
     okx_row_details,
     human_age,
 )
