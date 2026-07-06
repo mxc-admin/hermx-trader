@@ -2,9 +2,16 @@
 # deploy.sh — HermX VPS deploy (config-safe, snapshotted, auto-rollback)
 #
 # Pipeline:
-#   snapshot state -> capture START_SHA -> auto-migrate legacy tracked ledger ->
-#   config-safe pull -> pip install -> build UI -> offline tests -> restart ->
-#   health check.
+#   self-update deploy/ (if stale & not --no-pull, then re-exec) -> snapshot state ->
+#   capture START_SHA -> auto-migrate legacy tracked ledger -> config-safe pull ->
+#   pip install -> build UI -> offline tests -> restart -> health check.
+#
+# Self-update (self-healing distribution — see the block after the log helpers):
+#   Operators, cron, and the hx-upgrade skill all run a *possibly-stale* on-disk
+#   copy of this script. Before doing anything else it refreshes ONLY the deploy/
+#   folder from origin's default branch and re-execs, so the rest of the pipeline
+#   always runs current deploy logic (e.g. a newly-added self-heal step). This is
+#   skipped under --no-pull, which means no git network calls at all.
 #
 # One-time closed-trades.jsonl untrack migration (automatic, no flag):
 #   The realized-P&L ledger used to be git-tracked. It is now a per-host,
@@ -25,7 +32,7 @@
 #
 # Usage:
 #   bash deploy/deploy.sh             # full deploy
-#   bash deploy/deploy.sh --no-pull   # skip git fetch/pull (pip STILL runs)
+#   bash deploy/deploy.sh --no-pull   # zero git network: skip self-update + pull (pip STILL runs)
 #   bash deploy/deploy.sh --no-tests  # skip pytest (hotfix only)
 #   bash deploy/deploy.sh --no-ui     # skip React build (UI unchanged)
 set -euo pipefail
@@ -47,6 +54,86 @@ info()   { printf '  %s\n' "$1"; }
 ok()     { printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$1"; }
 warn()   { printf '  %s!%s %s\n' "$YELLOW" "$RESET" "$1"; }
 err()    { printf '  %sx%s %s\n' "$RED" "$RESET" "$1"; }
+
+# --- Self-update bootstrap (self-healing distribution) -------------------------
+# WHY: every caller — an operator at a shell, a cron job, the hx-upgrade skill —
+# invokes a *possibly-stale* on-disk copy of THIS script (`bash deploy/deploy.sh`).
+# If the host is behind, its first deploy after an upgrade runs OLD pipeline logic
+# and can silently miss a newly-added self-heal step (this is exactly how a stale
+# host would skip the closed-trades.jsonl untrack migration below). To close that
+# gap we refresh ONLY the deploy/ folder from the remote's default branch and, if
+# it changed, re-exec ourselves so the rest of the pipeline always runs current
+# deploy code. The migration and every other step then run once, in the fresh
+# process — never doubled, because we re-exec BEFORE reaching any of them.
+#
+# This is DELIBERATELY NARROW and a SEPARATE git operation from the main pull
+# (step 1/7). They exist for two different purposes:
+#   * self-update  — touches ONLY deploy/ (the deploy machinery). It runs here,
+#                    but is SKIPPED when --no-pull is passed (--no-pull means
+#                    zero git network calls). It never
+#                    touches src/, dashboard-ui/, operator config, or the P&L
+#                    ledger, so it cannot change what the services run — only how
+#                    they get deployed.
+#   * main pull    — the full config-safe `git pull --ff-only` of the whole repo
+#                    (step 1/7), which IS governed by --no-pull. That is the
+#                    application-code sync.
+#
+# Safety guarantees:
+#   * Loop guard: the sentinel HERMX_DEPLOY_REEXECED=1 is exported before the
+#     re-exec and checked at the top here, so self-update + re-exec happens AT
+#     MOST ONCE per deploy. No infinite re-exec.
+#   * Fail-open: every git step is best-effort. On any failure (not a git repo,
+#     no remote, offline, detached HEAD, checkout conflict) we warn and continue
+#     with the current on-disk script. Self-update is a nice-to-have, never a
+#     hard gate on the deploy.
+#   * Runs BEFORE arg parsing, START_SHA capture, and the migration block, so it
+#     cannot disturb the rollback point (the re-exec'd process captures its own
+#     START_SHA) and cannot double-run any pipeline step.
+# --no-pull means "zero git network calls of any kind" — so self-update is
+# skipped too, not just the step-1/7 pull. We must know this BEFORE the arg
+# parser exists (it lives after this block), so do a deliberately dumb pre-scan
+# of "$@" for the exact token --no-pull. This is NOT flag validation: unknown
+# flags are still left untouched for the real parser below (which, on a normal
+# run, executes only in the fresh process after re-exec). set -e safe: the match
+# lives in an `if`, never a bare failing test.
+SELF_UPDATE=true
+for _arg in "$@"; do
+  if [[ "$_arg" == "--no-pull" ]]; then SELF_UPDATE=false; break; fi
+done
+if [[ "${HERMX_DEPLOY_REEXECED:-}" != "1" && "$SELF_UPDATE" == true ]]; then
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    # Resolve the branch to track from origin's default branch; fall back to main.
+    SU_BRANCH="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
+    if [[ -z "$SU_BRANCH" || "$SU_BRANCH" == "HEAD" ]]; then
+      SU_BRANCH="main"
+    fi
+    # Fetch just that branch's refs (no working-tree changes, no merge).
+    if git fetch --quiet origin "$SU_BRANCH" 2>/dev/null; then
+      # Does the committed deploy/ tree differ from origin's? `git diff --quiet`
+      # exits non-zero when it differs — that is the "stale, update me" signal,
+      # NOT an error, so it lives in an `if` and never trips `set -e`.
+      if ! git diff --quiet "HEAD" "origin/$SU_BRANCH" -- deploy/ 2>/dev/null; then
+        warn "deploy/ is behind origin/$SU_BRANCH — self-updating deploy machinery before running"
+        # Narrow checkout: ONLY deploy/ is touched; HEAD is not moved. The
+        # checkout + re-exec are in one brace group so bash parses all of it
+        # before the checkout overwrites this file mid-run (avoids re-reading a
+        # changed script). On checkout failure we warn and fall through to run
+        # the current on-disk script instead of aborting the deploy.
+        if { git checkout --quiet "origin/$SU_BRANCH" -- deploy/ \
+             && ok "deploy/ refreshed from origin/$SU_BRANCH — re-executing with fresh deploy code" \
+             && HERMX_DEPLOY_REEXECED=1 exec bash "$ROOT/deploy/deploy.sh" "$@"; }; then
+          : # unreachable: exec replaces the process on success
+        else
+          warn "Narrow deploy/ self-update failed — continuing with current on-disk script"
+        fi
+      fi
+    else
+      warn "git fetch failed (offline / no remote / detached?) — continuing with current on-disk deploy.sh"
+    fi
+  else
+    warn "Not inside a git work tree — skipping deploy self-update"
+  fi
+fi
 
 NO_PULL=false; NO_TESTS=false; NO_UI=false
 while [[ $# -gt 0 ]]; do
