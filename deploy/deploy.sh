@@ -2,8 +2,16 @@
 # deploy.sh — HermX VPS deploy (config-safe, snapshotted, auto-rollback)
 #
 # Pipeline:
-#   snapshot state -> capture START_SHA -> config-safe pull -> pip install ->
-#   build UI -> offline tests -> restart -> health check.
+#   snapshot state -> capture START_SHA -> auto-migrate legacy tracked ledger ->
+#   config-safe pull -> pip install -> build UI -> offline tests -> restart ->
+#   health check.
+#
+# One-time closed-trades.jsonl untrack migration (automatic, no flag):
+#   The realized-P&L ledger used to be git-tracked. It is now a per-host,
+#   append-only live file (.gitignore'd). On hosts where it is still tracked, the
+#   upstream untrack commit would make `git pull --ff-only` abort on the local
+#   live rows. Before pulling, this script backs up and un-stages the ledger so
+#   the pull applies, then restores the live rows on top once it is untracked.
 # If the health check fails, the deploy AUTOMATICALLY ROLLS BACK to START_SHA:
 #   git reset --hard START_SHA -> restore operator config -> pip install (old
 #   requirements) -> rebuild UI -> restart -> re-probe.
@@ -186,6 +194,33 @@ rollback() {
   return 1
 }
 
+# --- 0.5/7 One-time closed-trades.jsonl untrack migration ----------------------
+# closed-trades.jsonl is a per-host, append-only live P&L ledger that must NOT be
+# git-tracked (see .gitignore). Hosts installed before the untrack commit still
+# have it tracked; there, `git pull --ff-only` would abort because the local live
+# rows collide with the incoming delete-from-index. Self-heal such hosts here:
+# back up the live ledger, make the working tree clean for that one file so the
+# pull can fast-forward, then (after the pull untracks it) restore the live rows
+# on top so no financial history is lost. On already-migrated hosts (file no
+# longer tracked) this whole block no-ops silently — the ls-files check fails.
+# Skipped under --no-pull: with no pull there is nothing to untrack the file, so
+# cleaning the working tree would wipe live rows with no restore to follow.
+LEDGER_MIGRATED=false
+LEDGER_BACKUP="$BACKUP_DIR/closed-trades.jsonl.premigrate"
+if [[ "$NO_PULL" != true ]] && git ls-files --error-unmatch closed-trades.jsonl >/dev/null 2>&1; then
+  phase "0.5/7 — Migrate closed-trades.jsonl (untrack live P&L ledger)"
+  if [[ -e "$ROOT/closed-trades.jsonl" ]]; then
+    cp -a "$ROOT/closed-trades.jsonl" "$LEDGER_BACKUP"
+    ok "Live ledger backed up → $LEDGER_BACKUP ($(wc -l < "$ROOT/closed-trades.jsonl") rows)"
+  else
+    warn "closed-trades.jsonl is tracked but absent on disk — nothing to back up"
+  fi
+  # Clean the working tree for this one file so `git pull --ff-only` won't abort.
+  git checkout -- closed-trades.jsonl 2>/dev/null || true
+  LEDGER_MIGRATED=true
+  info "Working tree cleaned for closed-trades.jsonl; the pull will untrack it"
+fi
+
 # --- 1/7 Config-safe pull ------------------------------------------------------
 if [[ "$NO_PULL" != true ]]; then
   phase "1/7 — Config-safe pull"
@@ -211,6 +246,25 @@ if [[ "$NO_PULL" != true ]]; then
   ok "Pulled latest code (operator config preserved)"
 else
   phase "1/7 — Pull skipped (--no-pull)"
+fi
+
+# --- 1.5/7 Restore live P&L ledger after untrack migration ---------------------
+# If the migration ran and the pull has now untracked closed-trades.jsonl, overlay
+# the backed-up live rows so the (now gitignored) ledger keeps its full history.
+if [[ "$LEDGER_MIGRATED" == true ]]; then
+  if ! git ls-files --error-unmatch closed-trades.jsonl >/dev/null 2>&1; then
+    if [[ -e "$LEDGER_BACKUP" ]]; then
+      cp -a "$LEDGER_BACKUP" "$ROOT/closed-trades.jsonl"
+      ok "Live P&L ledger restored → closed-trades.jsonl ($(wc -l < "$ROOT/closed-trades.jsonl") rows), now untracked"
+    else
+      ok "closed-trades.jsonl untracked (no live rows existed to restore)"
+    fi
+  else
+    # Unexpected: pull did not untrack it. Working-tree edits were reverted by the
+    # pre-pull checkout, so leave the backup in place and tell the operator.
+    warn "closed-trades.jsonl still tracked after pull — untrack commit not present upstream?"
+    warn "Live rows preserved in: $LEDGER_BACKUP (restore manually if needed)"
+  fi
 fi
 
 # --- 2/7 pip install (MANDATORY — see header) ----------------------------------
