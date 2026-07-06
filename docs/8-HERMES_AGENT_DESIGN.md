@@ -449,6 +449,7 @@ command in Hermes. They share one helper library
 | `/hx-restart` | mutating (lifecycle) | health-check and restart the down service(s) |
 | `/hx-upgrade` | mutating (lifecycle) | run `deploy/deploy.sh` with auto-rollback |
 | `/hx-exchange` | mutating (credentials) | add/validate/remove exchange API keys via `scripts/exchange.sh` over SSH — the skill never sees a secret |
+| `/hx-telegram` | mutating (gateway config) | set up / rotate / allowlist the Telegram operator gateway via `scripts/hermes-gateway.sh` over SSH — the skill never sees the bot token; comms themselves remain Hermes' native gateway (§5.2 note) |
 
 The mutating commands add exactly two money-adjacent write endpoints beyond
 `POST /webhook`: the receiver's reduce-only `POST /api/close` and the dashboard's

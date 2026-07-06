@@ -79,7 +79,7 @@ The agent uses only the local loopback API that already runs:
 
    ```bash
    mkdir -p ~/.hermes/skills
-   for d in skills/hermx-control skills/hx-status skills/hx-positions skills/hx-strategy-list skills/hx-trace skills/hx-tv-alerts skills/hx-help skills/hx-strategy-mode skills/hx-close skills/hx-emergency-stop skills/hx-restart skills/hx-upgrade skills/hx-exchange skills/hx-troubleshoot skills/hx-strategy; do
+   for d in skills/hermx-control skills/hx-status skills/hx-positions skills/hx-strategy-list skills/hx-trace skills/hx-tv-alerts skills/hx-help skills/hx-strategy-mode skills/hx-close skills/hx-emergency-stop skills/hx-restart skills/hx-upgrade skills/hx-exchange skills/hx-telegram skills/hx-troubleshoot skills/hx-strategy; do
      ln -sfn "$PWD/$d" ~/.hermes/skills/"$(basename "$d")"
    done
    ```
@@ -207,7 +207,7 @@ Concrete, copy-paste steps to talk to HermX from Telegram. This expands the
 
    ```bash
    mkdir -p ~/.hermes/skills
-   for d in skills/hermx-control skills/hx-status skills/hx-positions skills/hx-strategy-list skills/hx-trace skills/hx-tv-alerts skills/hx-help skills/hx-strategy-mode skills/hx-close skills/hx-emergency-stop skills/hx-restart skills/hx-upgrade skills/hx-exchange skills/hx-troubleshoot skills/hx-strategy; do
+   for d in skills/hermx-control skills/hx-status skills/hx-positions skills/hx-strategy-list skills/hx-trace skills/hx-tv-alerts skills/hx-help skills/hx-strategy-mode skills/hx-close skills/hx-emergency-stop skills/hx-restart skills/hx-upgrade skills/hx-exchange skills/hx-telegram skills/hx-troubleshoot skills/hx-strategy; do
      ln -sfn "$PWD/$d" ~/.hermes/skills/"$(basename "$d")"
    done
    hermes skills list | grep -E 'hermx-control|hx-'   # confirm: enabled, category trading

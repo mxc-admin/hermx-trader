@@ -8,7 +8,7 @@ platforms: [linux, macos]
 metadata:
   hermes:
     tags: [trading, hermx, help, docs, read-only, operations]
-    related_skills: [hermx-control, hx-status, hx-positions, hx-strategy-list, hx-trace, hx-tv-alerts, hx-strategy-mode, hx-close, hx-emergency-stop, hx-restart, hx-upgrade, hx-exchange]
+    related_skills: [hermx-control, hx-status, hx-positions, hx-strategy-list, hx-trace, hx-tv-alerts, hx-strategy-mode, hx-close, hx-emergency-stop, hx-restart, hx-upgrade, hx-exchange, hx-telegram]
     config:
       - key: hermx.dashboard_base
         description: "HermX dashboard base URL (loopback)"
@@ -36,13 +36,15 @@ operator at the shared helper
   `close`, `/hx-close`, `CLOSE`, `/Close` all resolve to `/hx-close`.
 - Accept common aliases: `estop`/`kill` → `/hx-emergency-stop`, `strategies`/`list`
   → `/hx-strategy-list`, `mode` → `/hx-strategy-mode`, `deploy` → `/hx-upgrade`,
-  `alerts`/`tv` → `/hx-tv-alerts`, `exchange`/`keys`/`creds` → `/hx-exchange`.
+  `alerts`/`tv` → `/hx-tv-alerts`, `exchange`/`keys`/`creds` → `/hx-exchange`,
+  `telegram`/`tg`/`gateway` → `/hx-telegram`.
 - Unknown arg → say so, then print the overview so the operator can pick.
 
 ## All commands (`/hx-help`)
 
-Eleven commands: five read-only diagnostics, five guarded mutations, plus
-`/hx-exchange` (exchange-credential management — reads plus guarded SSH mutations).
+Twelve commands: five read-only diagnostics, five guarded mutations, plus
+`/hx-exchange` (exchange-credential management) and `/hx-telegram` (Telegram
+operator-gateway management) — both reads plus guarded SSH mutations.
 None places or sizes an order. Every mutation confirms before it writes.
 
 **Read-only**
@@ -70,6 +72,9 @@ None places or sizes an order. Every mutation confirms before it writes.
   `/hx-upgrade`
 - **`/hx-exchange`** — add/update/remove/validate exchange API keys via SSH-dispatched
   `scripts/exchange.sh` (the skill never handles a key). `/hx-exchange add okx --demo`
+- **`/hx-telegram`** — set up/rotate/allowlist the Telegram operator gateway via
+  SSH-dispatched `scripts/hermes-gateway.sh` (the skill never handles the bot token).
+  `/hx-telegram allow 987654321`
 
 Ask `/hx-help <command>` for syntax, guards, and examples on any one.
 
@@ -244,6 +249,28 @@ Ask `/hx-help <command>` for syntax, guards, and examples on any one.
   - `rtk claude -p "/hx-exchange add okx --demo" --permission-mode dontAsk`
   - "are the Bybit live keys valid?" → `/hx-exchange status bybit --live`
 
+### `/hx-telegram`
+- **Type:** mutating (Telegram operator-gateway management, dispatched over SSH).
+- **Syntax:** `/hx-telegram status` · `/hx-telegram setup|rotate|remove` ·
+  `/hx-telegram allow|revoke <numeric-user-id>` · `/hx-telegram start|stop|restart` ·
+  `/hx-telegram test`
+- **Does:** runs the standalone `scripts/hermes-gateway.sh` on the VPS over SSH to manage
+  `TELEGRAM_BOT_TOKEN` / `TELEGRAM_ALLOWED_USERS` in `~/.hermes/.env` (the Hermes agent's
+  env, **not** the HermX `.env`) and drive the `hermes gateway` lifecycle. `status` reads
+  (masked token, allowlist, gateway process state); `setup`/`rotate` upsert the token
+  (backed up to `.env.bak`, `chmod 600`, restore-on-failure); `allow`/`revoke` edit the
+  allowlist; `remove` blanks both vars and stops the gateway.
+- **Guards:** the skill **never handles the bot token** — it is captured by `read -s`
+  **inside the script** on the VPS, never as an argument, never echoed. Mutations run
+  under `ssh -t`; `allow`/`revoke` require an all-digits user id and a typed
+  `yes, allow <id>` / `yes, revoke <id>`; `remove` needs `yes, remove telegram`; the
+  allowlist is never blank-as-configured or allow-all. The gateway is comms-only —
+  it grants no trading authority and its downtime never blocks execution.
+- **Examples:**
+  - `rtk claude -p "/hx-telegram status" --permission-mode dontAsk`
+  - `rtk claude -p "/hx-telegram allow 987654321" --permission-mode dontAsk`
+  - "rotate the telegram bot token" → `/hx-telegram rotate`
+
 ## Shared invariants (apply to every command)
 - **UNKNOWN, never "flat".** Any read failure, `okx_live.ok == false`,
   `executor.degraded`, or `freshness.no_data` → UNKNOWN. Only a healthy, non-degraded,
@@ -259,11 +286,11 @@ Ask `/hx-help <command>` for syntax, guards, and examples on any one.
 ## Rules
 - This skill is **pure text**: it issues no HTTP request, writes no file, mutates
   nothing. If asked to actually *run* a command, defer to that command's own skill.
-- Never invent commands or flags — only the ten above exist.
+- Never invent commands or flags — only the twelve above exist.
 - Keep output terse and chat-formatted: markdown bullets and short paragraphs.
 
 ## Verification checklist
-- [ ] `/hx-help` (no arg) lists all **eleven** commands, each with a one-liner + example.
+- [ ] `/hx-help` (no arg) lists all **twelve** commands, each with a one-liner + example.
 - [ ] `/hx-help close`, `/hx-help /hx-close`, `/hx-help CLOSE` all resolve to the `/hx-close` detail.
 - [ ] Aliases (`estop`, `kill`, `deploy`, `mode`, `list`, `alerts`, `tv`) map to the right command.
 - [ ] An unknown arg reports "unknown command" then falls back to the overview.
