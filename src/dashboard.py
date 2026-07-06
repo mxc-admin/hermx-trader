@@ -35,6 +35,16 @@ try:
 except Exception:
     ExecutorFactory = None
 
+# Order-journal lookup used by okx_execution_records to backfill sparse (gate-blocked,
+# no-payload) execution rows. Re-exported here so snapshot readers reach it via
+# ``import dashboard as _dash`` (and tests can monkeypatch ``dash.latest_order_record``).
+# Fail-open: if the journal module can't import, the enrichment simply finds nothing.
+try:
+    from orders.journal import latest_order_record
+except Exception:
+    def latest_order_record(cl_ord_id):  # type: ignore[misc]
+        return None
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ROOT = Path(os.environ.get("HERMX_ROOT") or REPO_ROOT)
 LOGS = ROOT / "logs"

@@ -698,69 +698,133 @@ def enrich_close_rows_with_okx_history(records, history_rows):
     return records
 
 
+def _execution_row_position_after(_dash, pos_after):
+    """Signed position-after from a CCXT ``{"side", "contracts"}`` fill block.
+
+    ``contracts`` is an unsigned magnitude and ``side`` is "long"/"short", so a raw
+    ``signed_position_side(contracts)`` would mislabel every short as LONG. Negate for a
+    short/sell side before signing; a flat (None) block resolves to FLAT."""
+    if not isinstance(pos_after, dict):
+        return _dash.signed_position_side(None)
+    qty = _dash.as_float(pos_after.get("contracts"))
+    if qty is not None and str(pos_after.get("side") or "").lower() in ("short", "sell"):
+        qty = -abs(qty)
+    return _dash.signed_position_side(qty)
+
+
+def _enrich_execution_row_from_journal(row, result, fill):
+    """Backfill a sparse (gate-blocked / no-payload) execution row from the order journal.
+
+    Gate-blocked results carry no CCXT payload, so symbol/side/notional/inst_id are blank.
+    Only the idempotency gate stamps a ``cl_ord_id`` on the result (earlier gates fire
+    BEFORE the cl_ord_id is computed, so those rows have none and are left as-is); when one
+    is present the submit-time order-journal intent supplies the missing fields. Fail-open:
+    a missing/lookup-erroring record leaves the row exactly as-is -- never fabricated."""
+    import dashboard as _dash
+    cl = str(result.get("cl_ord_id") or fill.get("client_order_id") or row.get("client_order_id") or "").strip()
+    if not cl:
+        return row
+    try:
+        rec = _dash.latest_order_record(cl)
+    except Exception:
+        rec = None
+    if not isinstance(rec, dict):
+        return row
+    intent = rec.get("intent") or {}
+
+    def _backfill(key, value):
+        if value is not None and value != "" and not row.get(key):
+            row[key] = value
+
+    _backfill("symbol", intent.get("symbol"))
+    _backfill("inst_id", intent.get("inst_id"))
+    _backfill("signal", str(intent.get("side") or "").upper() or None)
+    _backfill("planned_notional", _dash.as_float(intent.get("planned_notional_usd")))
+    # order_status on a sparse row is only the mode echo (e.g. "not_submitted"); the
+    # journal's actual order state is more informative, so prefer it when present.
+    if rec.get("state"):
+        row["order_status"] = rec.get("state")
+    row["cl_ord_id"] = row.get("cl_ord_id") or cl
+    row["client_order_id"] = row.get("client_order_id") or cl
+    return row
+
+
 def okx_execution_records(config, limit=500):
     import dashboard as _dash
-    # Execution outcomes now live in the unified pipeline.jsonl under stage="execution"
-    # (consolidated from the former executions.jsonl). Each row is {received_at,
-    # okx_execution, ...} exactly as before, plus the stage/signal_id stamp.
+    # Execution outcomes live in the unified pipeline.jsonl under stage="execution". Each
+    # row is {received_at, okx_execution, ...}. The service (execution/service.py) wraps
+    # the adapter's normalized_result() (executors/base.py) under okx_execution.payload:
+    #   okx_execution = {ok, mode, elapsed_ms, payload: <adapter_result>}
+    #   adapter_result = {ok, mode, exchange, elapsed_ms, fill_summary: {...},
+    #                     payload: {executed_orders, symbol, target_direction, ...}}
+    # so fill_summary is at the top of adapter_result and executed_orders/symbol/side are
+    # one level deeper. (The former OKX-native payload.plan / payload.okx_fill_summary
+    # shape no longer exists.) Each executed_orders element is
+    #   {action, submitted, status, order: <ccxt order dict|None>, requested_amount}.
     rows, _stats = _dash._pipeline_rows("execution", limit)
     out = []
     for row in rows:
         received_at = row.get("received_at")
         result = row.get("okx_execution") or {}
-        payload = result.get("payload") or {}
-        plan = payload.get("plan") or {}
-        fill = payload.get("okx_fill_summary") or {}
-        orders = payload.get("executed_orders") or []
-        plan_inst_id = plan.get("inst_id") or plan.get("instId")
-        symbol = plan.get("symbol") or _dash.symbol_from_inst_id(config, plan_inst_id)
-        signal_side = str(plan.get("signal_side") or "").upper()
-        signal_price = _dash.as_float(plan.get("signal_price"))
+        adapter = result.get("payload") or {}
+        fill = adapter.get("fill_summary") or {}
+        inner = adapter.get("payload") or {}
+        orders = inner.get("executed_orders") or []
+        symbol = inner.get("symbol")
+        inst_id = inner.get("inst_id")
+        signal_side = str(inner.get("target_direction") or "").upper()
+        signal_price = _dash.as_float(inner.get("reference_price"))
         base = {
             "received_at": received_at,
             "received_colombia": _dash.colombia_time(received_at),
-            "tv_time": plan.get("tv_time"),
+            "tv_time": None,
             "symbol": symbol,
-            "inst_id": plan_inst_id,
+            "inst_id": inst_id,
             "signal": signal_side,
             "alert_price": signal_price,
-            "mode": result.get("mode") or payload.get("mode"),
-            "elapsed_ms": result.get("elapsed_ms"),
+            "mode": result.get("mode") or adapter.get("mode"),
+            "elapsed_ms": result.get("elapsed_ms") or adapter.get("elapsed_ms"),
             "ok": result.get("ok"),
             "status": fill.get("status") or result.get("mode"),
-            "policy": plan.get("execution_policy_label") or plan.get("execution_policy"),
-            "planned_notional": _dash.nested_get(plan, "execution_intent", "planned_notional_usd"),
-            "risk_weight": _dash.nested_get(plan, "execution_intent", "risk_weight"),
-            "ct_val": _dash.nested_get(plan, "instrument", "ctVal"),
+            "policy": None,
+            "planned_notional": None,
+            "risk_weight": None,
+            "ct_val": None,
         }
         if not orders:
-            out.append({**base, "okx_action": "-", "order_status": base["status"], "position_after": _dash.signed_position_side(_dash.nested_get(fill, "position_after_order", "pos"))})
+            sparse = {
+                **base,
+                "okx_action": "-",
+                "order_status": base["status"],
+                "position_after": _execution_row_position_after(_dash, fill.get("position_after_order")),
+            }
+            out.append(_enrich_execution_row_from_journal(sparse, result, fill))
             continue
         for order in orders:
-            planned = order.get("planned") or {}
-            state = order.get("order_state") or {}
-            avg_px = _dash.as_float(_dash.first_present(state.get("avgPx"), state.get("fillPx")))
+            ccxt_order = order.get("order") if isinstance(order.get("order"), dict) else {}
+            avg_px = _dash.as_float(_dash.first_present(ccxt_order.get("average"), fill.get("avg_fill_price")))
             slippage = None
             if avg_px is not None and signal_price:
                 slippage = (avg_px / signal_price - 1.0) * 100.0
-            pos_after = fill.get("position_after_order") or {}
             out.append({
                 **base,
                 "okx_action": order.get("action"),
-                "okx_side": state.get("side") or planned.get("side"),
-                "contracts": _dash.as_float(_dash.first_present(state.get("accFillSz"), planned.get("sz"))),
-                "notional": _dash.okx_order_notional(order, plan),
+                "okx_side": ccxt_order.get("side"),
+                "contracts": _dash.as_float(_dash.first_present(ccxt_order.get("filled"), fill.get("filled_size"), order.get("requested_amount"))),
+                # cost is the ccxt-unified filled notional in quote ccy (filled x price);
+                # realized PnL / fees / venue fills come from the deferred order-history path.
+                "notional": _dash.as_float(ccxt_order.get("cost")),
                 "okx_price": avg_px,
                 "slippage_pct": slippage,
-                "fee": _dash.as_float(state.get("fee")),
-                "realized_pnl": _dash.as_float(state.get("pnl")),
-                "position_after": _dash.signed_position_side(pos_after.get("pos")),
-                "leverage": state.get("lever") or planned.get("lever") or _dash.nested_get(plan, "expected_settings", "leverage"),
-                "margin_mode": state.get("tdMode") or planned.get("tdMode"),
-                "order_id": order.get("ordId"),
-                "client_order_id": order.get("clOrdId"),
-                "order_status": state.get("state") or order.get("status"),
-                "elapsed_ms": order.get("elapsed_ms") or base["elapsed_ms"],
+                "fee": _dash.as_float(_dash.nested_get(ccxt_order, "fee", "cost")),
+                "realized_pnl": None,
+                "position_after": _execution_row_position_after(_dash, fill.get("position_after_order")),
+                "leverage": None,
+                "margin_mode": None,
+                "order_id": ccxt_order.get("id") or fill.get("order_id"),
+                "client_order_id": ccxt_order.get("clientOrderId") or fill.get("client_order_id"),
+                "order_status": ccxt_order.get("status") or order.get("status") or fill.get("status"),
+                "elapsed_ms": base["elapsed_ms"],
             })
     history = _dash.okx_order_history_snapshot(config)
     if history.get("ok"):

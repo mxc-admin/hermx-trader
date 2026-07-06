@@ -170,24 +170,28 @@ SIGNALS_DEFAULT_N = 50
 def _signal_projection(row):
     """Project one execution-stage pipeline row to the compact /api/signals shape.
 
-    Handles both normal TV-triggered submissions (fields nested under
-    ``okx_execution.payload.plan``) and operator closes (symbol/strategy_id/kind/
-    operator/reason stamped at the top level by execute_operator_close)."""
+    Handles both normal TV-triggered submissions and operator closes
+    (symbol/strategy_id/kind/operator/reason stamped at the top level by
+    execute_operator_close). The service wraps the adapter's normalized_result() under
+    ``okx_execution.payload`` -- that envelope carries the venue payload (symbol,
+    target_direction, executed_orders, ...) one level deeper under its own ``payload``
+    and fill_summary at its top level. The former OKX-native ``payload.plan`` shape is
+    gone; gate-blocked rows have no adapter envelope at all (falsey lookups)."""
     okx = row.get("okx_execution") or {}
-    payload = okx.get("payload") or {}
-    plan = payload.get("plan") or {}
-    intent = plan.get("execution_intent") or {}
+    adapter = okx.get("payload") or {}
+    fill = adapter.get("fill_summary") or {}
+    inner = adapter.get("payload") or {}
     return {
         "ts": row.get("ts"),
         "submitted_at": row.get("received_at") or row.get("ts"),
-        "symbol": row.get("symbol") or plan.get("symbol"),
-        "side": plan.get("signal_side") or plan.get("target_side"),
-        "strategy_id": row.get("strategy_id") or plan.get("strategy_id"),
-        "mode": okx.get("mode") or payload.get("mode"),
+        "symbol": row.get("symbol") or inner.get("symbol"),
+        "side": inner.get("target_direction"),
+        "strategy_id": row.get("strategy_id"),
+        "mode": okx.get("mode") or adapter.get("mode"),
         "reason": okx.get("reason"),
         "kind": row.get("kind"),
         "operator": row.get("operator"),
-        "cl_ord_id": row.get("cl_ord_id") or intent.get("client_order_id"),
+        "cl_ord_id": row.get("cl_ord_id") or okx.get("cl_ord_id") or fill.get("client_order_id"),
         "ok": okx.get("ok"),
         "elapsed_ms": okx.get("elapsed_ms"),
     }
