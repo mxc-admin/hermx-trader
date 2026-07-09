@@ -32,9 +32,20 @@ Every active execution alert must include `strategy_id`.
 
 ## Authentication
 
-The alert must be sent with the `X-Webhook-Secret` HTTP header set to `HERMX_SECRET`.
-The secret is **never** included in the JSON payload or in the URL — it travels only
-in the `X-Webhook-Secret` header.
+The alert carries the shared secret (`HERMX_SECRET`) via one of two transports:
+
+- **Default — `secret_key` JSON body field.** TradingView's native webhook alert action
+  **cannot send custom HTTP headers on any plan**, so a direct TradingView alert
+  authenticates by including `"secret_key": "<HERMX_SECRET>"` in the alert Message JSON.
+  This is the **standard method** for stock TradingView alerts. The receiver strips
+  `secret_key` immediately after authenticating, so it never lands in any ledger.
+- **Alternative — `X-Webhook-Secret` HTTP header.** For operators who run a relay/proxy
+  in front of the receiver, the secret may instead be injected as the `X-Webhook-Secret`
+  header. When the header is present it takes precedence and must match; a present-but-wrong
+  header is rejected and does **not** fall through to the body field.
+
+The secret is **never** placed in the URL (path or query string). If both transports are
+present, the header wins.
 
 ## Venue, Execution Mode, and Sizing Come From the Strategy
 
@@ -71,7 +82,9 @@ It does **not** open a new position.
 - Condition: correct Duo Base Dev BUY or SELL signal.
 - Timeframe: must match the strategy file.
 - Alert frequency: once per bar close.
-- Webhook URL: system webhook URL. Add the `X-Webhook-Secret` header with the `HERMX_SECRET` value.
+- Webhook URL: system webhook URL. Authenticate by adding `"secret_key":"<HERMX_SECRET>"` to
+  the alert Message JSON (default for native alerts), or — for relay/proxy setups — the
+  `X-Webhook-Secret` header with the `HERMX_SECRET` value.
 - Expiration: open-ended or longest available.
 
 ## Validation Rules
@@ -350,27 +363,36 @@ Pine Script placeholders — `{{ticker}}`, `{{strategy.order.action}}`, `{{close
 strategy's bar so an alert placed on the wrong chart is quarantined as `strategy_timeframe_mismatch`
 rather than silently accepted — do **not** use `{{interval}}` for it.
 
-Set the `X-Webhook-Secret` header to `HERMX_SECRET` in the alert's webhook settings (never in the message body).
+Authenticate the alert with the shared secret. For a **direct TradingView alert** (the
+default), add `"secret_key":"<HERMX_SECRET>"` to the Message JSON below — TradingView's
+native webhook cannot send custom headers. For **relay/proxy setups**, set the
+`X-Webhook-Secret` header to `HERMX_SECRET` in the webhook settings instead. Never put the
+secret in the URL.
 
 ### BTCUSDT Duo Base Dev 2H
 ```json
-{"strategy_id":"btcusdt_duo_base_dev_2h","strategy_name":"BTCUSDT Duo Base Dev 2H","indicator":"duo-base-dev","symbol":"{{ticker}}","timeframe":"2h","side":"{{strategy.order.action}}","tv_signal_price":"{{close}}","tv_time":"{{time}}","source":"tradingview"}
+{"strategy_id":"btcusdt_duo_base_dev_2h","strategy_name":"BTCUSDT Duo Base Dev 2H","indicator":"duo-base-dev","symbol":"{{ticker}}","timeframe":"2h","side":"{{strategy.order.action}}","tv_signal_price":"{{close}}","tv_time":"{{time}}","source":"tradingview","secret_key":"<HERMX_SECRET>"}
 ```
 
 ### ETHUSDT Duo Base Dev 2H
 ```json
-{"strategy_id":"ethusdt_duo_base_dev_2h","strategy_name":"ETHUSDT Duo Base Dev 2H","indicator":"duo-base-dev","symbol":"{{ticker}}","timeframe":"2h","side":"{{strategy.order.action}}","tv_signal_price":"{{close}}","tv_time":"{{time}}","source":"tradingview"}
+{"strategy_id":"ethusdt_duo_base_dev_2h","strategy_name":"ETHUSDT Duo Base Dev 2H","indicator":"duo-base-dev","symbol":"{{ticker}}","timeframe":"2h","side":"{{strategy.order.action}}","tv_signal_price":"{{close}}","tv_time":"{{time}}","source":"tradingview","secret_key":"<HERMX_SECRET>"}
 ```
 
 ### SOLUSDT Duo Base Dev 3H
 ```json
-{"strategy_id":"solusdt_duo_base_dev_3h","strategy_name":"SOLUSDT Duo Base Dev 3H","indicator":"duo-base-dev","symbol":"{{ticker}}","timeframe":"3h","side":"{{strategy.order.action}}","tv_signal_price":"{{close}}","tv_time":"{{time}}","source":"tradingview"}
+{"strategy_id":"solusdt_duo_base_dev_3h","strategy_name":"SOLUSDT Duo Base Dev 3H","indicator":"duo-base-dev","symbol":"{{ticker}}","timeframe":"3h","side":"{{strategy.order.action}}","tv_signal_price":"{{close}}","tv_time":"{{time}}","source":"tradingview","secret_key":"<HERMX_SECRET>"}
 ```
 
 ### XRPUSDT Duo Base Dev 4H
 ```json
-{"strategy_id":"xrpusdt_duo_base_dev_4h","strategy_name":"XRPUSDT Duo Base Dev 4H","indicator":"duo-base-dev","symbol":"{{ticker}}","timeframe":"4h","side":"{{strategy.order.action}}","tv_signal_price":"{{close}}","tv_time":"{{time}}","source":"tradingview"}
+{"strategy_id":"xrpusdt_duo_base_dev_4h","strategy_name":"XRPUSDT Duo Base Dev 4H","indicator":"duo-base-dev","symbol":"{{ticker}}","timeframe":"4h","side":"{{strategy.order.action}}","tv_signal_price":"{{close}}","tv_time":"{{time}}","source":"tradingview","secret_key":"<HERMX_SECRET>"}
 ```
+
+Replace `<HERMX_SECRET>` with the actual `HERMX_SECRET` value. This `secret_key` field is
+the default auth transport for direct TradingView alerts; omit it only if you inject the
+`X-Webhook-Secret` header via a relay/proxy. The receiver strips `secret_key` right after
+authenticating, so it never reaches any ledger.
 
 To attach debug context, add an `extras` object (observe-only, see above), e.g.
 `...,"source":"tradingview","extras":{"tv_alert":"{{time}}"}}`.

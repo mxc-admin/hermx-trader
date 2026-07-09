@@ -163,17 +163,42 @@ def authenticate_webhook_request(
     client_ip_fn: Callable,
     verify_hmac_fn: Callable,
     auth_failure_alert_fn: Callable,
+    body_secret: str | None = None,
 ) -> tuple[bool, int, str]:
-    """Authenticate a webhook request: shared secret then HMAC, alerting on failures."""
+    """Authenticate a webhook request: shared secret then HMAC, alerting on failures.
+
+    Two shared-secret transports are accepted, in this precedence:
+
+    * ``X-Webhook-Secret`` header -- for operators who run a relay/proxy that injects
+      it. If the header is PRESENT (even as an empty string) it MUST match ``secret``;
+      a present-but-wrong header is a hard 401 and NEVER falls through to the body.
+    * ``secret_key`` JSON body field (``body_secret``) -- the DEFAULT transport for
+      direct TradingView-native alerts, whose webhook action cannot send custom HTTP
+      headers on any plan. Only consulted when the header is ABSENT.
+
+    Both mismatches return the same ``"forbidden"`` reason so the response never leaks
+    which transport was attempted. HMAC verification (``verify_hmac_fn``) is orthogonal
+    and always runs after whichever shared-secret path succeeds.
+    """
     client_ip_value = client_ip_fn(handler)
     path = urlparse(handler.path).path
     if not secret:
         auth_failure_alert_fn(path, client_ip_value)
         return False, 401, "missing_webhook_secret"
-    provided = (handler.headers.get("X-Webhook-Secret") or "").strip()
-    if not hmac.compare_digest(provided, secret):
-        auth_failure_alert_fn(path, client_ip_value)
-        return False, 401, "forbidden"
+    header_raw = handler.headers.get("X-Webhook-Secret")
+    if header_raw is not None:
+        # Header present (even empty) -> must match; never fall through to the body.
+        if not hmac.compare_digest(header_raw.strip(), secret):
+            auth_failure_alert_fn(path, client_ip_value)
+            return False, 401, "forbidden"
+    else:
+        # Header absent -> body ``secret_key`` is the default TradingView-native path.
+        # Coerce a non-string (e.g. numeric) body_secret to "" so compare_digest never
+        # raises and a malformed value fails closed.
+        provided_body = body_secret if isinstance(body_secret, str) else ""
+        if not provided_body or not hmac.compare_digest(provided_body, secret):
+            auth_failure_alert_fn(path, client_ip_value)
+            return False, 401, "forbidden"
     ok, reason = verify_hmac_fn(handler.headers, body)
     if not ok:
         auth_failure_alert_fn(path, client_ip_value)

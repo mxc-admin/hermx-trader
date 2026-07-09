@@ -1,6 +1,6 @@
 ---
 name: hx-tv-alerts
-description: "Use when the operator wants copy-paste-ready TradingView alert Message templates for a HermX strategy — 'give me the BUY/SELL alert JSON for SOL', 'what do I paste into TradingView for btcusdt_duo_base_dev_2h'. Read-only. Resolves a name/id/symbol to a strategy_id via hermx_ops.resolve_strategy, reads the strategy file, and emits two schema-valid alert payloads (long/short) plus the webhook URL + X-Webhook-Secret guidance. Never sends an alert, never mutates, never calls /webhook."
+description: "Use when the operator wants copy-paste-ready TradingView alert Message templates for a HermX strategy — 'give me the BUY/SELL alert JSON for SOL', 'what do I paste into TradingView for btcusdt_duo_base_dev_2h'. Read-only. Resolves a name/id/symbol to a strategy_id via hermx_ops.resolve_strategy, reads the strategy file, and emits two schema-valid alert payloads (long/short) plus the webhook URL + secret_key auth guidance (X-Webhook-Secret header as the relay alternative). Never sends an alert, never mutates, never calls /webhook."
 version: 0.1.0
 author: HermX
 license: MIT
@@ -131,6 +131,10 @@ def tmpl(action, side=None):
         "tv_signal_price": "{{close}}",
         "tv_time": "{{time}}",
         "source": "tradingview",
+        # Default auth for direct TradingView alerts (native webhook can't send headers).
+        # Operator substitutes the real HERMX_SECRET before pasting; the receiver strips
+        # secret_key right after auth so it never persists. Omit only for relay/header setups.
+        "secret_key": "<HERMX_SECRET>",
     }
     if side:
         payload["side"] = side
@@ -156,10 +160,14 @@ PY
   public form `https://<host>/webhook` or the **Tailscale Funnel** URL that fronts it
   (see [`../../setup/04-tradingview-alerts.md`](../../setup/04-tradingview-alerts.md) and
   [`../../setup/08-webhook-hmac-relay.md`](../../setup/08-webhook-hmac-relay.md)).
-- **Auth header:** set `X-Webhook-Secret: <HERMX_SECRET>` in the alert's webhook settings
-  (TradingView Pro+ custom headers). The secret is **never** in the Message body or the
-  URL — header only. Requests without it are rejected. No custom-header plan → use the
-  HMAC relay path.
+- **Auth (default):** the templates carry a `secret_key` field — the operator replaces
+  `<HERMX_SECRET>` with the real `HERMX_SECRET`. This is the default transport for direct
+  TradingView alerts, whose native webhook **cannot send custom HTTP headers**. The receiver
+  strips `secret_key` right after authenticating, so it never persists. The secret is
+  **never** in the URL.
+- **Auth (relay alternative):** operators running a relay/proxy may instead inject
+  `X-Webhook-Secret: <HERMX_SECRET>` as a header (takes precedence when present) and drop
+  `secret_key` from the body. HMAC-signed setups also go through the relay path.
 - **Strategy must be loaded:** the receiver quarantines `unknown_strategy_id` for any id
   with no matching file. Confirm the strategy is live first with
   `rtk claude -p "/hx-strategy-list" --permission-mode dontAsk`.
@@ -196,5 +204,6 @@ PY
       by `action`).
 - [ ] No `exchange` field is present in any payload; `timeframe` is
       hard-coded, not `{{interval}}`.
-- [ ] Webhook URL, `X-Webhook-Secret` header, and "strategy must be loaded" are stated.
+- [ ] Webhook URL, `secret_key` auth (with `X-Webhook-Secret` header noted as the relay
+      alternative), and "strategy must be loaded" are stated.
 - [ ] No HTTP request issued, no file written, no `/webhook` call — read-only throughout.

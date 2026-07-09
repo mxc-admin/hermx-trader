@@ -1,8 +1,15 @@
 # 08 — Webhook HMAC Relay Contract
 
+> This relay is **only** needed when you run HMAC signing (`HERMX_REQUIRE_HMAC=true`) or
+> want to authenticate via the `X-Webhook-Secret` header. For a plain direct TradingView
+> alert, the **default and simplest** auth is the `secret_key` field in the alert JSON body
+> (TradingView's native webhook cannot send custom headers) — no relay required. See
+> `setup/04-tradingview-alerts.md`. Use this relay for header-based or HMAC-signed setups.
+
 When `HERMX_REQUIRE_HMAC=true`, each webhook request must include:
 
-- `X-Webhook-Secret`: shared secret (header auth)
+- shared secret — either the `X-Webhook-Secret` header (relay/proxy) **or** the `secret_key`
+  JSON body field (direct alerts); the header takes precedence when both are present
 - `X-Webhook-Timestamp`: unix seconds (or parseable ISO time)
 - `X-Webhook-Signature`: hex HMAC-SHA256 of `timestamp + raw_body`
 

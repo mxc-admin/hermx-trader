@@ -761,7 +761,13 @@ def verify_webhook_hmac(headers, body: bytes, now_seconds: float | None = None) 
     )
 
 
-def authenticate_webhook_request(handler: BaseHTTPRequestHandler, body: bytes) -> tuple[bool, int, str]:
+def authenticate_webhook_request(
+    handler: BaseHTTPRequestHandler, body: bytes, payload: dict | None = None
+) -> tuple[bool, int, str]:
+    # ``secret_key`` in the JSON body is the DEFAULT transport for direct
+    # TradingView-native alerts (their webhook action cannot send custom headers);
+    # the ``X-Webhook-Secret`` header remains for relay/proxy setups. See
+    # authenticate_webhook_request() in security/webhook_auth.py for the precedence.
     return _authenticate_webhook_request_impl(
         handler,
         body,
@@ -769,6 +775,7 @@ def authenticate_webhook_request(handler: BaseHTTPRequestHandler, body: bytes) -
         _client_ip,
         lambda headers, request_body: verify_webhook_hmac(headers, request_body),
         emit_auth_failure_alert,
+        body_secret=(payload or {}).get("secret_key"),
     )
 
 
@@ -858,6 +865,26 @@ def _signal_id_of(record: dict | None) -> str | None:
     return norm.get("signal_id") or None
 
 
+def _scrub_secret_key(obj, _depth: int = 0) -> None:
+    """Belt-and-suspenders: strip any ``secret_key`` field before a record is
+    persisted, at any nesting depth (top level, ``payload``, ``extras``,
+    ``normalized`` …). The primary redaction happens once at intake (do_POST) via
+    object identity, so on the live path this is a no-op; it exists so a FUTURE new
+    persist call site cannot reintroduce a secret leak into a durable ledger. Depth
+    is bounded so a pathological structure can never make logging loop forever.
+    Mutates ``obj`` in place (records are freshly built dicts; the only removed key
+    is the secret itself, so this never drops legitimate data)."""
+    if _depth > 6 or obj is None:
+        return
+    if isinstance(obj, dict):
+        obj.pop("secret_key", None)
+        for value in obj.values():
+            _scrub_secret_key(value, _depth + 1)
+    elif isinstance(obj, (list, tuple)):
+        for value in obj:
+            _scrub_secret_key(value, _depth + 1)
+
+
 def record_pipeline_event(stage: str, signal_id: str | None, payload: dict | None = None, *, durable: bool = False) -> None:
     """Append one signal-processing event to the unified pipeline ledger.
 
@@ -881,6 +908,7 @@ def record_pipeline_event(stage: str, signal_id: str | None, payload: dict | Non
         norm = payload.get("normalized")
         if isinstance(norm, dict) and isinstance(norm.get("extras"), dict):
             record["extras"] = norm["extras"]
+    _scrub_secret_key(record)
     (append_jsonl_durable if durable else append_jsonl)(PIPELINE_LEDGER, record)
     _rotate_ledger_if_large(PIPELINE_LEDGER)
 
@@ -892,6 +920,7 @@ def record_raw_webhook(phase: str, payload: dict) -> None:
         logging.warning("record_raw_webhook: unknown phase %r", phase)
     record = {"phase": phase}
     record.update(payload or {})
+    _scrub_secret_key(record)
     append_jsonl(RAW_WEBHOOK_LEDGER, record)
     _rotate_ledger_if_large(RAW_WEBHOOK_LEDGER)
 
@@ -1941,10 +1970,21 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send(400, {"ok": False, "error": "invalid_json", "detail": str(exc)})
             return
-        auth_ok, auth_status, auth_error = authenticate_webhook_request(self, raw_body)
+        auth_ok, auth_status, auth_error = authenticate_webhook_request(self, raw_body, payload)
         if not auth_ok:
             self._send(auth_status, {"ok": False, "error": auth_error})
             return
+        # LINCHPIN: strip the body ``secret_key`` from the live payload dict the instant
+        # auth succeeds and BEFORE the first persist. This same dict object is reused all
+        # the way through _queue_work_item and every downstream worker-phase persist call,
+        # so this single pop keeps the shared secret out of raw-webhooks.jsonl and
+        # pipeline.jsonl everywhere. Defensively strip a nested extras.secret_key too, in
+        # case an operator nests it. (record_* writers also scrub as belt-and-suspenders.)
+        if isinstance(payload, dict):
+            payload.pop("secret_key", None)
+            _extras = payload.get("extras")
+            if isinstance(_extras, dict):
+                _extras.pop("secret_key", None)
         intake_received_at = now_iso()
         record_raw_webhook("intake", {"received_at": intake_received_at, "payload": payload, "path": parsed.path})
         work_item = _queue_work_item(payload, intake_received_at)

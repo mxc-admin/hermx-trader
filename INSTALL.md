@@ -216,7 +216,8 @@ what each variable does before asking. Leave all other `HERMX_*` tuning variable
 
 ```text
 HERMX_SECRET=              # ONE secret for BOTH webhook and dashboard auth
-                          #   - webhook: sent by TradingView as the X-Webhook-Secret header
+                          #   - webhook: sent by a direct TradingView alert as the "secret_key"
+                          #     JSON body field (default); or as an X-Webhook-Secret header via a relay
                           #   - dashboard: used as the X-Dashboard-Token / Bearer / Basic password
 ```
 
@@ -234,7 +235,8 @@ and use it to log into the dashboard.
 > --new-secret` regenerates it on demand. There is no automatic time-based rotation.
 
 > **Single secret — and its blast radius.** `HERMX_SECRET` is the only source for both the
-> webhook (`X-Webhook-Secret`) and dashboard auth; there are no legacy fallbacks. If it is
+> webhook (body `secret_key` field, or `X-Webhook-Secret` header via a relay) and dashboard
+> auth; there are no legacy fallbacks. If it is
 > blank, auth fails closed (every webhook gets `401` and protected dashboard routes return
 > `401`). Because **one** value guards **both** surfaces, a leak exposes the intake *and* the
 > dashboard at once — rotate immediately on any suspicion with `bash run.sh --new-secret`
@@ -891,7 +893,10 @@ Show this to the user — it's the URL every alert posts to.
 ### 7.b Explain the alert anatomy
 
 > - An alert fires when your Pine strategy/indicator signals on a closed bar.
-> - The alert POSTs a small **JSON payload** to your webhook URL, with the `X-Webhook-Secret` header.
+> - The alert POSTs a small **JSON payload** to your webhook URL. The payload carries a
+>   `secret_key` field holding your `HERMX_SECRET` — this is how a direct TradingView alert
+>   authenticates, since TradingView's native webhook can't send custom HTTP headers. (Operators
+>   running a relay/proxy may instead inject an `X-Webhook-Secret` header.)
 > - Each alert is tied to **one** strategy via its `strategy_id`. HermX looks up that ID, matches the
 >   symbol/timeframe, runs the gates, and (only if all gates are open) places a demo order sized from
 >   the **strategy file**, not from the alert.
@@ -914,9 +919,14 @@ For **each enabled strategy** from Phase 3, give the user the exact alert messag
   "tv_signal_price": {{close}},
   "tv_time": "{{timenow}}",
   "exchange": "okx",
-  "source": "tradingview"
+  "source": "tradingview",
+  "secret_key": "<the HERMX_SECRET value from Phase 2>"
 }
 ```
+
+> `secret_key` is the default auth for direct TradingView alerts (native webhook can't send
+> headers). Replace the placeholder with your real `HERMX_SECRET`. The receiver strips it right
+> after authenticating, so it never lands in a ledger. Omit it only for relay/header setups.
 
 **ETHUSDT 2H** — `strategy_id: ethusdt_duo_base_dev_2h`, `timeframe: 2h`
 **SOLUSDT 3H** — `strategy_id: solusdt_duo_base_dev_3h`, `timeframe: 3h`
@@ -930,7 +940,8 @@ For **each enabled strategy** from Phase 3, give the user the exact alert messag
 For **every** alert, also give the user:
 
 - **Webhook URL:** `https://hermx.<tailnet>.ts.net/webhook` (from `WEBHOOK_URL.txt`)
-- **Request header:** `X-Webhook-Secret: <the HERMX_SECRET value from Phase 2>`
+- **Auth:** the `secret_key` field in the JSON payload = the `HERMX_SECRET` value from Phase 2
+  (default). Relay/proxy setups may instead use a `X-Webhook-Secret: <HERMX_SECRET>` header.
 
 ### 7.d TradingView UI — step by step
 
@@ -942,9 +953,12 @@ For **every** alert, also give the user:
 5. **Trigger:** **Once Per Bar Close**.
 6. **Expiration:** open-ended / maximum available.
 7. Open the **Notifications** tab → enable **Webhook URL** → paste the URL from `WEBHOOK_URL.txt`.
-8. In the **Message** box → paste the JSON template for that strategy.
-9. Add the request header `X-Webhook-Secret` with your secret (TradingView Pro+ supports custom
-   headers; if your plan can't send headers, use the HMAC path — see `setup/08-webhook-hmac-relay.md`).
+8. In the **Message** box → paste the JSON template for that strategy, with `secret_key` set to
+   your `HERMX_SECRET`. This is the default auth — TradingView's native webhook cannot send
+   custom headers, so no header configuration is needed.
+9. (Relay/proxy setups only) If you front the receiver with a relay, you may instead inject a
+   `X-Webhook-Secret` header and drop `secret_key` from the body — see
+   `setup/08-webhook-hmac-relay.md`.
 10. Name the alert (e.g. `HermX BTC 2h BUY`) → **Create**.
 11. Repeat for the SELL alert and for every other enabled strategy.
 
@@ -954,9 +968,9 @@ Confirm the receiver accepts a well-formed payload before relying on TradingView
 (`execution_mode: "demo"`) this is validated and ledgered but **never** sent to a live account:
 
 ```bash
+# Default (mirrors a direct TradingView alert): secret in the JSON body.
 curl -s -X POST http://127.0.0.1:8891/webhook \
   -H "Content-Type: application/json" \
-  -H "X-Webhook-Secret: <HERMX_SECRET>" \
   -d '{
     "strategy_id": "btcusdt_duo_base_dev_2h",
     "symbol": "BTCUSDT",
@@ -965,17 +979,19 @@ curl -s -X POST http://127.0.0.1:8891/webhook \
     "tv_signal_price": "65000",
     "tv_time": "2026-06-28T00:00:00Z",
     "exchange": "okx",
-    "source": "tradingview"
+    "source": "tradingview",
+    "secret_key": "<HERMX_SECRET>"
   }'
 ```
 
 Then open the dashboard (`http://127.0.0.1:8098/dashboard/`, via Tailscale or an SSH tunnel)
-and confirm the alert appears. A `401` means the `X-Webhook-Secret` is wrong/blank; a **quarantine**
+and confirm the alert appears. A `401` means the `secret_key` (or, for relay setups, the
+`X-Webhook-Secret` header) is wrong/blank; a **quarantine**
 means a field (`strategy_id`/`symbol`/`timeframe`) didn't match the strategy file.
 
 **✅ Verify Phase 7:** the manual `curl` test is accepted (not 401, not quarantined) and shows on the
-dashboard, and the user has created BUY+SELL alerts for each enabled strategy with the correct URL,
-header, and JSON.
+dashboard, and the user has created BUY+SELL alerts for each enabled strategy with the correct URL
+and JSON (including the `secret_key` field, or an `X-Webhook-Secret` header for relay setups).
 
 ---
 
@@ -1048,7 +1064,8 @@ order is blocked (`live_trading_disabled`). Never enable live unless the user ex
   `30m/1h/2h/3h/4h`.
 - **Receiver returns 401 on every webhook**: `HERMX_SECRET` is missing/blank, or
   `HERMX_REQUIRE_HMAC=true` without `HERMX_WEBHOOK_HMAC_KEY` (it fails closed). Set the secret/HMAC
-  key and restart. The header name is exactly `X-Webhook-Secret`.
+  key and restart. For a direct alert, confirm the payload's `secret_key` field equals
+  `HERMX_SECRET`; for a relay, the header name is exactly `X-Webhook-Secret`.
 - **`.env` permissions too broad**: logs warn if `.env` is group/world-readable — run
   `chmod 600 .env` and restart the receiver.
 - **Exchange API keys wrong**: the receiver can't authenticate to the exchange. Re-check you created

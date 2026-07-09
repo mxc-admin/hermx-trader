@@ -87,9 +87,15 @@ These run in order; the HTTP status is returned directly to TradingView:
 4. **JSON parse**: malformed body → `400 invalid_json`. (Parsing happens before auth; the
    raw bytes are also needed for HMAC verification.)
 5. **Auth** (`authenticate_webhook_request`, `src/security/webhook_auth.py`):
-   - `X-Webhook-Secret` header must equal `HERMX_SECRET` (constant-time compare). A
-     missing/blank server-side secret fails closed: every request gets
-     `401 missing_webhook_secret`. A mismatch → `401 forbidden`.
+   - Shared secret via either transport, constant-time compared to `HERMX_SECRET`:
+     the **`secret_key` JSON body field** (default for direct TradingView-native alerts,
+     which cannot send custom headers) **or** the **`X-Webhook-Secret` header** (for
+     relay/proxy setups). When the header is present it takes precedence and must match —
+     a present-but-wrong header is `401 forbidden` and never falls through to the body.
+     When the header is absent, `secret_key` must match. A missing/blank server-side
+     secret fails closed: every request gets `401 missing_webhook_secret`. A mismatch on
+     either transport → `401 forbidden` (the reason never leaks which was tried). The
+     receiver strips `secret_key` immediately after auth, before any persist.
    - When `HERMX_REQUIRE_HMAC=true`: `X-Webhook-Timestamp` + `X-Webhook-Signature` must carry
      a hex HMAC-SHA256 of `timestamp || body` keyed by `HERMX_WEBHOOK_HMAC_KEY` (an optional
      `sha256=` prefix is accepted), with the timestamp inside a 300 s replay window
@@ -220,11 +226,15 @@ terminal state against the venue.
    spam the dedup window); Expiration = open-ended or the longest available.
 3. **Enable the Webhook URL** notification and set it to the system webhook URL — the path
    is `/webhook` (e.g. `https://<your-host>/webhook`).
-4. **Set the secret header**: add the `X-Webhook-Secret` header with the `HERMX_SECRET`
-   value in the alert's webhook settings. Never put the secret in the message body or the
-   URL. (If the deployment runs with `HERMX_REQUIRE_HMAC=true`, requests must also carry
-   `X-Webhook-Timestamp`/`X-Webhook-Signature` — TradingView cannot compute a per-request
-   HMAC, so that mode requires a signing proxy in front of the receiver.)
+4. **Authenticate with the shared secret**: for a **direct TradingView alert** (the
+   default), include `"secret_key":"<HERMX_SECRET>"` in the message JSON — TradingView's
+   native webhook cannot send custom HTTP headers. For **relay/proxy setups**, inject the
+   `X-Webhook-Secret` header with the `HERMX_SECRET` value instead (it takes precedence
+   when present). Never put the secret in the URL. (If the deployment runs with
+   `HERMX_REQUIRE_HMAC=true`, requests must also carry `X-Webhook-Timestamp`/
+   `X-Webhook-Signature` — TradingView cannot compute a per-request HMAC, so that mode
+   requires a signing proxy in front of the receiver regardless of which secret transport
+   is used.)
 5. **Paste the message JSON** (see § 2, or the ready-made per-strategy templates in
    [3-TRADINGVIEW_ALERTS.md](3-TRADINGVIEW_ALERTS.md) § *TradingView Message Templates*). Placeholders:
    `{{ticker}}` → `symbol`, `{{strategy.order.action}}` → `side` (emits `buy`/`sell`),
@@ -233,6 +243,12 @@ terminal state against the venue.
 6. **Test with curl before going live**:
 
    ```bash
+   # Default (direct TradingView-native alert): secret in the JSON body.
+   curl -sS -X POST "https://<your-host>/webhook" \
+     -H "Content-Type: application/json" \
+     -d '{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview","secret_key":"'"$HERMX_SECRET"'"}'
+
+   # Alternative (relay/proxy setups): secret in the X-Webhook-Secret header.
    curl -sS -X POST "https://<your-host>/webhook" \
      -H "Content-Type: application/json" \
      -H "X-Webhook-Secret: $HERMX_SECRET" \
@@ -251,8 +267,9 @@ terminal state against the venue.
 - Alert placed on the wrong chart/timeframe → `strategy_symbol_mismatch` /
   `strategy_timeframe_mismatch` quarantine.
 - `timeframe` outside the schema enum (`30m 1h 2h 3h 4h`) fails schema validation.
-- Missing `X-Webhook-Secret` header → `401 forbidden`; TradingView shows the webhook as
-  failing but gives no detail — verify the header in the alert's webhook settings.
+- Missing/wrong `secret_key` body field (or, for relay setups, `X-Webhook-Secret` header) →
+  `401 forbidden`; TradingView shows the webhook as failing but gives no detail — verify the
+  `secret_key` in the alert message JSON (or the header in the relay).
 - TradingView webhooks require a paid plan, do not retry failed deliveries, and silently
   stop at alert expiration — set the longest expiration and monitor for signal absence.
 - Using `{{interval}}` for `timeframe` — hard-code it instead (§ 2).
@@ -262,7 +279,7 @@ terminal state against the venue.
 | Symptom | Likely cause | Where to check |
 |---|---|---|
 | TradingView marks webhook failed, nothing in logs | Wrong URL/path (must be `/webhook`), receiver down, or TLS issue | Receiver process status; `curl` test from § 5 |
-| `401 forbidden` / `missing_webhook_secret` | `X-Webhook-Secret` missing/wrong, or server `HERMX_SECRET` unset (fails closed) | Alert webhook settings; receiver env |
+| `401 forbidden` / `missing_webhook_secret` | `secret_key` body field (or relay `X-Webhook-Secret` header) missing/wrong, or server `HERMX_SECRET` unset (fails closed) | Alert message JSON / relay; receiver env |
 | `401 hmac_*` | `HERMX_REQUIRE_HMAC=true` without a signing proxy, clock skew past the 300 s replay window, wrong `HERMX_WEBHOOK_HMAC_KEY` | Proxy signing logic; server clock |
 | `400 invalid_json` | Malformed message body (trailing comma, unquoted placeholder) | Alert message box; the exact body in the 400 `detail` |
 | `200 queued` but no order | Rejected/quarantined asynchronously, or no strategy matched | `logs/pipeline.jsonl` (`quarantine`/`error` stage, `reason` field) |

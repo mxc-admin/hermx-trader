@@ -56,6 +56,10 @@
       "enum": ["tradingview"]
     },
     "signal_id": { "type": "string" },
+    "secret_key": {
+      "type": "string",
+      "description": "Shared webhook secret (equals HERMX_SECRET). This is the DEFAULT auth transport for direct TradingView-native alerts, whose webhook action cannot send custom HTTP headers on any plan. Operators running a relay/proxy may instead inject the X-Webhook-Secret header. The receiver authenticates on this field, then strips it before persisting so it never reaches any ledger."
+    },
     "extras": {
       "type": "object",
       "description": "Optional debugging context. Any extra fields sent in the alert that are not part of the core schema should be nested here to avoid conflicts with future schema additions. The receiver logs extras to pipeline.jsonl without affecting execution."

@@ -14,16 +14,22 @@ Goal: create one BUY and one SELL alert per strategy.
 
 ## Webhook Authentication
 
-The webhook secret is sent as an HTTP header, not in the alert body.
+The webhook secret (`HERMX_SECRET`) can be sent two ways:
 
-- Header name: `X-Webhook-Secret`
-- Header value: `HERMX_SECRET` from `.env`
-- This header is required; requests without it are rejected.
-- The secret does **not** go in the alert JSON body and is **not** part of the URL.
+- **Default — `secret_key` in the alert JSON body.** TradingView's native webhook alert
+  action **cannot send custom HTTP headers on any plan**, so a direct alert authenticates
+  by including `"secret_key": "<HERMX_SECRET>"` in the message JSON (see the payload
+  template below). This is the standard method for stock TradingView alerts.
+- **Alternative — `X-Webhook-Secret` HTTP header.** For operators who run a relay/proxy in
+  front of the receiver, the secret may instead be injected as this header. When present it
+  takes precedence over the body field and must match.
 
-TradingView Pro+ supports custom webhook headers, so the header can be set
-directly on the alert. If your plan does not support custom headers, use the
-HMAC relay path instead — see `setup/08-webhook-hmac-relay.md`.
+One transport is required; requests with neither (or a wrong value) are rejected `401`. The
+secret is **never** placed in the URL. The receiver strips `secret_key` immediately after
+authenticating, so it never reaches any ledger.
+
+If you run an HMAC signing relay (`HERMX_REQUIRE_HMAC=true`), see
+`setup/08-webhook-hmac-relay.md`.
 
 ## Active Alert Set
 
@@ -47,9 +53,11 @@ HMAC relay path instead — see `setup/08-webhook-hmac-relay.md`.
   "tv_signal_price": "{{close}}",
   "tv_time": "{{time}}",
   "exchange": "okx",
-  "source": "tradingview"
+  "source": "tradingview",
+  "secret_key": "<HERMX_SECRET>"
 }
 ```
 
-Use `side = sell` for sell alerts.
+Use `side = sell` for sell alerts. Replace `<HERMX_SECRET>` with the actual value from
+`.env`. Omit `secret_key` only if a relay injects the `X-Webhook-Secret` header instead.
 
