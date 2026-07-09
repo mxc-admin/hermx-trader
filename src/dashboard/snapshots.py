@@ -585,19 +585,6 @@ def signed_position_side(value):
     return "FLAT"
 
 
-def okx_order_notional(order, plan):
-    import dashboard as _dash
-    state = order.get("order_state") or {}
-    planned = order.get("planned") or {}
-    instrument = plan.get("instrument") or {}
-    size = _dash.as_float(_dash.first_present(state.get("accFillSz"), planned.get("sz")))
-    price = _dash.as_float(_dash.first_present(state.get("avgPx"), state.get("fillPx")))
-    ct_val = _dash.as_float(instrument.get("ctVal")) or 1.0
-    if size is None or price is None:
-        return None
-    return abs(size) * price * ct_val
-
-
 def epoch_ms(value):
     import dashboard as _dash
     if value in (None, ""):

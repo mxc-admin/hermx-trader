@@ -375,7 +375,6 @@ from dashboard.snapshots import (  # noqa: E402  re-export shim
     real_decisions,
     backfill_state,
     load_events,
-    target_side,
     mark_prices,
     _dashboard_executor,
     _strategy_venue,
@@ -390,7 +389,6 @@ from dashboard.snapshots import (  # noqa: E402  re-export shim
     okx_order_history_snapshot,
     symbol_from_inst_id,
     signed_position_side,
-    okx_order_notional,
     epoch_ms,
     okx_history_side_for_close,
     bool_text,
@@ -417,14 +415,10 @@ from dashboard.snapshots import (  # noqa: E402  re-export shim
 # callers). _MODEL_CACHE / _MODEL_BUILD_LOCK stay defined at the top of this
 # file because tests mutate dash_mod._MODEL_CACHE in place.
 from dashboard.model import (  # noqa: E402  re-export shim
-    DashboardModel,
-    StrategyPnlContract,
-    PortfolioContract,
     active_strategies,
     trial_symbols,
     strategy_inst_id,
     _pipeline_rows,
-    SIGNALS_MAX_N,
     SIGNALS_DEFAULT_N,
     _signal_projection,
     signals_payload,
@@ -463,17 +457,12 @@ from dashboard.render import (  # noqa: E402  re-export shim
     first_present,
     nested_get,
     fmt_seconds,
-    execution_fields,
-    execution_badge,
     metric_cards,
     reason_details,
-    asset_table,
     first_okx_trade_map,
     okx_live_entry_state,
     okx_live_card,
     okx_execution_table,
-    trade_log,
-    okx_demo_live_section,
     metric_cards_colored,
     strategy_card,
     strategy_alert_table,
@@ -534,7 +523,6 @@ STATIC_MIME_TYPES = {
 # because tests monkeypatch them here and they are repo/env-bound.
 from dashboard.server import (  # noqa: E402  re-export shim
     Handler,
-    DASHBOARD_REFRESH_INTERVAL_SECONDS,
     _refresh_dashboard_cache_loop,
 )
 

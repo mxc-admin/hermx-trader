@@ -148,74 +148,6 @@ def fmt_seconds(value):
     return f"{value:,.2f}s"
 
 
-def execution_fields(event, alert_price):
-    import dashboard as _dash
-    first_present, nested_get, as_float = _dash.first_present, _dash.nested_get, _dash.as_float
-    payload = event.get("payload") or {}
-    okx_fill = event.get("okx_fill") or nested_get(event, "execution_readiness", "okx_fill") or {}
-    okx_price = as_float(first_present(
-        event.get("okx_execution_price"),
-        event.get("execution_price"),
-        event.get("fill_price"),
-        event.get("avg_fill_price"),
-        okx_fill.get("avg_fill_price"),
-        payload.get("okx_execution_price"),
-        payload.get("execution_price"),
-        payload.get("fill_price"),
-        payload.get("avg_fill_price"),
-    ))
-    latency_seconds = as_float(first_present(
-        event.get("execution_latency_seconds"),
-        event.get("okx_latency_seconds"),
-        event.get("latency_seconds"),
-        nested_get(event, "latency", "latency_seconds"),
-        payload.get("execution_latency_seconds"),
-        payload.get("okx_latency_seconds"),
-    ))
-    slippage_pct = as_float(first_present(
-        event.get("slippage_pct"),
-        event.get("alert_execution_diff_pct"),
-        okx_fill.get("slippage_pct"),
-        payload.get("slippage_pct"),
-        payload.get("alert_execution_diff_pct"),
-    ))
-    if slippage_pct is None and okx_price is not None and alert_price:
-        slippage_pct = (float(okx_price) / float(alert_price) - 1.0) * 100.0
-    okx_status = str(first_present(
-        event.get("okx_status"),
-        event.get("execution_status"),
-        okx_fill.get("status"),
-        payload.get("okx_status"),
-        payload.get("execution_status"),
-    ) or "").lower()
-    okx_executed = bool(okx_price is not None or okx_status in {"filled", "executed", "partially_filled", "live_order_sent"})
-    source = "OKX" if okx_executed else "PAPER"
-    status = first_present(okx_status.upper() if okx_status else None, "executed" if okx_executed else None)
-    if source == "PAPER":
-        raw_source = str(event.get("source") or "").lower()
-        if raw_source == "historical":
-            status = "historical replay"
-        elif raw_source == "manual_backfill":
-            status = "manual backfill"
-        elif raw_source == "live":
-            status = "live paper"
-        else:
-            status = raw_source or "paper"
-    return {
-        "execution_source": source,
-        "execution_status": status,
-        "okx_price": okx_price,
-        "latency_seconds": latency_seconds,
-        "slippage_pct": slippage_pct,
-    }
-
-
-def execution_badge(row):
-    import dashboard as _dash
-    source = str(row.get("execution_source") or "PAPER").upper()
-    return _dash.badge("OKX" if source == "OKX" else "PAPER", "good" if source == "OKX" else "neutral")
-
-
 # --- HTML section builders (monolith ``metric_cards`` .. ``summary_cards``) ---
 
 def metric_cards(items):
@@ -233,38 +165,6 @@ def reason_details(row):
     ctx_line = f"Regime {ctx.get('regime','-')} / Phase {ctx.get('phase','-')} / Alignment {num(ctx.get('no_pulse_score'),2)} / RSI {num(ctx.get('jrsx'),2)} / Acc {num(ctx.get('pp_acc'),2)} / Vel {num(ctx.get('pp_vel'),2)}"
     raw = f"Decision {row.get('decision','-')} / Policy {row.get('policy_action','-')}"
     return f'<details class="why"><summary>{badge(trade_effect(row), action_kind(trade_effect(row)))}</summary><p>{esc(raw)}</p><p>{esc(ctx_line)}</p><ul>{reasons}</ul></details>'
-
-
-def asset_table(rows):
-    import dashboard as _dash
-    esc, num, badge, money = _dash.esc, _dash.num, _dash.badge, _dash.money
-    side_kind, trade_effect, action_kind, reason_details = _dash.side_kind, _dash.trade_effect, _dash.action_kind, _dash.reason_details
-    if not rows:
-        return '<table><tbody><tr><td>No signals yet.</td></tr></tbody></table>'
-    body = []
-    for row in reversed(rows):
-        pnl_kind = "good" if (row.get("closed_pnl") or 0) > 0 else ("bad" if row.get("closed_pnl") is not None else "neutral")
-        body.append(f"""
-        <tr>
-          <td>{esc(row.get('time_colombia'))}</td>
-          <td>{esc(row.get('timeframe'))}</td>
-          <td>{badge(row.get('signal'), side_kind(row.get('signal')))}</td>
-          <td>{num(row.get('price'), 4)}</td>
-          <td>{esc(row.get('position_action'))}</td>
-          <td>{badge(trade_effect(row), action_kind(trade_effect(row)))}</td>
-          <td>{reason_details(row)}</td>
-          <td>{num(row.get('weight'), 2)}x</td>
-          <td>{money(row.get('fees'), 2)}</td>
-          <td>{badge(money(row.get('closed_pnl'), 2) if row.get('closed_pnl') is not None else "-", pnl_kind)}</td>
-          <td>{money(row.get('equity_after'), 2)}</td>
-        </tr>
-        """)
-    return f"""
-    <table>
-      <thead><tr><th>Fecha</th><th>TF</th><th>Signal</th><th>Precio</th><th>Position action</th><th>Trade effect</th><th>Why</th><th>Weight</th><th>Fees</th><th>PnL</th><th>Budget after</th></tr></thead>
-      <tbody>{''.join(body)}</tbody>
-    </table>
-    """
 
 
 def first_okx_trade_map(rows):
@@ -395,75 +295,6 @@ def okx_execution_table(rows, live_info=None):
       <thead><tr><th>Fecha</th><th>Asset</th><th>Signal</th><th>Leg</th><th>Status</th><th>Alert</th><th>Fill</th><th>Slip</th><th>Size</th><th>Value</th><th>RO</th><th>Fee</th><th>PnL</th><th>Mode</th><th>Details</th></tr></thead>
       <tbody>{''.join(body)}</tbody>
     </table>
-    """
-
-
-def trade_log(rows, live_row_ids=None):
-    import dashboard as _dash
-    esc, num, badge, money = _dash.esc, _dash.num, _dash.badge, _dash.money
-    side_kind, trade_effect, action_kind, reason_details = _dash.side_kind, _dash.trade_effect, _dash.action_kind, _dash.reason_details
-    if not rows:
-        return '<table><tbody><tr><td>No signals yet.</td></tr></tbody></table>'
-    live_row_ids = live_row_ids or set()
-    body = []
-    for row in reversed(rows):
-        pnl_kind = "good" if (row.get("closed_pnl") or 0) > 0 else ("bad" if row.get("closed_pnl") is not None else "neutral")
-        effect = trade_effect(row)
-        is_live = row.get("row_id") in live_row_ids
-        live_cell = '<span class="live-dot"></span> LIVE' if is_live else ""
-        tr_class = ' class="live-row"' if is_live else ""
-        body.append(f"""
-        <tr id="{esc(row.get('row_id'))}"{tr_class}>
-          <td>{esc(row.get('time_colombia'))}</td>
-          <td>{live_cell}</td>
-          <td><b>{esc(row.get('symbol'))}</b></td>
-          <td>{esc(row.get('timeframe'))}</td>
-          <td>{badge(row.get('signal'), side_kind(row.get('signal')))}</td>
-          <td>{num(row.get('price'), 4)}</td>
-          <td>{esc(row.get('position_action'))}</td>
-          <td>{badge(effect, action_kind(effect))}</td>
-          <td>{reason_details(row)}</td>
-          <td>{num(row.get('weight'), 2)}x</td>
-          <td>{money(row.get('fees'), 2)}</td>
-          <td>{badge(money(row.get('closed_pnl'), 2) if row.get('closed_pnl') is not None else "-", pnl_kind)}</td>
-        </tr>
-        """)
-    return f"""
-    <table>
-      <thead><tr><th>Fecha</th><th>Live</th><th>Asset</th><th>TF</th><th>Signal</th><th>Mark price</th><th>Position action</th><th>Trade effect</th><th>Why</th><th>Weight</th><th>Fees</th><th>PnL</th></tr></thead>
-      <tbody>{''.join(body)}</tbody>
-    </table>
-    """
-
-
-def okx_demo_live_section(config, okx_live, okx_executions):
-    import dashboard as _dash
-    esc = _dash.esc
-    okx_live_card, okx_live_entry_state = _dash.okx_live_card, _dash.okx_live_entry_state
-    first_okx_trade_map, okx_execution_table = _dash.first_okx_trade_map, _dash.okx_execution_table
-    error = ""
-    if not okx_live.get("ok"):
-        error = f'<div class="notice warn"><b>OKX read unavailable:</b> {esc(okx_live.get("error") or "unknown error")}</div>'
-    live_info = okx_live_entry_state(okx_live, okx_executions)
-    first_trades = first_okx_trade_map(okx_executions)
-    return f"""
-    <section class="subsection okx-section">
-      <div class="log-head">
-        <div>
-          <h3>OKX Demo Live</h3>
-          <p>Actual sandbox positions and order fills. This is separate from the historical paper replay.</p>
-        </div>
-      </div>
-      {error}
-      <div class="asset-grid">{''.join(okx_live_card(config, okx_live, sym, first_trades.get(sym)) for sym in _dash.SYMBOLS)}</div>
-      <section class="trade-log-card nested">
-        <div class="log-head">
-          <h3>Execution Ledger</h3>
-          <p>Only real demo submissions appear here. Close and open orders can be separate rows for the same alert.</p>
-        </div>
-        <div class="table-wrap unified-log">{okx_execution_table(okx_executions, live_info)}</div>
-      </section>
-    </section>
     """
 
 
