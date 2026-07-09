@@ -15,14 +15,11 @@ from __future__ import annotations
 
 from orders.troubleshoot import (
     SafeAction,
-    TroubleshootResult,
     classify_ambiguous_unknown,
     classify_terminal_overwritten,
     run_classifiers,
     troubleshoot_all_open_orders,
 )
-
-import pytest
 
 import webhook_receiver as wr  # noqa: F401  (imported for type/reference parity with sibling test files)
 

@@ -19,7 +19,6 @@ import time
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib import request as urllib_request
 from urllib.parse import urlparse
 
 from security.credentials import redact_secrets

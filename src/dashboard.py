@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import base64
-import html
-import hmac
 import json
 import os
 import sys
 import tempfile
 import threading
-import time
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
 
 from dashboard_core import (
     LEDGER_READ_STATS,

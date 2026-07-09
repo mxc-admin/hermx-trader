@@ -913,7 +913,7 @@ def strategy_indicator_label(strategies):
 
 def summary_cards(model):
     import dashboard as _dash
-    esc, badge = _dash.esc, _dash.badge
+    esc = _dash.esc
     okx_live = model.get("okx_live") or {}
     strategies = model.get("active_strategies") or []
     executor = model.get("executor") or {}
