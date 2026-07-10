@@ -748,7 +748,6 @@ def summary_cards(model):
     okx_live = model.get("okx_live") or {}
     strategies = model.get("active_strategies") or []
     executor = model.get("executor") or {}
-    fresh = model.get("freshness") or {}
 
     # Card 1: System status
     live_enabled, _ = _dash.live_trading_enabled()
@@ -783,7 +782,13 @@ def summary_cards(model):
     # Card 4: Executor health
     exec_ok = executor.get("ok", False)
     exec_err = executor.get("error")
-    stale = fresh.get("stale", False)
+    # Staleness for THIS card is executor health, not alert freshness. `fresh`
+    # ("stale") tracks the signal-bar freshness clock (used by the freshness card /
+    # STALE badge elsewhere); the executor summary carries its own "stale" flag
+    # (dashboard/model.py:360 aggregates per-(venue,mode) env staleness). Sourcing it
+    # from `fresh` here mislabels the engine STALE whenever alerts are quiet even if
+    # the executor is healthy, and misses a genuinely stale executor when alerts flow.
+    stale = executor.get("stale", False)
     if stale:
         exec_label, exec_kind = "STALE", "bad"
     elif not exec_ok:

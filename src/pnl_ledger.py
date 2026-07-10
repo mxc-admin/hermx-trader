@@ -148,6 +148,44 @@ def _as_float(value) -> float | None:
         return None
 
 
+def _quote_ccy(inst_id) -> str | None:
+    """The instrument's quote currency, e.g. ``BTC-USDT-SWAP`` -> ``USDT``.
+
+    None when the id doesn't carry a dash-delimited quote segment (can't judge)."""
+    parts = str(inst_id or "").split("-")
+    return parts[1].upper() if len(parts) > 1 else None
+
+
+def _fee_currency_matches_quote(fee_currency, inst_id) -> bool:
+    """True unless we can POSITIVELY determine the fee is in a non-quote currency.
+
+    A fee paid in a currency other than the instrument's quote (e.g. BNB, the base
+    asset) is not USD-denominated and must be excluded from USD aggregates. We can't
+    FX-convert here, so when either the fee currency or the quote can't be resolved we
+    can't prove a mismatch -> treat as eligible (preserves the normal path and avoids
+    a false-positive exclusion of a genuine quote-currency fee)."""
+    quote = _quote_ccy(inst_id)
+    if not fee_currency or not quote:
+        return True
+    return str(fee_currency).upper() == quote
+
+
+def _usd_fee_cost(row: dict) -> float | None:
+    """The portion of ``fee_cost`` eligible for USD-denominated aggregates.
+
+    Returns the raw ``fee_cost`` when its currency matches the instrument quote, else
+    ``0.0`` — the mismatched fee is zeroed *for USD-total purposes only*. The raw
+    ``fee_cost`` / ``fee_currency`` stay on the row untouched (nothing is lost); this
+    is purely the value that may be summed into ``closed_fees_usd`` / net. None when
+    the row has no fee at all (distinct from a real 0.0)."""
+    fee = _as_float(row.get("fee_cost"))
+    if fee is None:
+        return None
+    if _fee_currency_matches_quote(row.get("fee_currency"), row.get("inst_id")):
+        return fee
+    return 0.0
+
+
 def _composite_key(row: dict) -> tuple:
     return (row.get("exchange"), row.get("inst_id"), row.get("ord_id"), row.get("mode"))
 
@@ -300,9 +338,12 @@ def read_closed_trades(
             # Derived on read from stored gross+fee; never persisted here so the
             # ledger stays append-only and the computation stays rollback-safe.
             if "net_realized_pnl" not in row:
+                # #2b: back-fill net using the USD-eligible fee only — a v1 row whose
+                # fee_currency mismatches the instrument quote excludes that fee from
+                # net (same exclusion the write path now applies at _build_entry).
                 row["net_realized_pnl"] = _compute_net_realized(
                     _as_float(row.get("pnl_gross")),
-                    _as_float(row.get("fee_cost")),
+                    _usd_fee_cost(row),
                     row.get("exchange"),
                 )
             # Back-fill recorded_at_ms (local ts_init) for v1/v2 rows as None on read
@@ -445,7 +486,10 @@ def aggregate_strategy_pnl(
         rows = [r for r in rows if r.get("mode") == mode]
     closed_net = sum((r.get("net_realized_pnl") or 0.0) for r in rows)
     closed_realized = sum((_as_float(r.get("pnl_gross")) or 0.0) for r in rows)
-    closed_fees = sum((_as_float(r.get("fee_cost")) or 0.0) for r in rows)
+    # #2b: closed_fees_usd is a USD total — exclude any fee in a non-quote currency
+    # (`_usd_fee_cost` zeroes a mismatch) so it can't sum a BNB/base-asset fee as if
+    # it were USDT. `net_realized_pnl` already excludes the same fee at write/back-fill.
+    closed_fees = sum((_usd_fee_cost(r) or 0.0) for r in rows)
     # Latest close instant within the window (ms epoch), or None when no rows. The
     # Phase-4 API contract surfaces it as ``last_close_at_ms`` so the UI can show
     # "as of" freshness without re-reading the ledger.
@@ -641,18 +685,19 @@ def _build_entry(row: dict, exchange_id: str, mode: str, side: str, filled: floa
     fee_cost = _as_float(row.get("fee"))
     fee_currency = row.get("feeCcy")
     # A fee paid in a currency other than the instrument's quote (e.g. BNB, base
-    # asset) is not USD and must not be summed into closed_fees_usd as if it were.
-    # We can't FX-convert here, so warn for operator awareness and still persist the
-    # row — the mismatched fee is simply excluded from the USD total downstream.
-    if fee_cost and fee_currency and inst_id:
-        _parts = str(inst_id).split("-")
-        quote = _parts[1].upper() if len(_parts) > 1 else None
-        if quote and str(fee_currency).upper() != quote:
-            logger.warning(
-                "fee_currency_mismatch inst_id=%s fee_currency=%s quote=%s fee_cost=%.8g"
-                " — fee excluded from USD total",
-                inst_id, fee_currency, quote, fee_cost,
-            )
+    # asset) is not USD and must not be summed into closed_fees_usd / net as if it
+    # were. We can't FX-convert here, so warn for operator awareness, keep the raw
+    # fee_cost/fee_currency on the row (nothing lost), and zero the fee ONLY for the
+    # USD-denominated net below (`_usd_fee`). Read/aggregate paths re-derive the same
+    # exclusion via `_usd_fee_cost` so closed_fees_usd stays consistent.
+    _usd_fee = fee_cost
+    if fee_cost and not _fee_currency_matches_quote(fee_currency, inst_id):
+        _usd_fee = 0.0
+        logger.warning(
+            "fee_currency_mismatch inst_id=%s fee_currency=%s quote=%s fee_cost=%.8g"
+            " — fee excluded from USD total",
+            inst_id, fee_currency, _quote_ccy(inst_id), fee_cost,
+        )
     cl_ord_id = row.get("clOrdId") or row.get("clientOrderId")
     # Hyperliquid returns a numeric/hex cloid in place of the submitted mxc id; if
     # we recorded the mapping at submit time, store the original mxc id (Phase 7b).
@@ -694,7 +739,9 @@ def _build_entry(row: dict, exchange_id: str, mode: str, side: str, filled: floa
         "fee_currency": fee_currency,
         # Phase 2: fee-correct net, computed from gross+fee per venue semantics.
         # Gross stays the displayed value for now (Decision ②: verify net later).
-        "net_realized_pnl": _compute_net_realized(pnl_gross, fee_cost, exchange_id),
+        # #2b: a non-quote-currency fee is excluded from net (`_usd_fee` zeroed above)
+        # so net stays USD-denominated; the raw fee_cost is preserved on the row.
+        "net_realized_pnl": _compute_net_realized(pnl_gross, _usd_fee, exchange_id),
         "closed_at_ms": _row_ts(row),
         "recorded_at_ms": int(time.time() * 1000),
         "cl_ord_id": cl_ord_id,

@@ -140,3 +140,67 @@ def test_net_realized_for_strategy_none_counts_as_zero(ledger_dir):
         encoding="utf-8",
     )
     assert pnl_ledger.net_realized_for_strategy("alpha") == 8.0
+
+
+# --- #2b: non-quote-currency fees excluded from USD-denominated totals -------
+
+def test_net_excludes_non_quote_currency_fee(ledger_dir):
+    # Fee paid in BNB on a USDT-quoted instrument: not USD, so it must NOT be
+    # subtracted into net_realized_pnl. The raw fee_cost/currency stay on the row.
+    rows = [
+        {"instId": "BTC-USDT-SWAP", "ordId": "closeBNB", "clOrdId": "mxcBNB",
+         "side": "sell", "accFillSz": 1.0, "reduceOnly": True,
+         "avgPx": "51000", "pnl": "100.0", "fee": "-0.5", "feeCcy": "BNB",
+         "uTime": 200},
+    ]
+    pnl_ledger.reconcile_from_order_history(rows, "okx", "demo")
+    row = pnl_ledger.read_closed_trades()[0]
+    assert row["fee_cost"] == -0.5          # raw fee preserved (nothing lost)
+    assert row["fee_currency"] == "BNB"
+    assert row["net_realized_pnl"] == pytest.approx(100.0)  # fee NOT netted
+
+
+def test_net_includes_matching_quote_currency_fee(ledger_dir):
+    # Normal path (no false-positive exclusion): USDT fee on a USDT instrument IS
+    # subtracted into net, exactly as before.
+    rows = [
+        {"instId": "BTC-USDT-SWAP", "ordId": "closeUSDT", "clOrdId": "mxcUSDT",
+         "side": "sell", "accFillSz": 1.0, "reduceOnly": True,
+         "avgPx": "51000", "pnl": "100.0", "fee": "-0.5", "feeCcy": "USDT",
+         "uTime": 200},
+    ]
+    pnl_ledger.reconcile_from_order_history(rows, "okx", "demo")
+    row = pnl_ledger.read_closed_trades()[0]
+    assert row["net_realized_pnl"] == pytest.approx(99.5)
+
+
+def test_aggregate_excludes_non_quote_fee_from_usd_totals(ledger_dir):
+    # One strategy, two closes: a USDT fee (counts toward closed_fees_usd) and a BNB
+    # fee (excluded). closed_net sums the stored, already-corrected net rows.
+    ledger_dir.write_text(
+        json.dumps({"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "1",
+                    "mode": "demo", "strategy_id": "alpha", "pnl_gross": 100.0,
+                    "fee_cost": -0.5, "fee_currency": "USDT",
+                    "net_realized_pnl": 99.5, "closed_at_ms": 100}) + "\n"
+        + json.dumps({"exchange": "okx", "inst_id": "ETH-USDT-SWAP", "ord_id": "2",
+                      "mode": "demo", "strategy_id": "alpha", "pnl_gross": 50.0,
+                      "fee_cost": -2.0, "fee_currency": "BNB",
+                      "net_realized_pnl": 50.0, "closed_at_ms": 200}) + "\n",
+        encoding="utf-8",
+    )
+    agg = pnl_ledger.aggregate_strategy_pnl("alpha", mode="demo")
+    # Only the USDT fee (-0.5) is a USD fee; the BNB fee (-2.0) is excluded.
+    assert agg["closed_fees_usd"] == pytest.approx(-0.5)
+    assert agg["closed_net_pnl_usd"] == pytest.approx(149.5)
+
+
+def test_backfill_net_excludes_non_quote_fee(ledger_dir):
+    # A v1 row (no net_realized_pnl) whose fee is in a non-quote currency: the
+    # read-time back-fill must exclude that fee from net, same as the write path.
+    ledger_dir.write_text(
+        json.dumps({"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "ord_id": "v1bnb",
+                    "mode": "demo", "pnl_gross": 100.0, "fee_cost": -0.5,
+                    "fee_currency": "BNB", "closed_at_ms": 100}) + "\n",
+        encoding="utf-8",
+    )
+    assert pnl_ledger.read_closed_trades()[0]["net_realized_pnl"] == pytest.approx(100.0)
