@@ -12,8 +12,8 @@ Covers:
   - N <= 0 disables the sweep entirely.
 
 The loop under test is reconcile.unknown_resolver.unknown_resolver_loop; the
-sweep globals (HERMX_DRIFT_CHECK_EVERY_N_TICKS, active_venue_modes) live on
-that module and are monkeypatched there. check_balance_drift and
+sweep globals (HERMX_DRIFT_CHECK_EVERY_N_TICKS, active_venue_mode_currencies)
+live on that module and are monkeypatched there. check_balance_drift and
 _account_equity_estimate are dereferenced through their home modules at call
 time (the module's documented lazy-import pattern), so they are patched on
 executors.ccxt_adapter / pnl_ledger respectively -- the production call path,
@@ -48,17 +48,25 @@ def _tick_summary():
 
 
 def _run_ticks(wr, monkeypatch, *, n_ticks, every_n, pairs, equity, drift_calls,
-               drift_raises=frozenset(), equity_fn=None):
+               drift_raises=frozenset(), equity_fn=None, currency_calls=None):
     """Drive unknown_resolver_loop for exactly n_ticks with the drift seam faked.
 
+    pairs: (venue, simulated) 2-tuples (implicit "USDT" settle currency) OR
+    (venue, simulated, currency) 3-tuples -- fed to the currency-aware enumerator
+    active_venue_mode_currencies (#9 Half 1).
     equity: dict[(venue, mode)] -> float | None (missing key -> None);
     equity_fn overrides it when a test needs to observe the estimate calls.
     drift_calls: list appended with (venue, mode, equity) per production
-    check_balance_drift invocation. drift_raises: venues whose check raises.
+    check_balance_drift invocation. currency_calls: when provided, list appended
+    with (venue, mode, currency) so a test can assert per-currency iteration.
+    drift_raises: venues whose check raises.
     Returns the tick count observed by the (faked) resolver pass.
     """
     ticks = []
     stop = _FastStop()
+
+    def _as_triple(p):
+        return p if len(p) == 3 else (p[0], p[1], "USDT")
 
     def fake_resolve():
         ticks.append(1)
@@ -74,12 +82,14 @@ def _run_ticks(wr, monkeypatch, *, n_ticks, every_n, pairs, equity, drift_calls,
             raise RuntimeError(f"venue {venue} balance read exploded")
         assert isinstance(executor, _StubExecutor)
         drift_calls.append((venue, mode, hermx_equity_usd))
+        if currency_calls is not None:
+            currency_calls.append((venue, mode, currency))
         return None
 
     monkeypatch.setattr(wr, "resolve_unknown_orders_once", fake_resolve)
     monkeypatch.setattr(wr, "_reconciliation_executor", lambda intent=None: _StubExecutor())
     monkeypatch.setattr(ur, "HERMX_DRIFT_CHECK_EVERY_N_TICKS", every_n)
-    monkeypatch.setattr(ur, "active_venue_modes", lambda: set(pairs))
+    monkeypatch.setattr(ur, "active_venue_mode_currencies", lambda: {_as_triple(p) for p in pairs})
     monkeypatch.setattr(pnl_ledger, "_account_equity_estimate",
                         equity_fn or (lambda venue, mode: equity.get((venue, mode))))
     monkeypatch.setattr(ccxt_adapter, "check_balance_drift", fake_check_balance_drift)
@@ -182,6 +192,25 @@ def test_zero_or_negative_n_disables_sweep(wr, monkeypatch):
     )
     assert ticks == 4
     assert calls == []
+
+
+def test_drift_check_iterates_per_currency_same_venue(wr, monkeypatch):
+    # #9 Half 1: a USDT strategy and a USDC strategy on the SAME live venue are
+    # two distinct (venue, mode, currency) tuples -> two drift checks, each
+    # reading its own currency, NOT one hardcoded-USDT check that misses USDC.
+    calls = []
+    ccy_calls = []
+    ticks = _run_ticks(
+        wr, monkeypatch, n_ticks=1, every_n=1,
+        pairs={("okx", False, "USDT"), ("okx", False, "USDC")},
+        equity={("okx", "live"): 1000.0},
+        drift_calls=calls, currency_calls=ccy_calls,
+    )
+    assert ticks == 1
+    assert sorted(ccy_calls) == [
+        ("okx", "live", "USDC"),
+        ("okx", "live", "USDT"),
+    ]
 
 
 def test_default_cadence_is_ten_ticks():

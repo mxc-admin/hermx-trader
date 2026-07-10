@@ -49,6 +49,73 @@ def active_venue_modes() -> "set[tuple[str, bool]]":
     return pairs
 
 
+def settle_currency(inst_id: "str | None") -> str:
+    """PURE: the settlement currency of an inst_id -- the exact key the drift check
+    must pull out of the venue's multi-currency balance dict.
+
+    Fail-open to ``"USDT"`` (the pre-fix hardcoded default) on any unparseable
+    shape so a bad/unknown id degrades the drift sweep to prior behavior rather
+    than crashing it. Handles both id conventions already used in this codebase:
+
+      OKX-native   BTC-USDT-SWAP -> USDT   ETH-USDC-SWAP -> USDC
+      CCXT-unified BTC/USDT:USDT -> USDT   SOL/USDC:USDC -> USDC
+
+    and the inverse-contract convention from
+    ``ccxt_adapter._inst_id_to_ccxt_symbol`` (``settle = base if quote == "USD"``),
+    so a ``BTC-USD-SWAP`` inverse id resolves to ``BTC``, for consistency."""
+    text = str(inst_id or "").strip().upper()
+    if not text:
+        return "USDT"
+    try:
+        # CCXT-unified "BASE/QUOTE:SETTLE" -- the settle ccy is explicit after ':'.
+        if ":" in text:
+            settle = text.split(":", 1)[1].strip()
+            return settle or "USDT"
+        # OKX-native "BASE-QUOTE[-TYPE]" -- the middle segment is the quote ccy;
+        # an inverse (quote == USD) settles in the base, matching ccxt_adapter:147.
+        if "-" in text:
+            parts = [p for p in text.split("-") if p]
+            if len(parts) >= 2:
+                base, quote = parts[0], parts[1]
+                return base if quote == "USD" else quote
+        # Spot-style "BASE/QUOTE" (no settle marker) -- the quote is the settle ccy.
+        if "/" in text:
+            base, quote = (p.strip() for p in text.split("/", 1))
+            if quote:
+                return base if quote == "USD" else quote
+    except Exception:  # pragma: no cover - defensive: any parse surprise -> default
+        pass
+    return "USDT"
+
+
+def active_venue_mode_currencies() -> "set[tuple[str, bool, str]]":
+    """Currency-aware sibling of :func:`active_venue_modes` (issue #9, Half 1): the
+    same ``(venue, simulated_trading)`` domain, PLUS the settlement currency each
+    loaded strategy trades in -- so the balance-drift sweep can read the right
+    balance key per strategy instead of the hardcoded ``"USDT"``. A USDT strategy
+    and a USDC strategy on the same venue yield two distinct tuples, hence two
+    drift checks (one per currency) rather than one wrong USDT-only check.
+
+    Kept as a PARALLEL function -- ``active_venue_modes`` stays a 2-tuple set --
+    because that function's exact shape is asserted by tests and mirrored by
+    ``pnl_ledger._account_equity_estimate``; only the drift path needs currency.
+    Venue and mode resolve IDENTICALLY to ``active_venue_modes`` (same lazy
+    STRATEGIES read, same ``effective_execution_mode`` override); the currency
+    comes from :func:`settle_currency` over the instrument's ``inst_id`` and
+    fail-opens to ``"USDT"``, so an all-USDT fleet yields exactly one currency
+    per venue -- no behavior change from the pre-fix default."""
+    import webhook_receiver as _wr
+    triples: "set[tuple[str, bool, str]]" = set()
+    for sid, strategy in (getattr(_wr, "STRATEGIES", None) or {}).items():
+        inst = strategy_instrument(strategy) or {}
+        venue = str(inst.get("exchange") or "").strip().lower()
+        if not venue:
+            continue
+        mode = effective_execution_mode(strategy, sid)
+        triples.add((venue, mode != "live", settle_currency(inst.get("inst_id"))))
+    return triples
+
+
 def _effective_execution_config(order_intent: "dict | None" = None) -> dict:
     """The execution config the write path actually resolves: the adapter selector
     (EXEC_BACKEND, which already honors HERMX_EXEC_BACKEND) plus the venue+mode to

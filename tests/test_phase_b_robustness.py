@@ -36,7 +36,11 @@ from executors.ccxt_adapter import (
     check_balance_drift,
     detect_position_drift,
 )
-from reconcile.executor_select import active_venue_modes
+from reconcile.executor_select import (
+    active_venue_modes,
+    active_venue_mode_currencies,
+    settle_currency,
+)
 
 
 # ===========================================================================
@@ -356,6 +360,72 @@ def test_active_venue_modes_reflects_control_state_override(wr, monkeypatch):
 def test_active_venue_modes_empty_strategies(wr, monkeypatch):
     monkeypatch.setattr(wr, "STRATEGIES", {})
     assert active_venue_modes() == set()
+
+
+# ===========================================================================
+# #9 Half 1 — settle-currency parser + currency-aware (venue, mode, ccy) domain
+# ===========================================================================
+
+def _venue_strategy_ccy(sid, exchange, inst_id, mode="demo"):
+    """_venue_strategy with an explicit inst_id (so the settle currency varies)."""
+    return {
+        "strategy_id": sid,
+        "execution_mode": mode,
+        "instrument": {"exchange": exchange, "inst_id": inst_id, "type": "swap"},
+    }
+
+
+@pytest.mark.parametrize("inst_id, expected", [
+    ("BTC-USDT-SWAP", "USDT"),          # OKX-native linear
+    ("ETH-USDC-SWAP", "USDC"),          # OKX-native USDC-settled
+    ("BTC/USDT:USDT", "USDT"),          # CCXT-unified linear
+    ("SOL/USDC:USDC", "USDC"),          # CCXT-unified USDC-settled
+    ("BTC-USD-SWAP", "BTC"),            # inverse: settle == base (ccxt_adapter:147)
+    ("BTC/USD:BTC", "BTC"),             # CCXT-unified inverse (explicit settle)
+    ("btc-usdc-swap", "USDC"),          # case-insensitive
+    ("ETH-USDT", "USDT"),               # bare pair, no type suffix
+    ("garbage", "USDT"),                # unparseable -> fail-open default
+    ("", "USDT"),                       # empty -> default
+    (None, "USDT"),                     # None -> default
+])
+def test_settle_currency_parses_all_shapes(inst_id, expected):
+    assert settle_currency(inst_id) == expected
+
+
+def test_active_venue_mode_currencies_splits_by_currency(wr, monkeypatch):
+    # One USDT strategy and one USDC strategy on the SAME live venue -> two
+    # distinct (venue, simulated, currency) tuples (the drift check will run once
+    # per currency instead of one hardcoded-USDT check).
+    monkeypatch.setattr(wr, "STRATEGIES", {
+        "usdt": _venue_strategy_ccy("usdt", "okx", "BTC-USDT-SWAP", mode="live"),
+        "usdc": _venue_strategy_ccy("usdc", "okx", "ETH-USDC-SWAP", mode="live"),
+    })
+    assert active_venue_mode_currencies() == {
+        ("okx", False, "USDT"),
+        ("okx", False, "USDC"),
+    }
+
+
+def test_active_venue_mode_currencies_all_usdt_fleet_one_ccy_per_venue(wr, monkeypatch):
+    # Regression guard: the current all-USDT fleet (4 strategies across venues)
+    # still yields exactly ONE currency (USDT) per (venue, mode) -- zero behavior
+    # change from the pre-fix hardcoded default.
+    monkeypatch.setattr(wr, "STRATEGIES", {
+        "s1": _venue_strategy_ccy("s1", "okx", "BTC-USDT-SWAP", mode="live"),
+        "s2": _venue_strategy_ccy("s2", "okx", "ETH-USDT-SWAP", mode="live"),  # same venue+ccy
+        "s3": _venue_strategy_ccy("s3", "bybit", "SOL/USDT:USDT", mode="live"),
+        "s4": _venue_strategy_ccy("s4", "kucoin", "XRP-USDT-SWAP", mode="demo"),
+    })
+    triples = active_venue_mode_currencies()
+    # Every emitted currency is USDT; two okx strategies collapse to one triple.
+    assert triples == {
+        ("okx", False, "USDT"),
+        ("bybit", False, "USDT"),
+        ("kucoin", True, "USDT"),
+    }
+    assert {ccy for (_v, _s, ccy) in triples} == {"USDT"}
+    # Venue/mode domain is identical to the 2-tuple enumerator (no drift).
+    assert {(v, s) for (v, s, _c) in triples} == active_venue_modes()
 
 
 # ===========================================================================

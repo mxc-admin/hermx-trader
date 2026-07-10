@@ -35,7 +35,7 @@ from orders.journal import (
     load_open_orders,
     record_order_state,
 )
-from reconcile.executor_select import _executor_for_order, active_venue_modes
+from reconcile.executor_select import _executor_for_order, active_venue_mode_currencies
 from reconcile.orders import reconcile_order_once, _order_is_present
 from reconcile.alerts import (
     emit_reconcile_alert,
@@ -66,9 +66,9 @@ HERMX_DRIFT_CHECK_EVERY_N_TICKS = _env_int("HERMX_DRIFT_CHECK_EVERY_N_TICKS", 10
 
 
 def _run_balance_drift_checks() -> None:
-    """B1 balance-drift sweep: for every live (venue, mode) the loaded strategies
-    can trade on, compare the venue's real balance against HermX's synthetic
-    equity estimate. OBSERVE-ONLY and fail-open at every layer: any per-pair
+    """B1 balance-drift sweep: for every live (venue, mode, currency) the loaded
+    strategies can trade on, compare the venue's real balance (in that strategy's
+    own settle currency, #9 Half 1) against HermX's synthetic equity estimate. OBSERVE-ONLY and fail-open at every layer: any per-pair
     failure is logged and the sweep moves on -- it must never block, delay, or
     crash the resolver's real order-reconciliation work.
 
@@ -85,7 +85,7 @@ def _run_balance_drift_checks() -> None:
     import pnl_ledger as _pnl
     from executors import ccxt_adapter as _ccxt
 
-    for venue, simulated in sorted(active_venue_modes()):
+    for venue, simulated, currency in sorted(active_venue_mode_currencies()):
         if simulated:
             continue  # live-only monitor: demo/pause sandbox balance is meaningless
         mode = "live"
@@ -96,9 +96,16 @@ def _run_balance_drift_checks() -> None:
             executor = _wr._reconciliation_executor({"venue": venue, "simulated_trading": simulated})
             if executor is None:
                 continue  # factory/config unavailable -> degrade silently
-            _ccxt.check_balance_drift(executor, equity, venue, mode)
+            # Half 1 (#9): read the strategy's OWN settle currency, not the
+            # hardcoded "USDT" default -- a USDC strategy is compared against the
+            # venue's USDC balance key. Same-currency comparison only (Half 2's FX
+            # normalization for non-stablecoin/inverse quotes is out of scope).
+            _ccxt.check_balance_drift(executor, equity, venue, mode, currency=currency)
         except Exception as exc:
-            logging.warning("balance drift check failed venue=%s mode=%s: %s", venue, mode, exc)
+            logging.warning(
+                "balance drift check failed venue=%s mode=%s currency=%s: %s",
+                venue, mode, currency, exc,
+            )
 
 
 def _order_age_seconds(order_record: dict, now_ts: "str | None" = None) -> "float | None":
@@ -410,7 +417,7 @@ def unknown_resolver_loop(stop_event: "threading.Event | None" = None, sleep=tim
         # reconciliation work so a slow/broken sweep can only ever trail it.
         # Bare-name globals (cadence + sweep fn) are re-read each tick so tests
         # monkeypatch them on this module. Outer try/except keeps even an
-        # active_venue_modes() failure from killing the resolver thread.
+        # active_venue_mode_currencies() failure from killing the resolver thread.
         every_n = HERMX_DRIFT_CHECK_EVERY_N_TICKS
         if every_n > 0 and tick % every_n == 0:
             try:
