@@ -36,7 +36,7 @@ import hermx_gate_lib as g  # noqa: E402
 
 def main() -> int:
     ops = g.import_hermx_ops()
-    secret = os.environ.get("HERMX_SECRET")
+    secret = ops._load_secret()
     # GET /api forces dashboard_model() to rebuild, which reconciles every distinct
     # (venue, mode) account's order history into the ledger. The MODEL_CACHE TTL means
     # a build within the last few seconds is reused — harmless for a periodic cron.

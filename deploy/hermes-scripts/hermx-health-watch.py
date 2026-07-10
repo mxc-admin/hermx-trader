@@ -49,7 +49,7 @@ def check(ops):
     Fingerprints are stable (no timestamp/counter) so the suppression window can key
     on them across ticks. ``title`` carries the plain-text line printed for Hermes."""
     conds = []
-    secret = os.environ.get("HERMX_SECRET")
+    secret = ops._load_secret()
 
     health, _herr = ops._get_json(ops.DASHBOARD_BASE, "/health", secret=secret)
     dashboard_ok = isinstance(health, dict) and bool(health.get("ok"))

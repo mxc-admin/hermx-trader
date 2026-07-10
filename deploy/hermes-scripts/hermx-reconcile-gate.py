@@ -15,7 +15,10 @@ Derives four condition families and compares their fingerprints against the side
   lookback (a rejected close/flip leg leaves the position open; nothing else alerts on it).
 
 All reads are HTTP (``/api``) or tolerant ``.jsonl`` file scans — no ``src/`` imports.
-Every missing/corrupt input fails open to no condition. Emits ``{"wakeAgent": false}``
+A missing/corrupt *file* input fails open to no condition (absence of a row is
+meaningful). A failed ``/api`` *read* is the exception: it means the open-order state
+is unknown, so it escalates a ``reconcile:api_unreadable`` condition rather than emit a
+false all-clear on trading state. Emits ``{"wakeAgent": false}``
 when nothing is fresh (suppression window 1800s, escalation bypass), else
 ``{"wakeAgent": true, "context": {"alerts": [...]}}``.
 
@@ -86,12 +89,26 @@ def alert_conditions(ops, repo, now_epoch):
 
 def stuck_order_conditions(ops):
     """Open orders in an UNKNOWN state on ``/api`` → stuck-order conditions.
-    An unreachable dashboard yields nothing (fail-open — the health watchdog owns
-    reachability); never a false all-clear on trading state."""
-    secret = os.environ.get("HERMX_SECRET")
-    api, _err = ops._get_json(ops.DASHBOARD_BASE, "/api", secret=secret)
+
+    A FAILED ``/api`` read (unreachable, 401/auth-rejected, or non-dict body) means
+    the open-order state is *unknown* — NOT that there are zero stuck orders. Emitting
+    an empty list there would be a silent false all-clear on trading state, so a read
+    failure escalates a single ``reconcile:api_unreadable`` condition instead. Only a
+    genuine successful read with zero UNKNOWN rows stays silent (a real all-clear)."""
+    secret = ops._load_secret()
+    api, err = ops._get_json(ops.DASHBOARD_BASE, "/api", secret=secret)
     conds = []
-    if not isinstance(api, dict):
+    if err or not isinstance(api, dict):
+        # Read failed → open-order state unknown. Escalate to be safe rather than
+        # emit a false all-clear (a 401 can return a JSON body, so gate on ``err``).
+        conds.append({
+            "fingerprint": "reconcile:api_unreadable",
+            "severity": "error",
+            "category": "reconcile",
+            "title": "reconcile gate could not read dashboard /api -- escalating (open-order state unknown)",
+            "detail": {"error": err or "no_api",
+                       "hint": "dashboard /api unreachable or auth-rejected; run /hx-troubleshoot"},
+        })
         return conds
     rows = ((api.get("open_orders") or {}).get("rows")) or []
     for row in rows:

@@ -218,9 +218,12 @@ def test_reconcile_stuck_order_from_api(monkeypatch):
     assert [c["fingerprint"] for c in conds] == ["reconcile:stuck_order:c9"]
 
 
-def test_reconcile_stuck_order_unreachable_api_fail_open(monkeypatch):
+def test_reconcile_stuck_order_unreachable_api_escalates(monkeypatch):
+    # #6 half-2: a failed /api read is UNKNOWN trading state, not an all-clear.
     _install_urlopen(monkeypatch, {"/api": urllib.error.URLError("down")})
-    assert reconcile.stuck_order_conditions(hermx_ops) == []
+    conds = reconcile.stuck_order_conditions(hermx_ops)
+    assert [c["fingerprint"] for c in conds] == ["reconcile:api_unreadable"]
+    assert conds[0]["severity"] == "error"
 
 
 def test_reconcile_gate_end_to_end_wake_then_sleep(monkeypatch, tmp_path):
@@ -238,6 +241,85 @@ def test_reconcile_gate_end_to_end_wake_then_sleep(monkeypatch, tmp_path):
 
     second = g.run_gate("reconcile", conds, NOW + 100)  # inside window
     assert second["wakeAgent"] is False
+
+
+# --------------------------------------------------------------------------- #
+# #6 half-1: secret resolved via ops._load_secret() (env or .env), not raw env #
+# --------------------------------------------------------------------------- #
+def _secret_recorder():
+    """A ``_get_json`` stand-in that records the (base, path, secret) of each call
+    and returns a benign, all-healthy dict so the caller runs to completion."""
+    calls = []
+
+    def rec(base, path, secret=None, timeout=None):
+        calls.append({"base": base, "path": path, "secret": secret})
+        return {"ok": True, "arm": {"armed": True},
+                "open_orders": {"rows": []}, "strategies": []}, None
+
+    return calls, rec
+
+
+def _arm_env_file_secret(monkeypatch, tmp_path):
+    # HERMX_SECRET absent from env, present only in ${HERMX_DATA_DIR}/.env → the swap
+    # must resolve it via _load_secret(); the old os.environ.get read would yield None.
+    monkeypatch.setenv("HERMX_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("HERMX_SECRET", raising=False)
+    (tmp_path / ".env").write_text("HERMX_SECRET=fromfile\n")
+
+
+def test_stuck_order_resolves_secret_from_env_file(monkeypatch, tmp_path):
+    _arm_env_file_secret(monkeypatch, tmp_path)
+    calls, rec = _secret_recorder()
+    monkeypatch.setattr(hermx_ops, "_get_json", rec)
+    reconcile.stuck_order_conditions(hermx_ops)
+    api = [c for c in calls if c["path"] == "/api"]
+    assert api and api[0]["secret"] == "fromfile"
+
+
+def test_health_check_resolves_secret_from_env_file(monkeypatch, tmp_path):
+    _arm_env_file_secret(monkeypatch, tmp_path)
+    calls, rec = _secret_recorder()
+    monkeypatch.setattr(hermx_ops, "_get_json", rec)
+    health.check(hermx_ops)
+    dash = [c for c in calls if c["path"] == "/health" and "8098" in c["base"]]
+    assert dash and dash[0]["secret"] == "fromfile"
+
+
+def test_ledger_reconcile_resolves_secret_from_env_file(monkeypatch, tmp_path):
+    _arm_env_file_secret(monkeypatch, tmp_path)
+    calls, rec = _secret_recorder()
+    monkeypatch.setattr(hermx_ops, "_get_json", rec)
+    monkeypatch.setattr(ledger.g, "import_hermx_ops", lambda: hermx_ops)
+    assert ledger.main() == 0
+    api = [c for c in calls if c["path"] == "/api"]
+    assert api and api[0]["secret"] == "fromfile"
+
+
+# --------------------------------------------------------------------------- #
+# #6 half-2: failed /api read escalates (no false all-clear on trading state)   #
+# --------------------------------------------------------------------------- #
+def test_stuck_order_http_401_escalates(monkeypatch):
+    # A 401 may return a JSON error body (a dict) alongside err → gate on err.
+    monkeypatch.setattr(hermx_ops, "_get_json",
+                        lambda *a, **k: ({"error": "forbidden"}, "http_401"))
+    conds = reconcile.stuck_order_conditions(hermx_ops)
+    assert [c["fingerprint"] for c in conds] == ["reconcile:api_unreadable"]
+    assert conds[0]["severity"] == "error"
+    assert conds[0]["detail"]["error"] == "http_401"
+
+
+def test_stuck_order_unreachable_escalates(monkeypatch):
+    monkeypatch.setattr(hermx_ops, "_get_json",
+                        lambda *a, **k: (None, "unreachable:conn refused"))
+    conds = reconcile.stuck_order_conditions(hermx_ops)
+    assert [c["fingerprint"] for c in conds] == ["reconcile:api_unreadable"]
+
+
+def test_stuck_order_success_zero_stuck_stays_silent(monkeypatch):
+    # Genuine successful read, zero UNKNOWN rows → real all-clear, must stay empty.
+    monkeypatch.setattr(hermx_ops, "_get_json",
+                        lambda *a, **k: ({"open_orders": {"rows": []}}, None))
+    assert reconcile.stuck_order_conditions(hermx_ops) == []
 
 
 # --------------------------------------------------------------------------- #
