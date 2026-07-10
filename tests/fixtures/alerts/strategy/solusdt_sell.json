@@ -4,7 +4,7 @@
   "strategy_name": "SOLUSDT Duo Base Dev 3H",
   "indicator": "mxc duo-base",
   "symbol": "SOLUSDT",
-  "side": "sell",
+  "action": "sell",
   "timeframe": "3h",
   "tv_time": "2026-06-20T00:00:00Z",
   "tv_signal_price": 150.0,

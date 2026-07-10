@@ -26,7 +26,7 @@ BASE = {
 
 @pytest.mark.parametrize(
     "raw,expected_action",
-    [({"side": "buy"}, "buy"), ({"side": "sell"}, "sell"), ({"action": "close"}, "close")],
+    [({"action": "buy"}, "buy"), ({"action": "sell"}, "sell"), ({"action": "close"}, "close")],
 )
 def test_normalize_output_has_no_side_key(wr, raw, expected_action):
     norm = wr.normalize({**BASE, **raw})
@@ -35,21 +35,21 @@ def test_normalize_output_has_no_side_key(wr, raw, expected_action):
 
 
 def test_dedupe_key_uses_action_and_is_stable_for_opens(wr):
-    """For an open, action == the old side value, so the key is byte-identical to the
-    pre-change side-based key (the ``action`` value fills the slot ``side`` used to)."""
-    norm = wr.normalize({**BASE, "side": "buy"})
+    """For an open, the dedupe key is keyed on ``action`` (buy/sell fills the slot the
+    old ``side`` input used to)."""
+    norm = wr.normalize({**BASE, "action": "buy"})
     expected = "|".join(["btcusdt_duo_base_dev_2h", "BTCUSDT", "buy", "2h", "2026-07-09T00:00:00Z"])
     assert wr.dedupe_key(norm) == expected
     # Deterministic across calls.
-    assert wr.dedupe_key(norm) == wr.dedupe_key(wr.normalize({**BASE, "side": "buy"}))
+    assert wr.dedupe_key(norm) == wr.dedupe_key(wr.normalize({**BASE, "action": "buy"}))
 
 
 def test_same_bar_buy_and_sell_are_not_duplicates(wr):
     """THE atomicity regression: on the same bar a buy then a sell (a reversal) must
-    stay distinct. If ``side`` were dropped without swapping dedupe to ``action`` both
-    keys would collapse to an empty-side key and the sell would be a false duplicate."""
-    buy = wr.normalize({**BASE, "side": "buy"})
-    sell = wr.normalize({**BASE, "side": "sell"})
+    stay distinct. Dedupe keys on ``action``; if it collapsed to an empty slot both
+    keys would match and the sell would be a false duplicate."""
+    buy = wr.normalize({**BASE, "action": "buy"})
+    sell = wr.normalize({**BASE, "action": "sell"})
     assert wr.dedupe_key(buy) != wr.dedupe_key(sell)
 
     dup_buy, _ = wr.check_and_mark_signal(buy, "2026-07-09T00:00:01Z")
@@ -60,7 +60,7 @@ def test_same_bar_buy_and_sell_are_not_duplicates(wr):
 
 def test_dedupe_round_trip_still_rejects_a_true_repeat(wr):
     """A genuine repeat of the same signal is still deduplicated."""
-    buy = wr.normalize({**BASE, "side": "buy"})
+    buy = wr.normalize({**BASE, "action": "buy"})
     first, _ = wr.check_and_mark_signal(buy, "2026-07-09T00:00:01Z")
     second, meta = wr.check_and_mark_signal(buy, "2026-07-09T00:00:02Z")
     assert first is False

@@ -141,7 +141,7 @@ def test_alert_without_strategy_id_quarantined_when_required(wr, monkeypatch):
     payload = {
         "source": "tradingview",
         "symbol": "BTCUSDT",
-        "side": "buy",
+        "action": "buy",
         "timeframe": "2h",
         "tv_time": RECEIVED_AT,
     }
@@ -158,7 +158,7 @@ def test_alert_without_strategy_id_not_blocked_when_not_required(wr):
     payload = {
         "source": "tradingview",
         "symbol": "BTCUSDT",
-        "side": "buy",
+        "action": "buy",
         "timeframe": "2h",
         "tv_time": RECEIVED_AT,
     }

@@ -22,7 +22,7 @@ def test_durable_signal_dedupe_survives_reload(wr, wr_root):
     normalized = {
         "strategy_id": "duo_raw",
         "symbol": "XRPUSDT",
-        "side": "buy",
+        "action": "buy",
         "timeframe": "30m",
         "tv_time": "2026-06-25T00:00:00Z",
         "signal_id": "sig-fixed-1",

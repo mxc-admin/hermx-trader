@@ -52,7 +52,7 @@ def _eligible_payload(now: float, *, tv_offset: float = 10.0, **overrides) -> di
     """A payload normalize() accepts and that carries a fresh time field."""
     payload = {
         "symbol": "BTCUSDT",
-        "side": "buy",
+        "action": "buy",
         "timeframe": "30m",
         "strategy_id": "S1",
         "tv_time": _iso(now - tv_offset),

@@ -1419,21 +1419,6 @@ def _build_close_record(payload: dict, normalized: dict, received_at_override: s
 def build_record(payload: dict, received_at_override: str | None = None) -> tuple[int, dict]:
     normalized = normalize(payload)
 
-    # PR2 conflict gate: reject when BOTH an explicit `action` and an explicit
-    # `side` are present as *opposing* open sides (e.g. action=buy, side=sell).
-    # A matching pair (buy/buy) or a lone field is fine and falls through.
-    raw_action_in = str(first(payload, "action", default="") or "").lower().strip()
-    raw_side_in = str(first(payload, "side", default="") or "").lower().strip()
-    if (raw_action_in in {"buy", "sell"} and raw_side_in in {"buy", "sell"}
-            and raw_action_in != raw_side_in):
-        return 400, {
-            "ok": False,
-            "error": "action_side_conflict",
-            "mode": "action_side_conflict",
-            "reason": f"action={raw_action_in!r} conflicts with side={raw_side_in!r}",
-            "normalized": normalized,
-        }
-
     # PR2 close branch: action=close reduces risk, so it reuses the operator-close
     # path (close_only=True → bypasses the kill switch + symbol pause). It carries
     # no side, so it must return BEFORE the action-not-buy/sell gate below.
@@ -1605,7 +1590,7 @@ def process_payload_async(payload: dict, intake_received_at: str) -> None:
         else:
             normalized = record.get("normalized") or {}
             logging.info(
-                "Shadow async processed symbol=%s side=%s tv_time=%s status=%s",
+                "Shadow async processed symbol=%s action=%s tv_time=%s status=%s",
                 normalized.get("symbol"),
                 normalized.get("action"),
                 normalized.get("tv_time"),

@@ -59,20 +59,15 @@ def normalize(payload: dict) -> dict:
     symbol = str(first(payload, "symbol", "ticker", default="")).upper()
     symbol = symbol.replace("OKX:", "").replace("/", "").replace("-", "")
     # `action` is the single canonical intent field on the normalized output.
-    # Legacy alerts send only the raw `side` input (buy|sell); `action` adds `close`.
-    # The raw `side` input is still read here purely to derive `action`, but it is no
-    # longer echoed onto the output dict. When both raw fields are present the conflict
-    # gate in build_record catches opposing open sides.
+    # The raw `side` input is no longer read at all -- `action` (buy|sell|close) is the
+    # sole accepted direction field on the payload. An invalid/absent `action` is
+    # preserved verbatim below purely so build_record / schema validation can report it.
     raw_action = str(first(payload, "action", default="") or "").lower().strip()
-    raw_side = str(first(payload, "side", default="") or "").lower().strip()
-    _valid_open = {"buy", "sell"}
     _valid_action = {"buy", "sell", "close"}
     if raw_action in _valid_action:
         action = raw_action
-    elif raw_side in _valid_open:
-        action = raw_side          # derive action from side for legacy alerts
     else:
-        action = raw_action or raw_side   # preserve for error reporting
+        action = raw_action   # preserve for error reporting
     timeframe = canonical_timeframe(first(payload, "timeframe", "interval", default="30m"))
     tv_time = str(first(payload, "tv_time", "time", "timestamp", "bar_time", "candle_time", default=now_iso()))
     signal_id = str(first(payload, "signal_id", default=""))

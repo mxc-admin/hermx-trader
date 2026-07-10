@@ -4,7 +4,7 @@
   "strategy_name": "BTCUSDT Duo Base Dev 2H",
   "indicator": "mxc duo-base",
   "symbol": "ETHUSDT",
-  "side": "buy",
+  "action": "buy",
   "timeframe": "2h",
   "tv_time": "2026-06-20T08:00:00Z",
   "tv_signal_price": 65000.0,

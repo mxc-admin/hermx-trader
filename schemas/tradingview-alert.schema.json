@@ -10,11 +10,8 @@
     "timeframe",
     "tv_signal_price",
     "tv_time",
-    "source"
-  ],
-  "anyOf": [
-    { "required": ["side"] },
-    { "required": ["action"] }
+    "source",
+    "action"
   ],
   "properties": {
     "strategy_id": {
@@ -30,10 +27,6 @@
     "timeframe": {
       "type": "string",
       "enum": ["30m", "1h", "2h", "3h", "4h"]
-    },
-    "side": {
-      "type": "string",
-      "enum": ["buy", "sell"]
     },
     "action": {
       "type": "string",

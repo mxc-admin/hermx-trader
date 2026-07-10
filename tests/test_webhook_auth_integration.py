@@ -63,7 +63,7 @@ def _all_persisted_text(wr) -> str:
 
 def test_unauthenticated_post_rejected_and_no_wal_row(wr, monkeypatch):
     monkeypatch.setattr(wr, "PROCESS_QUEUE", queue.Queue(maxsize=10))
-    payload = {"source": "tradingview", "symbol": "BTCUSDT", "side": "buy"}
+    payload = {"source": "tradingview", "symbol": "BTCUSDT", "action": "buy"}
 
     server, thread = _serve(wr.Handler)
     try:
@@ -78,7 +78,7 @@ def test_unauthenticated_post_rejected_and_no_wal_row(wr, monkeypatch):
 
 def test_authenticated_post_accepted_and_wal_row_written(wr, monkeypatch):
     monkeypatch.setattr(wr, "PROCESS_QUEUE", queue.Queue(maxsize=10))
-    payload = {"source": "tradingview", "symbol": "BTCUSDT", "side": "buy"}
+    payload = {"source": "tradingview", "symbol": "BTCUSDT", "action": "buy"}
 
     server, thread = _serve(wr.Handler)
     try:
@@ -104,7 +104,7 @@ def test_hmac_required_path_enforced(wr, monkeypatch):
     monkeypatch.setattr(wr, "HERMX_REQUIRE_HMAC", True)
     monkeypatch.setattr(wr, "HERMX_WEBHOOK_HMAC_KEY", "hmac-key")
     monkeypatch.setattr(wr, "HERMX_REPLAY_WINDOW_SECONDS", 300.0)
-    payload = {"source": "tradingview", "symbol": "BTCUSDT", "side": "buy"}
+    payload = {"source": "tradingview", "symbol": "BTCUSDT", "action": "buy"}
 
     server, thread = _serve(wr.Handler)
     try:
@@ -143,7 +143,7 @@ def test_hmac_required_path_enforced(wr, monkeypatch):
 
 def test_body_secret_key_authenticated_post_accepted_and_wal_row_written(wr, monkeypatch):
     monkeypatch.setattr(wr, "PROCESS_QUEUE", queue.Queue(maxsize=10))
-    payload = {"source": "tradingview", "symbol": "BTCUSDT", "side": "buy", "secret_key": "test-secret"}
+    payload = {"source": "tradingview", "symbol": "BTCUSDT", "action": "buy", "secret_key": "test-secret"}
 
     server, thread = _serve(wr.Handler)
     try:
@@ -159,7 +159,7 @@ def test_body_secret_key_authenticated_post_accepted_and_wal_row_written(wr, mon
 
 def test_wrong_body_secret_key_rejected_and_no_wal_row(wr, monkeypatch):
     monkeypatch.setattr(wr, "PROCESS_QUEUE", queue.Queue(maxsize=10))
-    payload = {"source": "tradingview", "symbol": "BTCUSDT", "side": "buy", "secret_key": "wrong-secret"}
+    payload = {"source": "tradingview", "symbol": "BTCUSDT", "action": "buy", "secret_key": "wrong-secret"}
 
     server, thread = _serve(wr.Handler)
     try:
@@ -182,7 +182,7 @@ def test_body_secret_key_never_persisted_across_intake_and_downstream(wr, monkey
     payload = {
         "source": "tradingview",
         "symbol": "BTCUSDT",
-        "side": "buy",
+        "action": "buy",
         "timeframe": "1h",
         "tv_signal_price": "100.5",
         "tv_time": "2026-07-09T00:00:00Z",
@@ -222,7 +222,7 @@ def test_writer_scrub_backstops_a_forgetful_future_call_site(wr):
     leaky_payload = {
         "source": "tradingview",
         "symbol": "ETHUSDT",
-        "side": "sell",
+        "action": "sell",
         "timeframe": "1h",
         "tv_signal_price": "50.0",
         "tv_time": "2026-07-09T00:00:00Z",

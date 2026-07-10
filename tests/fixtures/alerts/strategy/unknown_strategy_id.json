@@ -4,7 +4,7 @@
   "strategy_name": "Phantom Strategy",
   "indicator": "mxc duo-base",
   "symbol": "BTCUSDT",
-  "side": "buy",
+  "action": "buy",
   "timeframe": "2h",
   "tv_time": "2026-06-20T12:00:00Z",
   "tv_signal_price": 65000.0,

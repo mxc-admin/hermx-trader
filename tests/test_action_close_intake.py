@@ -1,8 +1,9 @@
-"""PR2: `action` field intake wiring in webhook_receiver.build_record.
+"""`action` field intake wiring in webhook_receiver.build_record.
 
 Proves, against the REAL production build_record (not an inline re-implementation):
-  * an explicit action/side conflict (opposing open sides) is a hard 400,
-  * an action=buy alert routes identically to the equivalent side=buy alert,
+  * a legacy side-only alert (no `action`) is now rejected 400 side_not_allowed —
+    `side` is no longer read from the payload,
+  * an action=buy alert routes through the strategy-file trial path,
   * action=close reuses the operator-close path (close_only=True) — matched
     strategy → 200, unknown strategy → quarantine (never 400 side_not_allowed),
   * a repeated close signal is deduplicated.
@@ -18,57 +19,42 @@ from conftest import load_alert
 RECEIVED_AT = "2026-06-22T00:00:00Z"
 
 
-def _reset_dedupe(wr) -> None:
-    """Clear the in-memory dedupe index so a fresh (non-duplicate) alert can be
-    replayed within one test."""
-    wr._SIGNAL_DEDUPE_INDEX["signals"].clear()
-    wr._SIGNAL_DEDUPE_INDEX["keys"].clear()
-
-
 # --------------------------------------------------------------------------- #
-# conflict gate                                                                 #
+# side-only alert (legacy template) is now rejected                             #
 # --------------------------------------------------------------------------- #
 
 
-def test_action_conflict_returns_400(wr):
-    """action=buy with side=sell (opposing open sides) → 400 action_side_conflict."""
-    alert = load_alert("strategy/btcusdt_buy.json")  # side=buy
-    alert["action"] = "sell"
+def test_side_only_alert_is_rejected_400(wr):
+    """A legacy alert carrying only `side` (no `action`) is now rejected: `side` is
+    no longer read, so normalize yields no valid action → 400 side_not_allowed."""
+    alert = load_alert("strategy/btcusdt_buy.json")  # action=buy
+    # Reconstruct an old-style payload: drop `action`, send only `side`.
+    alert.pop("action", None)
+    alert["side"] = "buy"
     status, record = wr.build_record(alert, RECEIVED_AT)
     assert status == 400
-    assert record["mode"] == "action_side_conflict"
-    assert record["error"] == "action_side_conflict"
+    assert record["ok"] is False
+    assert record["error"] == "side_not_allowed"
 
 
 # --------------------------------------------------------------------------- #
-# action=buy is a drop-in for side=buy                                          #
+# action=buy routes through the strategy-file trial path                         #
 # --------------------------------------------------------------------------- #
 
 
-def test_action_buy_routes_identically_to_side_buy(wr, monkeypatch):
-    # Force the execution surface unavailable so both runs resolve to a
-    # deterministic not_submitted outcome instead of a real sandbox submit.
+def test_action_buy_routes_through_strategy_trial(wr, monkeypatch):
+    # Force the execution surface unavailable so the run resolves to a deterministic
+    # not_submitted outcome instead of a real sandbox submit.
     monkeypatch.setattr(wr.ExecutorFactory, "available", lambda: False)
 
-    side_alert = load_alert("strategy/btcusdt_buy.json")  # side=buy, no action
-    s1, r1 = wr.build_record(side_alert, RECEIVED_AT)
+    alert = load_alert("strategy/btcusdt_buy.json")  # action=buy
+    status, record = wr.build_record(alert, RECEIVED_AT)
 
-    # Same alert expressed via action only (side removed). Same strategy/symbol/
-    # timeframe/tv_time → same signal_id, so reset dedupe before the replay.
-    action_alert = {k: v for k, v in side_alert.items() if k != "side"}
-    action_alert["action"] = "buy"
-    _reset_dedupe(wr)
-    s2, r2 = wr.build_record(action_alert, RECEIVED_AT)
-
-    assert s1 == s2 == 200
-    assert r1["mode"] == r2["mode"] == "strategy_file_trial"
-    # Identical routing: same normalized alert and same execution outcome.
-    assert r1["normalized"] == r2["normalized"]
-    assert r1["okx_execution"] == r2["okx_execution"]
-    # `action` is the single canonical intent field; the `side` output was removed
-    # (Phase B), so it is absent for a buy just as it is for a close.
-    assert r2["normalized"]["action"] == "buy"
-    assert "side" not in r2["normalized"]
+    assert status == 200
+    assert record["mode"] == "strategy_file_trial"
+    # `action` is the single canonical intent field; there is no `side` output.
+    assert record["normalized"]["action"] == "buy"
+    assert "side" not in record["normalized"]
 
 
 # --------------------------------------------------------------------------- #

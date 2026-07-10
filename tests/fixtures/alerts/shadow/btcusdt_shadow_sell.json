@@ -2,7 +2,7 @@
   "source": "tradingview",
   "indicator": "duo_raw",
   "symbol": "BTCUSDT",
-  "side": "sell",
+  "action": "sell",
   "timeframe": "2h",
   "tv_time": "2026-06-21T04:00:00Z",
   "tv_signal_price": 66300.0,
