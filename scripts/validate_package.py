@@ -37,7 +37,7 @@ def main() -> int:
         except Exception as exc:
             failures.append(f"invalid json: {path.relative_to(ROOT)}: {exc}")
 
-    for path in (ROOT / "src").glob("*.py"):
+    for path in (ROOT / "src").rglob("*.py"):
         try:
             py_compile.compile(str(path), doraise=True)
         except Exception as exc:

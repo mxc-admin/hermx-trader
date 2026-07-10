@@ -91,6 +91,14 @@ def rate_limit_allow(
     window = max(1.0, window_seconds)
     limit = max(1, max_requests)
     with lock:
+        # Reclaim memory: drop any bucket whose events have all aged out of the window.
+        # An idle sender's key would otherwise linger forever (the per-key filter below
+        # only runs when THAT key sends again). Active senders keep at least one in-window
+        # event, so their buckets are never swept. Bounded by the number of distinct
+        # in-window client IPs, all under the existing lock -- no behavior change.
+        stale = [k for k, evs in buckets.items() if all(now - ts > window for ts in evs)]
+        for k in stale:
+            del buckets[k]
         events = buckets.get(source_key, [])
         events = [ts for ts in events if now - ts <= window]
         allowed = len(events) < limit
@@ -188,7 +196,9 @@ def authenticate_webhook_request(
     header_raw = handler.headers.get("X-Webhook-Secret")
     if header_raw is not None:
         # Header present (even empty) -> must match; never fall through to the body.
-        if not hmac.compare_digest(header_raw.strip(), secret):
+        # Encode both operands to bytes so a non-ASCII secret (e.g. "café") compares
+        # cleanly instead of raising TypeError inside compare_digest.
+        if not hmac.compare_digest(header_raw.strip().encode("utf-8"), secret.encode("utf-8")):
             auth_failure_alert_fn(path, client_ip_value)
             return False, 401, "forbidden"
     else:
@@ -196,7 +206,9 @@ def authenticate_webhook_request(
         # Coerce a non-string (e.g. numeric) body_secret to "" so compare_digest never
         # raises and a malformed value fails closed.
         provided_body = body_secret if isinstance(body_secret, str) else ""
-        if not provided_body or not hmac.compare_digest(provided_body, secret):
+        # Encode both operands to bytes so a non-ASCII body secret compares cleanly
+        # instead of raising TypeError inside compare_digest (still fails closed on mismatch).
+        if not provided_body or not hmac.compare_digest(provided_body.encode("utf-8"), secret.encode("utf-8")):
             auth_failure_alert_fn(path, client_ip_value)
             return False, 401, "forbidden"
     ok, reason = verify_hmac_fn(handler.headers, body)

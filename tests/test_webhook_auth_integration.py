@@ -237,3 +237,26 @@ def test_writer_scrub_backstops_a_forgetful_future_call_site(wr):
     assert "secret_key" not in blob
     assert "test-secret" not in blob
     assert "keep-me" in blob
+
+
+# --- Non-dict JSON body guard --------------------------------------------------------
+#
+# A syntactically valid but non-object JSON body (list / string / number / bool) parses
+# fine but has no ``.get()``/``.pop()``. Without a guard it would reach
+# authenticate_webhook_request / the intake pop and raise AttributeError -> 500. It must
+# instead be a clean 400 with no WAL row, BEFORE auth runs.
+
+def test_non_dict_json_body_rejected_cleanly_no_crash(wr, monkeypatch):
+    monkeypatch.setattr(wr, "PROCESS_QUEUE", queue.Queue(maxsize=10))
+    server, thread = _serve(wr.Handler)
+    try:
+        port = server.server_address[1]
+        for non_dict in ([1, 2, 3], "x", 5, True):
+            status, body = _post(port, "/webhook", non_dict)  # json.dumps -> non-object body
+            assert status == 400, f"expected 400 for {non_dict!r}, got {status}"
+            assert body.get("ok") is False
+            assert body.get("error") == "invalid_payload"
+        # The guard runs before the intake record -> nothing persisted.
+        assert _intake_rows(wr) == []
+    finally:
+        _stop(server, thread)

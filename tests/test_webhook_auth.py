@@ -6,9 +6,12 @@ rate-limit buckets when no trusted reverse proxy fronts the receiver.
 """
 from __future__ import annotations
 
+import threading
+
 from security.webhook_auth import (
     authenticate_webhook_request,
     client_ip,
+    rate_limit_allow,
     rate_limit_key,
 )
 
@@ -175,3 +178,69 @@ def test_auth_body_path_still_enforces_hmac_when_required():
     )
     assert (ok, status, reason) == (False, 401, "hmac_header_missing")
     assert len(alerts) == 1
+
+
+# --- Non-ASCII secrets must not crash compare_digest --------------------------------
+#
+# hmac.compare_digest raises TypeError when a str operand contains non-ASCII characters.
+# A non-ASCII header/body secret (e.g. "café") must therefore be encoded to bytes so the
+# comparison fails CLOSED (forbidden) instead of raising a TypeError -> 500.
+
+def test_auth_non_ascii_header_secret_fails_closed_without_typeerror():
+    handler = _FakeHandler(headers={"X-Webhook-Secret": "café"})  # non-ASCII, wrong secret
+    (ok, status, reason), _ = _auth(handler)  # secret is ASCII _SECRET
+    assert (ok, status, reason) == (False, 401, "forbidden")
+
+
+def test_auth_non_ascii_body_secret_fails_closed_without_typeerror():
+    handler = _FakeHandler(headers={})  # header absent -> body path
+    (ok, status, reason), _ = _auth(handler, body_secret="café")  # non-ASCII, wrong
+    assert (ok, status, reason) == (False, 401, "forbidden")
+
+
+def test_auth_non_ascii_secret_matches_authenticates():
+    # A correct non-ASCII secret still authenticates (behavior preserved for any UTF-8 value).
+    handler = _FakeHandler(headers={"X-Webhook-Secret": "café"})
+    (ok, status, reason), _ = _auth(handler, secret="café")
+    assert (ok, status, reason) == (True, 200, "ok")
+
+
+# --- rate_limit_allow reclaims fully-expired buckets --------------------------------
+#
+# An idle sender's bucket key would otherwise linger forever (the per-key window filter
+# only runs when THAT key sends again). Fully-expired buckets must be reclaimed on any
+# call, while a sender with an in-window event is left untouched.
+
+def test_rate_limit_reclaims_idle_bucket_and_keeps_active_untouched():
+    buckets: dict = {}
+    lock = threading.Lock()
+    kw = dict(window_seconds=60, max_requests=100)
+    # idle sender: a single event at t=1000 and never returns.
+    rate_limit_allow("ip:idle", buckets, lock, now_seconds=1000.0, **kw)
+    # active sender: stays warm with events at t=1000 and t=1050 (both in-window at 1050).
+    rate_limit_allow("ip:active", buckets, lock, now_seconds=1000.0, **kw)
+    rate_limit_allow("ip:active", buckets, lock, now_seconds=1050.0, **kw)
+    # At 1050 idle's event is only 50s old (<=60) -> not yet reclaimed.
+    assert buckets["ip:idle"] == [1000.0]
+    assert buckets["ip:active"] == [1000.0, 1050.0]
+
+    # A new request at t=1065: idle's only event (65s old) is fully expired -> reclaimed;
+    # active still has an in-window event at 1050 (15s old) -> its bucket is left untouched.
+    rate_limit_allow("ip:newcomer", buckets, lock, now_seconds=1065.0, **kw)
+    assert "ip:idle" not in buckets
+    assert buckets["ip:active"] == [1000.0, 1050.0]
+    assert buckets["ip:newcomer"] == [1065.0]
+
+
+def test_rate_limit_active_sender_window_behavior_preserved():
+    # Regression guard: reclaim must not weaken the sliding window for an active sender.
+    buckets: dict = {}
+    lock = threading.Lock()
+    kw = dict(window_seconds=60, max_requests=3)
+    for i in range(3):
+        allowed, _ = rate_limit_allow("ip:x", buckets, lock, now_seconds=1000.0 + i, **kw)
+        assert allowed is True
+    # 4th request inside the window is blocked and the bucket is retained (not reclaimed).
+    allowed, _ = rate_limit_allow("ip:x", buckets, lock, now_seconds=1003.0, **kw)
+    assert allowed is False
+    assert len(buckets["ip:x"]) == 3

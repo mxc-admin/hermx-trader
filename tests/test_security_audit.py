@@ -377,6 +377,25 @@ def test_gitleak_non_git_dir_skips(tmp_path):
     assert status == "skipped"
 
 
+@pytest.mark.skipif(not shutil.which("git"), reason="git required")
+def test_gitleak_gitignore_env_local_only_flags_missing_env(tmp_path):
+    # A .gitignore that lists only `.env.local` (not a bare `.env`) must still be flagged.
+    # The old substring check `".env" in text` passed here as a false negative.
+    _git_init_commit(tmp_path, {"a.py": "x = 1\n", ".gitignore": ".env.local\n.env.example\n"})
+    findings, status = audit.check_gitleak(tmp_path)
+    assert status == "ran"
+    assert _has(findings, "does not list .env", "MEDIUM")
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="git required")
+def test_gitleak_gitignore_bare_env_line_passes(tmp_path):
+    # A bare `.env` line (alongside more specific entries) satisfies the rule.
+    _git_init_commit(tmp_path, {"a.py": "x = 1\n", ".gitignore": ".env.local\n.env\n"})
+    findings, status = audit.check_gitleak(tmp_path)
+    assert status == "ran"
+    assert not _has(findings, "does not list .env")
+
+
 # --------------------------------------------------------------------------- #
 # Orchestration + report
 # --------------------------------------------------------------------------- #

@@ -1969,6 +1969,12 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send(400, {"ok": False, "error": "invalid_json", "detail": str(exc)})
             return
+        # A syntactically valid but non-object JSON body (list / string / number / bool)
+        # parses fine yet has no ``.get()``/``.pop()`` -- reject it here BEFORE auth or any
+        # dict access so a `[1,2,3]` body is a clean 400, not a downstream AttributeError/500.
+        if not isinstance(payload, dict):
+            self._send(400, {"ok": False, "error": "invalid_payload"})
+            return
         auth_ok, auth_status, auth_error = authenticate_webhook_request(self, raw_body, payload)
         if not auth_ok:
             self._send(auth_status, {"ok": False, "error": auth_error})

@@ -845,9 +845,12 @@ def check_gitleak(root, fast=False):
                 path=rel,
                 remediation="Remove from history if it is a real key; add to .gitignore and rotate.",
             ))
-    # .gitignore should list .env (defense in depth).
+    # .gitignore should list .env (defense in depth). Match a bare `.env` LINE exactly --
+    # a substring check passes on `.env.local` / `.env.example` while `.env` itself is
+    # still untracked-ignore-less, a false negative.
     gi = root / ".gitignore"
-    if gi.exists() and ".env" not in _read_text(gi):
+    gi_has_env = gi.exists() and any(line.strip() == ".env" for line in _read_text(gi).splitlines())
+    if gi.exists() and not gi_has_env:
         findings.append(finding(
             "gitleak", "MEDIUM", ".gitignore does not list .env",
             path=".gitignore", remediation="Add `.env` to .gitignore.",

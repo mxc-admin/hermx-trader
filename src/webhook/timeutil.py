@@ -31,6 +31,16 @@ def parse_tv_time(value) -> datetime | None:
             if raw > 10_000_000_000:
                 raw = raw / 1000.0
             return datetime.fromtimestamp(raw, tz=timezone.utc)
+        # Fractional epoch seconds (e.g. "1699999999.5") are not caught by isdigit()
+        # but are still a valid epoch timestamp -- try float before falling back to ISO.
+        try:
+            raw = float(text)
+        except (TypeError, ValueError):
+            pass
+        else:
+            if raw > 10_000_000_000:
+                raw = raw / 1000.0
+            return datetime.fromtimestamp(raw, tz=timezone.utc)
         return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
     except Exception:
         return None
