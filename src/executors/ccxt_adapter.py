@@ -327,7 +327,7 @@ class CcxtExecutor(BaseExecutor):
             raw = str(os.environ.get("HERMX_CCXT_EXCHANGE") or "okx").strip().lower()
         return raw
 
-    def _client(self, *, close_only: bool = False):
+    def _client(self, *, close_only: bool = False, read_only: bool = False):
         if self._cached_client is not None:
             return self._cached_client
         if ccxt is None:
@@ -419,7 +419,7 @@ class CcxtExecutor(BaseExecutor):
             # this gate (it only REDUCES exposure) to mirror the service-level bypass
             # in execution/service.py -- otherwise an emergency close can never reach
             # the venue while the kill switch is off.
-            if not close_only and not live_trading_enabled()[0]:
+            if not close_only and not read_only and not live_trading_enabled()[0]:
                 raise RuntimeError(
                     "live_trading_disabled: CcxtExecutor refuses to connect to live venue "
                     "without HERMX_LIVE_TRADING=true"
@@ -1098,7 +1098,7 @@ class CcxtExecutor(BaseExecutor):
 
     def get_order(self, inst_id: str, ord_id: str | None = None, cl_ord_id: str | None = None) -> dict:
         try:
-            client = self._client()
+            client = self._client(read_only=True)
             symbol = _inst_id_to_ccxt_symbol(inst_id) or inst_id
 
             if ord_id:
@@ -1141,7 +1141,7 @@ class CcxtExecutor(BaseExecutor):
 
     def get_open_orders(self, inst_id: str | None = None) -> list:
         try:
-            client = self._client()
+            client = self._client(read_only=True)
             symbol = _inst_id_to_ccxt_symbol(inst_id) if inst_id else None
             return [self._normalize_order(o) for o in (client.fetch_open_orders(symbol=symbol) or [])]
         except Exception:
@@ -1149,7 +1149,7 @@ class CcxtExecutor(BaseExecutor):
 
     def get_order_history_raw(self, inst_ids: list[str] | None = None, limit: int = 100) -> list:
         try:
-            client = self._client()
+            client = self._client(read_only=True)
             rows: list[dict] = []
             targets = list(inst_ids or [])
             if not targets:
@@ -1196,7 +1196,7 @@ class CcxtExecutor(BaseExecutor):
 
     def get_order_history_archive(self, inst_id: str | None = None, limit: int = 100) -> list:
         try:
-            client = self._client()
+            client = self._client(read_only=True)
             symbol = _inst_id_to_ccxt_symbol(inst_id) if inst_id else None
             return [self._normalize_order(o) for o in (client.fetch_closed_orders(symbol=symbol, limit=max(1, int(limit))) or [])]
         except Exception:
@@ -1204,7 +1204,7 @@ class CcxtExecutor(BaseExecutor):
 
     def get_positions(self, inst_id: str | None = None) -> list:
         try:
-            client = self._client()
+            client = self._client(read_only=True)
             symbols = [_inst_id_to_ccxt_symbol(inst_id) or inst_id] if inst_id else None
             rows = client.fetch_positions(symbols) if hasattr(client, "fetch_positions") else []
             out = []
@@ -1231,7 +1231,7 @@ class CcxtExecutor(BaseExecutor):
 
     def get_balance(self, ccy: str | None = None) -> list:
         try:
-            client = self._client()
+            client = self._client(read_only=True)
             bal = client.fetch_balance() or {}
             total = bal.get("total") or {}
             free = bal.get("free") or {}
@@ -1261,7 +1261,7 @@ class CcxtExecutor(BaseExecutor):
         demo sandbox balance is arbitrary. Never raises: a failed venue read returns
         None so the drift check degrades instead of crashing."""
         try:
-            client = self._client()
+            client = self._client(read_only=True)
             bal = client.fetch_balance() or {}
             total = (bal.get("total") or {}).get(currency)
             free = (bal.get("free") or {}).get(currency)
@@ -1278,7 +1278,7 @@ class CcxtExecutor(BaseExecutor):
 
     def health(self) -> dict:
         try:
-            client = self._client()
+            client = self._client(read_only=True)
             balance = client.fetch_balance() or {}
             pos_rows = client.fetch_positions() if hasattr(client, "fetch_positions") else []
 

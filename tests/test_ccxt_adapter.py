@@ -1438,3 +1438,109 @@ def test_zero_notional_and_no_price_keep_plain_zero_size(monkeypatch):
     )
     assert amount == 0.0
     assert reason == "zero_size"
+
+
+# ---------------------------------------------------------------------------
+# #1 -- read_only bypass of the live-trading kill-switch gate in _client().
+#
+# When HERMX_LIVE_TRADING is disarmed but a live-mode executor is built
+# (simulated_trading=False), pure-read operations must still connect (they only
+# READ; they never submit), while any submit path stays hard-blocked. The gate
+# lives in _client(): read call sites pass read_only=True, the submit path
+# (execute -> _client(close_only=...)) does NOT. These exercise the REAL gate
+# (ccxt is stubbed, not _client), so a regression that drops read_only or leaks
+# the bypass into the submit path fails here.
+# ---------------------------------------------------------------------------
+
+
+class _GateFakeClient:
+    """Offline stand-in for a live ccxt client -- no network, just enough shape
+    for health()/get_positions() to complete once the gate lets them through."""
+
+    def __init__(self, kwargs=None):
+        self.kwargs = kwargs
+
+    def fetch_balance(self):
+        return {"total": {"USDT": 100.0}, "free": {"USDT": 100.0}, "info": {"posMode": "net"}}
+
+    def fetch_positions(self, symbols=None):
+        return []
+
+
+def _live_executor() -> CcxtExecutor:
+    """A live-mode (simulated_trading=False) executor -- the only mode whose
+    _client() reaches the HERMX_LIVE_TRADING gate."""
+    cfg = {
+        "execution": {
+            "exchange": "ccxt",
+            "ccxt_exchange": "okx",
+            "simulated_trading": False,
+            "td_mode": "cross",
+        }
+    }
+    return CcxtExecutor(cfg, Path("."))
+
+
+def _stub_live_ccxt(monkeypatch):
+    monkeypatch.setattr(
+        ccxt_adapter, "ccxt", types.SimpleNamespace(okx=_GateFakeClient)
+    )
+
+
+def test_read_only_bypasses_gate_when_disarmed(monkeypatch):
+    """Kill switch OFF + live mode: a read (health) still connects via read_only=True."""
+    monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
+    _stub_live_ccxt(monkeypatch)
+    ex = _live_executor()
+
+    # Direct gate assertion: read_only=True does NOT raise.
+    client = ex._client(read_only=True)
+    assert isinstance(client, _GateFakeClient)
+
+    # End-to-end read: health() succeeds (ok=True), not the gate-error shape.
+    snap = _live_executor().health()
+    assert snap["ok"] is True
+    assert "live_trading_disabled" not in str(snap.get("error", ""))
+
+
+def test_submit_path_still_blocked_when_disarmed(monkeypatch):
+    """Kill switch OFF + live mode: the submit path (_client without read_only)
+    stays hard-blocked, and execute() surfaces it as submit_exception."""
+    monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
+    _stub_live_ccxt(monkeypatch)
+
+    # Direct gate assertion: the submit-path call still raises.
+    with pytest.raises(RuntimeError, match="live_trading_disabled"):
+        _live_executor()._client(close_only=False)
+
+    # End-to-end: execute() reaches _client(close_only=False), gate raises, and
+    # the RuntimeError is mapped to submit_exception (UNKNOWN) -- never a silent pass.
+    readiness = {
+        "signal_side": "buy",
+        "signal_price": 60000.0,
+        "inst_id": "BTC-USDT-SWAP",
+        "td_mode": "cross",
+        "execution_intent": {
+            "client_order_id": "cid-gate",
+            "target_direction": "long",
+            "planned_notional_usd": 1500.0,
+            "actions": ["OPEN_LONG"],
+        },
+    }
+    out = _live_executor().execute(readiness)
+    assert out["ok"] is False
+    assert out["mode"] == "submit_exception"
+    assert "live_trading_disabled" in out["payload"]["error"]
+
+
+def test_armed_allows_both_read_and_submit(monkeypatch):
+    """Kill switch ON: normal path unchanged -- both read and submit connect."""
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "true")
+    _stub_live_ccxt(monkeypatch)
+
+    # Read connects.
+    assert isinstance(_live_executor()._client(read_only=True), _GateFakeClient)
+    # Submit-path connects too (no gate raise when armed).
+    assert isinstance(_live_executor()._client(close_only=False), _GateFakeClient)
+    # And a read completes end-to-end.
+    assert _live_executor().health()["ok"] is True

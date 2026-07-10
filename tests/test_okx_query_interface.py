@@ -82,7 +82,7 @@ def _order(*, status, side="buy", filled=3, amount=3, average=63000.5, cl="cid-1
 
 def test_get_order_filled(monkeypatch):
     ex = _executor()
-    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(order=_order(status="closed")))
+    monkeypatch.setattr(ex, "_client", lambda **_kw: _FakeQueryClient(order=_order(status="closed")))
     out = ex.get_order("BTC-USDT-SWAP", ord_id="688577747503788032")
     assert out["exchange"] == "ccxt"
     assert out["state"] == "filled"
@@ -100,7 +100,7 @@ def test_get_order_filled(monkeypatch):
 def test_get_order_partially_filled(monkeypatch):
     # status closed but 0 < filled < amount => partially_filled (-> FILLED+partial in Task 4).
     ex = _executor()
-    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(order=_order(status="closed", filled=1, amount=3, average=3010.25)))
+    monkeypatch.setattr(ex, "_client", lambda **_kw: _FakeQueryClient(order=_order(status="closed", filled=1, amount=3, average=3010.25)))
     out = ex.get_order("BTC-USDT-SWAP", ord_id="x")
     assert out["state"] == "partially_filled"
     assert out["acc_fill_sz"] == 1.0
@@ -111,7 +111,7 @@ def test_get_order_partially_filled(monkeypatch):
 def test_get_order_live_pending(monkeypatch):
     # status open + zero fill => live.
     ex = _executor()
-    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(order=_order(status="open", filled=0, average=None)))
+    monkeypatch.setattr(ex, "_client", lambda **_kw: _FakeQueryClient(order=_order(status="open", filled=0, average=None)))
     out = ex.get_order("BTC-USDT-SWAP", ord_id="x")
     assert out["state"] == "live"
     assert out["acc_fill_sz"] == 0.0
@@ -120,7 +120,7 @@ def test_get_order_live_pending(monkeypatch):
 def test_get_order_canceled_zero_fill(monkeypatch):
     # canceled + accFillSz == 0 -> REJECTED later (:211). Empty avgPx -> None, not 0.0.
     ex = _executor()
-    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(order=_order(status="canceled", filled=0, average=None)))
+    monkeypatch.setattr(ex, "_client", lambda **_kw: _FakeQueryClient(order=_order(status="canceled", filled=0, average=None)))
     out = ex.get_order("BTC-USDT-SWAP", ord_id="x")
     assert out["state"] == "canceled"
     assert out["acc_fill_sz"] == 0.0
@@ -130,7 +130,7 @@ def test_get_order_canceled_zero_fill(monkeypatch):
 def test_get_order_not_found_is_not_an_exception(monkeypatch):
     # cl_ord_id lookup with nothing in open/closed -> normalized not_found, never raises.
     ex = _executor()
-    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(open_orders=[], closed_orders=[]))
+    monkeypatch.setattr(ex, "_client", lambda **_kw: _FakeQueryClient(open_orders=[], closed_orders=[]))
     out = ex.get_order("BTC-USDT-SWAP", cl_ord_id="missing-cid")
     assert out["state"] == "not_found"
     assert out["exchange"] == "ccxt"
@@ -141,7 +141,7 @@ def test_get_order_not_found_is_not_an_exception(monkeypatch):
 def test_get_order_by_cl_ord_id_matches_closed(monkeypatch):
     ex = _executor()
     fake = _FakeQueryClient(open_orders=[], closed_orders=[_order(status="closed", cl="cid-match")])
-    monkeypatch.setattr(ex, "_client", lambda: fake)
+    monkeypatch.setattr(ex, "_client", lambda **_kw: fake)
     out = ex.get_order("BTC-USDT-SWAP", cl_ord_id="cid-match")
     assert out["state"] == "filled"
     assert out["cl_ord_id"] == "cid-match"
@@ -153,7 +153,7 @@ def test_get_order_by_cl_ord_id_matches_closed(monkeypatch):
 def test_get_order_error_degrades_safely(monkeypatch):
     # A generic client error -> normalized error state, never raises.
     ex = _executor()
-    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(fetch_order_error=RuntimeError("boom")))
+    monkeypatch.setattr(ex, "_client", lambda **_kw: _FakeQueryClient(fetch_order_error=RuntimeError("boom")))
     out = ex.get_order("BTC-USDT-SWAP", ord_id="x")
     assert out["state"] == "error"
     assert out["exchange"] == "ccxt"
@@ -162,7 +162,7 @@ def test_get_order_error_degrades_safely(monkeypatch):
 def test_get_order_not_found_error_text_maps_not_found(monkeypatch):
     # An explicit "order does not exist" venue error maps to not_found, not error.
     ex = _executor()
-    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(fetch_order_error=RuntimeError("Order does not exist")))
+    monkeypatch.setattr(ex, "_client", lambda **_kw: _FakeQueryClient(fetch_order_error=RuntimeError("Order does not exist")))
     out = ex.get_order("BTC-USDT-SWAP", ord_id="x")
     assert out["state"] == "not_found"
 
@@ -178,7 +178,7 @@ def test_get_positions_open_is_signed(monkeypatch):
         "entryPrice": 60000.0, "unrealizedPnl": 12.5,
         "info": {"instId": "BTC-USDT-SWAP", "posSide": "long"},
     }]
-    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(positions=positions))
+    monkeypatch.setattr(ex, "_client", lambda **_kw: _FakeQueryClient(positions=positions))
     rows = ex.get_positions("BTC-USDT-SWAP")
     assert len(rows) == 1
     pos = rows[0]
@@ -191,7 +191,7 @@ def test_get_positions_open_is_signed(monkeypatch):
 def test_get_balance(monkeypatch):
     ex = _executor()
     balance = {"total": {"USDT": 100012.5}, "free": {"USDT": 99000.0}, "info": {}}
-    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(balance=balance))
+    monkeypatch.setattr(ex, "_client", lambda **_kw: _FakeQueryClient(balance=balance))
     rows = ex.get_balance("USDT")
     assert len(rows) == 1
     bal = rows[0]
@@ -204,7 +204,7 @@ def test_get_balance(monkeypatch):
 def test_get_balance_ccy_filter(monkeypatch):
     ex = _executor()
     balance = {"total": {"USDT": 100012.5, "BTC": 0.0}, "free": {"USDT": 99000.0, "BTC": 0.0}, "info": {}}
-    monkeypatch.setattr(ex, "_client", lambda: _FakeQueryClient(balance=balance))
+    monkeypatch.setattr(ex, "_client", lambda **_kw: _FakeQueryClient(balance=balance))
     assert [r["ccy"] for r in ex.get_balance("USDT")] == ["USDT"]
 
 
