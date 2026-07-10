@@ -184,6 +184,12 @@
           "default": true,
           "description": "Whether orders are actually submitted. False = Pause: the strategy still validates, ledgers, and renders, but NO order is sent to either the sandbox or live account. True (default) = orders are submitted to the account selected by execution_mode."
         },
+        "side_policy": {
+          "type": "string",
+          "enum": ["long_only", "short_only", "long_short"],
+          "default": "long_short",
+          "description": "Directional trading policy. 'long_short' (default, also when absent): both directions trade normally. 'long_only': only long opens are placed; a short signal still closes an open long but its OPEN_SHORT leg is suppressed. 'short_only': mirror image. The opposite-close leg always runs so a policy change can never strand an open position."
+        },
         "notes": { "type": "string" }
       }
     }

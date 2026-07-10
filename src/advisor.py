@@ -70,7 +70,7 @@ def _advisor_state_snapshot(record: dict) -> dict:
     intent = readiness.get("execution_intent") or {}
     return {
         "symbol": normalized.get("symbol"),
-        "side": normalized.get("side"),
+        "side": normalized.get("action"),
         "timeframe": normalized.get("timeframe"),
         "signal_price": normalized.get("tv_signal_price"),
         "strategy_id": normalized.get("strategy_id"),

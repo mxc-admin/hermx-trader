@@ -215,7 +215,7 @@ def build_combined_events(merged: dict, live_rows: list[dict]):
                 "received_at": record.get("received_at"),
                 "time_colombia": colombia_time(n.get("tv_time") or record.get("received_at")),
                 "symbol": n.get("symbol"),
-                "side": str(n.get("side") or "").lower(),
+                "side": str(n.get("action") or "").lower(),
                 "ha_close": as_float(n.get("tv_signal_price") or n.get("price")),
                 "source": "live",
                 "payload": record.get("payload") or {},

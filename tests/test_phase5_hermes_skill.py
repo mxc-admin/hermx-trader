@@ -22,7 +22,7 @@ def _signal(**over):
     base = {
         "strategy_id": "duo_raw",
         "symbol": "XRPUSDT",
-        "side": "buy",
+        "action": "buy",
         "timeframe": "30m",
         "tv_time": "2026-06-25T00:00:00Z",
         "signal_id": "sig-1",
@@ -236,7 +236,7 @@ def test_invalid_side_fails_closed_without_submit():
     service = mock.Mock()
     skill = HermesRelayAdapter(service=service)
 
-    out = skill.execute(signal=_signal(side="hold"), strategy=_strategy(), account_context=_account(), mode="live")
+    out = skill.execute(signal=_signal(action="hold"), strategy=_strategy(), account_context=_account(), mode="live")
 
     service.execute.assert_not_called()
     assert out["mode"] == "not_submitted"

@@ -30,13 +30,16 @@ from webhook.ledger_io import append_jsonl, read_jsonl_tolerant
 
 
 def dedupe_key(normalized: dict) -> str:
-    return "|".join(str(normalized.get(k, "")) for k in ("strategy_id", "symbol", "side", "timeframe", "tv_time"))
+    # Keyed on `action` (buy|sell|close), not the removed `side` output field. For an
+    # open, action==the old side value, so keys are byte-identical to before; but a
+    # same-bar buy and sell now stay distinct instead of collapsing to one key.
+    return "|".join(str(normalized.get(k, "")) for k in ("strategy_id", "symbol", "action", "timeframe", "tv_time"))
 
 
 def _signal_identity(normalized: dict) -> str:
     return "|".join(
         str(normalized.get(k, ""))
-        for k in ("strategy_id", "symbol", "side", "timeframe", "tv_time", "signal_id")
+        for k in ("strategy_id", "symbol", "action", "timeframe", "tv_time", "signal_id")
     )
 
 
@@ -131,7 +134,7 @@ def check_and_mark_signal(normalized: dict, received_at: str) -> tuple[bool, dic
             "signal_id": sid,
             "dedupe_key": key,
             "symbol": normalized.get("symbol"),
-            "side": normalized.get("side"),
+            "side": normalized.get("action"),
             "timeframe": normalized.get("timeframe"),
             "tv_time": normalized.get("tv_time"),
         }

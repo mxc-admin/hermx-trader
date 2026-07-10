@@ -65,9 +65,10 @@ def test_action_buy_routes_identically_to_side_buy(wr, monkeypatch):
     # Identical routing: same normalized alert and same execution outcome.
     assert r1["normalized"] == r2["normalized"]
     assert r1["okx_execution"] == r2["okx_execution"]
-    # Derivation worked both ways: action present, side back-filled to buy.
+    # `action` is the single canonical intent field; the `side` output was removed
+    # (Phase B), so it is absent for a buy just as it is for a close.
     assert r2["normalized"]["action"] == "buy"
-    assert r2["normalized"]["side"] == "buy"
+    assert "side" not in r2["normalized"]
 
 
 # --------------------------------------------------------------------------- #

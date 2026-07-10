@@ -36,7 +36,7 @@ MODE_UNKNOWN = "unknown"
 
 VALID_MODES = ("dry_run", "live")  # accepted `mode` inputs
 
-_SIDE_TO_DIRECTION = {"buy": "long", "sell": "short"}
+_ACTION_TO_DIRECTION = {"buy": "long", "sell": "short"}
 
 
 def _utc_now_iso() -> str:
@@ -60,7 +60,7 @@ def _stable_client_order_id(signal: dict, strategy: dict, role: str = "base") ->
         return explicit
     identity = "|".join(
         str((signal or {}).get(k, ""))
-        for k in ("strategy_id", "symbol", "side", "timeframe", "tv_time", "signal_id")
+        for k in ("strategy_id", "symbol", "action", "timeframe", "tv_time", "signal_id")
     )
     digest = hashlib.sha256(f"{identity}|{role}".encode("utf-8")).hexdigest()
     return f"mxc{digest}"[:32]
@@ -115,8 +115,8 @@ def build_execution_intent(*, signal: dict, strategy: dict, account_context: dic
     then ``OPEN_<dir>``); the adapter enforces no-pyramid / reverse semantics so
     the skill never re-derives position math.
     """
-    side = str((signal or {}).get("side") or (signal or {}).get("action") or "").strip().lower()
-    direction = _SIDE_TO_DIRECTION.get(side, "")
+    side = str((signal or {}).get("action") or "").strip().lower()
+    direction = _ACTION_TO_DIRECTION.get(side, "")
     symbol = _norm_symbol((signal or {}).get("symbol") or (strategy or {}).get("asset"))
     inst_id = _resolve_inst_id(signal, strategy, account_context)
     # Distinct clOrdId per leg (close vs open) so a reversal's second leg is not rejected

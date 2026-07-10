@@ -58,9 +58,11 @@ def normalize(payload: dict) -> dict:
     indicator = str(first(payload, "indicator", "indicator_name", "indicatorName", default="")).strip()
     symbol = str(first(payload, "symbol", "ticker", default="")).upper()
     symbol = symbol.replace("OKX:", "").replace("/", "").replace("-", "")
-    # `action` is the primary intent field; `side` is derived for back-compat.
-    # Legacy alerts send only `side` (buy|sell); `action` adds `close`. When both
-    # are present the conflict gate in build_record catches opposing open sides.
+    # `action` is the single canonical intent field on the normalized output.
+    # Legacy alerts send only the raw `side` input (buy|sell); `action` adds `close`.
+    # The raw `side` input is still read here purely to derive `action`, but it is no
+    # longer echoed onto the output dict. When both raw fields are present the conflict
+    # gate in build_record catches opposing open sides.
     raw_action = str(first(payload, "action", default="") or "").lower().strip()
     raw_side = str(first(payload, "side", default="") or "").lower().strip()
     _valid_open = {"buy", "sell"}
@@ -71,7 +73,6 @@ def normalize(payload: dict) -> dict:
         action = raw_side          # derive action from side for legacy alerts
     else:
         action = raw_action or raw_side   # preserve for error reporting
-    side = action if action in _valid_open else (raw_side if raw_side in _valid_open else "")
     timeframe = canonical_timeframe(first(payload, "timeframe", "interval", default="30m"))
     tv_time = str(first(payload, "tv_time", "time", "timestamp", "bar_time", "candle_time", default=now_iso()))
     signal_id = str(first(payload, "signal_id", default=""))
@@ -85,7 +86,6 @@ def normalize(payload: dict) -> dict:
         "strategy_name": strategy_name,
         "indicator": indicator,
         "symbol": symbol,
-        "side": side,
         "action": action,
         "timeframe": timeframe,
         "tv_signal_price": as_float(first(payload, "tv_signal_price", "tv_close", "signal_price", "price", "close", default=None)),
@@ -101,10 +101,6 @@ def normalize(payload: dict) -> dict:
     # Optional observe-only debugging context. Only carried when it is a dict --
     # never inject ``extras: None``, which would fail the schema's ``object`` type
     # check (schema key ``extras`` is an object) and reject otherwise-valid alerts.
-    # A close carries no side; drop the empty value so it never trips the schema's
-    # side enum (buy|sell). `action` is the authoritative field for a close bar.
-    if not normalized.get("side"):
-        normalized.pop("side", None)
     extras = payload.get("extras")
     if isinstance(extras, dict):
         normalized["extras"] = extras

@@ -512,6 +512,8 @@ class CcxtExecutor(BaseExecutor):
         intent = (readiness or {}).get("execution_intent") or {}
         actions = [str(a or "").upper() for a in (intent.get("actions") or []) if str(a or "").strip()]
         target = self._target_direction(readiness)
+        # side_policy suppressed the OPEN leg upstream: never synthesize it in the fallback.
+        open_suppressed = bool(intent.get("open_suppressed"))
         out: list[str] = []
 
         for action in actions:
@@ -524,7 +526,7 @@ class CcxtExecutor(BaseExecutor):
             if action in {"CLOSE_LONG", "CLOSE_SHORT", "OPEN_LONG", "OPEN_SHORT"}:
                 out.append(action)
 
-        if not out and target:
+        if not out and target and not open_suppressed:
             if target == "long" and current_side == "short":
                 out.append("CLOSE_SHORT")
             elif target == "short" and current_side == "long":

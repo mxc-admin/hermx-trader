@@ -249,7 +249,7 @@ def strategy_alert_rows(limit=500):
             "strategy_name": strategy.get("name") or norm.get("strategy_name") or norm.get("strategy_id"),
             "asset": norm.get("symbol") or strategy.get("asset"),
             "timeframe": norm.get("timeframe") or strategy.get("timeframe"),
-            "side": str(norm.get("side") or "").upper(),
+            "side": str(norm.get("action") or "").upper(),
             "price": norm.get("tv_signal_price"),
             "tv_time": norm.get("tv_time"),
             "tv_time_colombia": _dash.colombia_time(norm.get("tv_time")),

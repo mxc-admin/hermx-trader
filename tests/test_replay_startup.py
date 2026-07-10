@@ -167,7 +167,7 @@ def test_intake_in_signals_skipped(replay_env):
         "first_seen_at": _iso(now - 10),
         "first_seen_epoch": now - 10,
         "symbol": norm["symbol"],
-        "side": norm["side"],
+        "side": norm.get("action"),
         "timeframe": norm["timeframe"],
         "tv_time": norm["tv_time"],
     }])

@@ -62,9 +62,9 @@ def real_decisions(limit=10000):
         norm = row.get("normalized") or {}
         if row.get("duplicate") or norm.get("source") != "tradingview":
             continue
-        if norm.get("symbol") not in symbol_set or norm.get("side") not in {"buy", "sell"}:
+        if norm.get("symbol") not in symbol_set or norm.get("action") not in {"buy", "sell"}:
             continue
-        sid = norm.get("signal_id") or f"{norm.get('symbol')}|{norm.get('side')}|{norm.get('tv_time')}"
+        sid = norm.get("signal_id") or f"{norm.get('symbol')}|{norm.get('action')}|{norm.get('tv_time')}"
         if sid in seen:
             continue
         seen.add(sid)
@@ -86,7 +86,7 @@ def load_events():
     live_record_by_key = {}
     for record in live_rows:
         norm = record.get("normalized") or {}
-        key = (norm.get("symbol"), norm.get("side"), norm.get("tv_time") or record.get("received_at"))
+        key = (norm.get("symbol"), norm.get("action"), norm.get("tv_time") or record.get("received_at"))
         live_record_by_key[key] = record
     for event in live:
         key = (event.get("symbol"), event.get("side"), event.get("time"))

@@ -549,7 +549,6 @@ except Exception as exc:  # fail closed: execution simply stays disabled
     logging.warning("ExecutionService unavailable: %s", exc)
 
 ALLOWED_SYMBOLS = frozenset(s.get("asset") for s in STRATEGIES.values() if s.get("asset"))
-ALLOWED_SIDES = {"buy", "sell"}
 
 
 def webhook_auth_config_healthy() -> bool:
@@ -1325,7 +1324,7 @@ def _build_close_record(payload: dict, normalized: dict, received_at_override: s
     """Intake path for a webhook-driven close (action=close). Runs the SAME
     source / schema / strategy-match / dedupe gates as an open signal, then routes
     through the operator-close executor (close_only=True). A close carries no side,
-    so it deliberately bypasses the ALLOWED_SIDES gate that guards open signals."""
+    so it deliberately bypasses the action-not-buy/sell gate that guards open signals."""
     if normalized.get("source") != "tradingview":
         return 202, {"ok": True, "ignored": True, "reason": "non_tradingview_source", "normalized": normalized}
 
@@ -1437,13 +1436,14 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
 
     # PR2 close branch: action=close reduces risk, so it reuses the operator-close
     # path (close_only=True → bypasses the kill switch + symbol pause). It carries
-    # no side, so it must return BEFORE the ALLOWED_SIDES gate below.
+    # no side, so it must return BEFORE the action-not-buy/sell gate below.
     if normalized.get("action") == "close":
         return _build_close_record(payload, normalized, received_at_override)
 
-    # `.get`: a close has already returned above; a malformed open alert (invalid
-    # side, no valid action) has its `side` key dropped by normalize → None → 400.
-    if normalized.get("side") not in ALLOWED_SIDES:
+    # A close has already returned above, so `action` here is buy/sell for a valid open;
+    # a malformed open alert (invalid side, no valid action) carries an `action` that is
+    # neither buy nor sell → 400.
+    if normalized.get("action") not in {"buy", "sell"}:
         return 400, {"ok": False, "error": "side_not_allowed", "normalized": normalized}
     if normalized.get("source") != "tradingview":
         return 202, {"ok": True, "ignored": True, "reason": "non_tradingview_source", "normalized": normalized}
@@ -1519,7 +1519,7 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
         return 200, record
 
     if strategy_config is not None:
-        direction = "long" if normalized.get("side") == "buy" else "short"
+        direction = "long" if normalized.get("action") == "buy" else "short"
         decision = {
             "policy": f"strategy_file:{normalized.get('strategy_id')}",
             "decision": "TRADE",
@@ -1607,7 +1607,7 @@ def process_payload_async(payload: dict, intake_received_at: str) -> None:
             logging.info(
                 "Shadow async processed symbol=%s side=%s tv_time=%s status=%s",
                 normalized.get("symbol"),
-                normalized.get("side"),
+                normalized.get("action"),
                 normalized.get("tv_time"),
                 status,
             )

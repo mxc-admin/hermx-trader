@@ -92,7 +92,19 @@ def build_strategy_execution_readiness(record: dict) -> dict:
     # Demo/Live -> True. execution_mode then decides sandbox vs real account.
     live_execution_enabled = bool(submit_orders)
     live_allowed = live_execution_enabled
-    direction = "long" if normalized.get("side") == "buy" else "short"
+    direction = "long" if normalized.get("action") == "buy" else "short"
+    # side_policy (schema default "long_short") gates which OPEN legs may be placed.
+    # long_only/short_only suppress the opposite-direction OPEN while ALWAYS keeping the
+    # CLOSE_OPPOSITE_IF_ANY leg, so a policy change can never strand an open position.
+    side_policy = str(strategy.get("side_policy") or "long_short").lower()
+    open_allowed = (
+        side_policy == "long_short"
+        or (direction == "long" and side_policy == "long_only")
+        or (direction == "short" and side_policy == "short_only")
+    )
+    intent_actions = ["CLOSE_OPPOSITE_IF_ANY"]
+    if open_allowed:
+        intent_actions.append(f"OPEN_{direction.upper()}")
     signal_identity = _signal_identity(normalized)
     # Reversal signals submit two legs (close the opposite position, then open the new
     # one). Each leg needs its OWN clOrdId or the venue rejects the second as a duplicate.
@@ -179,14 +191,14 @@ def build_strategy_execution_readiness(record: dict) -> dict:
         "leverage": strategy.get("leverage"),
         "timeframe": normalized.get("timeframe"),
         "tv_time": normalized.get("tv_time"),
-        "signal_side": normalized.get("side"),
+        "signal_side": normalized.get("action"),
         "signal_price": normalized.get("tv_signal_price"),
         "execution_intent": {
             "policy": f"strategy_file:{normalized.get('strategy_id')}",
             "decision": "TRADE",
             "risk_weight": 1.0,
             "target_direction": direction,
-            "actions": ["CLOSE_OPPOSITE_IF_ANY", f"OPEN_{direction.upper()}"],
+            "actions": intent_actions,
             "base_notional_usd": sizing_budget_usd,
             "planned_notional_usd": planned_notional,
             "client_order_id": client_order_id,
@@ -205,6 +217,11 @@ def build_strategy_execution_readiness(record: dict) -> dict:
         },
         "block_reason": None if live_allowed else "Duo Base Dev strategy trial is not approved for OKX submission",
     }
+    if not open_allowed:
+        # Flag the suppression so the adapter drops the OPEN leg (open_suppressed) and the
+        # pipeline event is observable. Decision-level tag only -- never the service `gate`.
+        plan["execution_intent"]["open_suppressed"] = True
+        plan["side_policy_restriction"] = {"policy": side_policy, "suppressed_direction": direction}
     # The separate execution-plan.jsonl ledger was removed entirely (constant + sweep
     # entry): nothing consumed it. The authoritative submission outcome is recorded to
     # pipeline.jsonl (stage="execution"), which the dashboard reads.
