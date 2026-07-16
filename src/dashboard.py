@@ -124,6 +124,7 @@ __all__ = [
     "parse_dt",
     "pct",
     "portfolio_contract",
+    "positions_contract",
     "read_jsonl_stats",
     "real_decisions",
     "reconcile_alert_records",
@@ -542,6 +543,7 @@ from dashboard.model import (  # noqa: E402  re-export shim
     _strategy_pnl_contract,
     _ledger_net_realized,
     portfolio_contract,
+    positions_contract,
     api_payload,
     health_payload,
 )

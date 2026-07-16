@@ -3,6 +3,7 @@ import { ArmingBanner } from '../components/ArmingBanner'
 import { TopBar } from '../components/TopBar'
 import { SummaryCards } from '../components/SummaryCards'
 import { StrategyGrid } from '../components/StrategyGrid'
+import { PositionsTable } from '../components/PositionsTable'
 import { ExecutionLedger } from '../components/ExecutionLedger'
 import { StrategyAlertLog } from '../components/StrategyAlertLog'
 import { OpenOrdersTable } from '../components/OpenOrdersTable'
@@ -39,6 +40,7 @@ export default function Home() {
         <StrategyGrid />
 
         {/* Tables */}
+        <PositionsTable />
         <ExecutionLedger />
         <StrategyAlertLog />
         <OpenOrdersTable />

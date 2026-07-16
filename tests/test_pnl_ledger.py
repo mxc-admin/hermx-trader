@@ -311,9 +311,9 @@ def test_reconcile_extracts_reduce_only_closes(ledger_dir):
          "uTime": 200},
     ]
     written = pnl_ledger.reconcile_from_order_history(rows, "okx", "demo")
-    assert written == 1
+    assert written == 2  # open leg (Positions-First) + close leg
     ledger = pnl_ledger.read_closed_trades()
-    assert len(ledger) == 1
+    assert len(ledger) == 1  # open legs invisible to the close view
     row = ledger[0]
     assert row["ord_id"] == "close1"
     assert row["side"] == "sell"
@@ -335,7 +335,7 @@ def test_reconcile_extracts_position_delta_close(ledger_dir):
          "side": "sell", "accFillSz": 2.0, "avgPx": "52000", "uTime": 200},
     ]
     written = pnl_ledger.reconcile_from_order_history(rows, "binance", "live")
-    assert written == 1
+    assert written == 2
     ledger = pnl_ledger.read_closed_trades()
     assert [r["ord_id"] for r in ledger] == ["spotClose"]
     assert ledger[0]["mode"] == "live"
@@ -382,8 +382,8 @@ def test_reconcile_is_idempotent(ledger_dir):
         {"instId": "BTC-USDT-SWAP", "ordId": "close1", "clOrdId": "mxcClose",
          "side": "sell", "accFillSz": 1.0, "reduceOnly": True, "uTime": 200},
     ]
-    assert pnl_ledger.reconcile_from_order_history(rows, "okx", "demo") == 1
-    # Re-running the same snapshot must not double-write.
+    assert pnl_ledger.reconcile_from_order_history(rows, "okx", "demo") == 2
+    # Re-running the same snapshot must not double-write (open + close legs).
     assert pnl_ledger.reconcile_from_order_history(rows, "okx", "demo") == 0
     assert len(pnl_ledger.read_closed_trades()) == 1
 
@@ -408,7 +408,7 @@ def test_reconcile_attributes_hyperliquid_numeric_cloid(ledger_dir):
          "side": "sell", "accFillSz": 1.0, "reduceOnly": True, "uTime": 250},
     ]
     written = pnl_ledger.reconcile_from_order_history(rows, "hyperliquid", "live")
-    assert written == 1
+    assert written == 2  # mapped open + mapped close; both externals skipped
     ledger = pnl_ledger.read_closed_trades()
     assert [r["ord_id"] for r in ledger] == ["hlClose"]
     # The original mxc id is preserved via the submit-time map.
@@ -458,7 +458,7 @@ def test_float_residue_does_not_create_phantom_close(ledger_dir):
          "accFillSz": 0.5, "avgPx": "52000", "uTime": 400},
     ]
     written = pnl_ledger.reconcile_from_order_history(rows, "okx", "demo")
-    assert written == 1
+    assert written == 4  # b1+b2 open legs, c1 close, s1 short-entry open leg
     assert [r["ord_id"] for r in pnl_ledger.read_closed_trades()] == ["c1"]
 
 
@@ -477,7 +477,7 @@ def test_snap_to_zero_after_equal_and_opposite_fills(ledger_dir):
          "accFillSz": 1.0, "avgPx": "52000", "uTime": 400},
     ]
     written = pnl_ledger.reconcile_from_order_history(rows, "okx", "demo")
-    assert written == 1
+    assert written == 4  # o1+o2 open legs, c1 close, reopen open leg
     assert [r["ord_id"] for r in pnl_ledger.read_closed_trades()] == ["c1"]
 
 
@@ -493,7 +493,7 @@ def test_sign_flip_warning_is_logged(ledger_dir, caplog):
     ]
     with caplog.at_level("WARNING", logger="pnl_ledger"):
         written = pnl_ledger.reconcile_from_order_history(rows, "okx", "demo")
-    assert written == 1
+    assert written == 2
     assert any("reconcile_position_sign_flip" in r.message for r in caplog.records)
 
 
@@ -511,7 +511,7 @@ def test_sign_guard_mismatch_logs_and_continues(ledger_dir, caplog):
     with caplog.at_level("WARNING", logger="pnl_ledger"):
         written = pnl_ledger.reconcile_from_order_history(rows, "okx", "demo")
     assert any("reconcile_sign_guard_mismatch" in r.message for r in caplog.records)
-    assert written == 1
+    assert written == 2
     assert [r["ord_id"] for r in pnl_ledger.read_closed_trades()] == ["bad1"]
 
 
@@ -536,7 +536,7 @@ def test_nonterminal_row_is_skipped(ledger_dir):
     written = pnl_ledger.reconcile_from_order_history(
         _term_rows(state="live", reduce_only=False), "okx", "demo"
     )
-    assert written == 0
+    assert written == 1  # the terminal open leg still ledgers; the close does not
     assert pnl_ledger.read_closed_trades() == []
 
 
@@ -545,7 +545,7 @@ def test_reduce_only_nonterminal_is_processed(ledger_dir):
     written = pnl_ledger.reconcile_from_order_history(
         _term_rows(state="live", reduce_only=True), "okx", "demo"
     )
-    assert written == 1
+    assert written == 2
 
 
 def test_absent_state_is_processed(ledger_dir):
@@ -553,14 +553,14 @@ def test_absent_state_is_processed(ledger_dir):
     written = pnl_ledger.reconcile_from_order_history(
         _term_rows(reduce_only=False), "okx", "demo"
     )
-    assert written == 1
+    assert written == 2
 
 
 def test_terminal_state_is_processed(ledger_dir):
     written = pnl_ledger.reconcile_from_order_history(
         _term_rows(state="filled", reduce_only=False), "okx", "demo"
     )
-    assert written == 1
+    assert written == 2
 
 
 # --- P0-1 max_recorded_closed_at (age-out high-water helper) -----------------
@@ -603,7 +603,7 @@ def test_recorded_at_ms_written_on_new_rows(ledger_dir):
     row = pnl_ledger.read_closed_trades()[0]
     assert isinstance(row["recorded_at_ms"], int)
     assert row["recorded_at_ms"] > 0
-    assert row["schema_version"] == 3
+    assert row["schema_version"] == 4
 
 
 def test_v2_rows_backfill_recorded_at_none_on_read(ledger_dir):
@@ -696,3 +696,100 @@ def test_reconcile_health_stats_mixed_v2_v3(ledger_dir):
     assert stats["max_recorded_at_ms"] == 5000
     assert stats["recorded_at_rows_pct"] == 0.5
     assert stats["recorded_at_rows_pct"] < 1.0
+
+
+# --- Positions-First: leg_kind (schema v4) -----------------------------------
+
+def _open_close_rows():
+    return [
+        {"instId": "BTC-USDT-SWAP", "ordId": "o1", "clOrdId": "mxcOpen",
+         "side": "buy", "accFillSz": 1.0, "reduceOnly": False,
+         "avgPx": "50000", "fee": "-0.2", "feeCcy": "USDT", "uTime": 100},
+        {"instId": "BTC-USDT-SWAP", "ordId": "c1", "clOrdId": "mxcClose",
+         "side": "sell", "accFillSz": 1.0, "reduceOnly": True,
+         "avgPx": "51000", "pnl": "10.0", "fee": "-0.5", "feeCcy": "USDT",
+         "uTime": 200},
+    ]
+
+
+def test_open_leg_written_with_none_pnl(ledger_dir):
+    assert pnl_ledger.reconcile_from_order_history(_open_close_rows(), "okx", "demo") == 2
+    legs = pnl_ledger.read_trade_legs()
+    by_id = {r["ord_id"]: r for r in legs}
+    assert by_id["o1"]["leg_kind"] == "open"
+    assert by_id["o1"]["pnl_gross"] is None
+    assert by_id["o1"]["net_realized_pnl"] is None
+    assert by_id["o1"]["fee_cost"] == -0.2
+    assert by_id["o1"]["avg_px"] == 50000.0
+    assert by_id["c1"]["leg_kind"] == "close"
+
+
+def test_open_legs_invisible_to_read_closed_trades_and_aggregate(ledger_dir):
+    import pnl_strategy_map
+    pnl_strategy_map.record_submit_strategy("mxcOpen", "alpha")
+    pnl_strategy_map.record_submit_strategy("mxcClose", "alpha")
+    pnl_ledger.reconcile_from_order_history(_open_close_rows(), "okx", "demo")
+    closes = pnl_ledger.read_closed_trades()
+    assert [r["ord_id"] for r in closes] == ["c1"]
+    agg = pnl_ledger.aggregate_strategy_pnl("alpha", mode="demo")
+    assert agg["closed_order_count"] == 1
+    assert agg["closed_net_pnl_usd"] == pytest.approx(9.5)
+    assert agg["closed_fees_usd"] == pytest.approx(-0.5)  # open-leg fee excluded
+
+
+def test_legacy_rows_backfill_leg_kind_close(ledger_dir):
+    ledger_dir.write_text(
+        json.dumps({"exchange": "okx", "inst_id": "A", "ord_id": "v3",
+                    "mode": "demo", "strategy_id": "alpha", "pnl_gross": 5.0,
+                    "fee_cost": 0.0, "net_realized_pnl": 5.0,
+                    "closed_at_ms": 100, "schema_version": 3}) + "\n",
+        encoding="utf-8",
+    )
+    rows = pnl_ledger.read_closed_trades()
+    assert len(rows) == 1
+    assert rows[0]["leg_kind"] == "close"
+    assert pnl_ledger.net_realized_for_strategy("alpha") == pytest.approx(5.0)
+
+
+def test_legacy_close_key_stable_after_backfill(ledger_dir):
+    # A legacy (keyless) close on disk and a v4 close entry for the SAME order
+    # must dedupe to one row — back-fill never re-keys history.
+    legacy = {"exchange": "okx", "inst_id": "A", "ord_id": "x1", "mode": "demo",
+              "pnl_gross": 5.0, "closed_at_ms": 100}
+    ledger_dir.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+    v4 = dict(legacy, leg_kind="close", schema_version=4)
+    assert pnl_ledger.append_closed_trades([v4]) == 0
+    # An open leg for the same ord_id is a DISTINCT key and appends fine.
+    open_leg = dict(legacy, leg_kind="open", pnl_gross=None)
+    assert pnl_ledger.append_closed_trades([open_leg]) == 1
+    assert len(pnl_ledger.read_closed_trades()) == 1
+    assert len(pnl_ledger.read_trade_legs()) == 2
+
+
+def test_read_trade_legs_kind_filter(ledger_dir):
+    pnl_ledger.reconcile_from_order_history(_open_close_rows(), "okx", "demo")
+    assert [r["ord_id"] for r in pnl_ledger.read_trade_legs(leg_kind="open")] == ["o1"]
+    assert [r["ord_id"] for r in pnl_ledger.read_trade_legs(leg_kind="close")] == ["c1"]
+    assert len(pnl_ledger.read_trade_legs()) == 2
+
+
+def test_zero_fill_open_not_ledgered(ledger_dir):
+    rows = [{"instId": "BTC-USDT-SWAP", "ordId": "z1", "clOrdId": "mxcZero",
+             "side": "buy", "accFillSz": 0.0, "state": "canceled", "uTime": 100}]
+    assert pnl_ledger.reconcile_from_order_history(rows, "okx", "demo") == 0
+
+
+def test_external_open_not_ledgered(ledger_dir):
+    rows = [{"instId": "BTC-USDT-SWAP", "ordId": "e1", "clOrdId": "someBot",
+             "side": "buy", "accFillSz": 1.0, "uTime": 100}]
+    assert pnl_ledger.reconcile_from_order_history(rows, "okx", "demo") == 0
+
+
+def test_hyperliquid_open_leg_resolves_cloid(ledger_dir):
+    import pnl_cloid_map
+    pnl_cloid_map.record_cloid_mapping("mxc-hl-o", "0x" + "ab" * 16, "hyperliquid")
+    rows = [{"instId": "BTC", "ordId": "hlO", "clOrdId": "0x" + "ab" * 16,
+             "side": "buy", "accFillSz": 1.0, "reduceOnly": False, "uTime": 100}]
+    assert pnl_ledger.reconcile_from_order_history(rows, "hyperliquid", "live") == 1
+    leg = pnl_ledger.read_trade_legs(leg_kind="open")[0]
+    assert leg["cl_ord_id"] == "mxc-hl-o"

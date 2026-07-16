@@ -97,6 +97,53 @@ export interface Strategy {
   _path?: string
 }
 
+/**
+ * positions.open[] / positions.closed[] — Positions-First contract.
+ *
+ * Closed rows are flat-to-flat episodes folded from the durable leg ledger
+ * (qty = sum of close-leg fills; realized figures are the same close-leg sums
+ * the strategy card aggregates). Open rows are venue-truth (qty/upl live),
+ * enriched with opened_at_ms/strategy_id/entry from ledger open legs.
+ */
+export interface PositionRow {
+  status?: string // "open" | "closed"
+  strategy_id?: string | null
+  venue?: string | null
+  mode?: string | null
+  inst_id?: string | null
+  symbol?: string
+  side?: string | null // "long" | "short"
+  qty?: number | null
+  entry_px?: number | null
+  exit_px?: number | null
+  opened_at_ms?: number | null
+  closed_at_ms?: number | null
+  realized_pnl_gross?: number | null
+  fees?: number | null
+  realized_pnl_net?: number | null
+  upl?: number | null
+  mark_px?: number | null
+  notional_usd?: number | null
+  open_leg_count?: number
+  close_leg_count?: number
+}
+
+/** Observe-only reconcile-by-position drift row (never auto-traded). */
+export interface PositionDrift {
+  kind?: string
+  venue?: string | null
+  mode?: string | null
+  inst_id?: string | null
+  ledger_qty?: number | null
+  venue_qty?: number | null
+}
+
+export interface PositionsContract {
+  open?: PositionRow[]
+  closed?: PositionRow[]
+  drift?: { count?: number; rows?: PositionDrift[] }
+}
+
 /** okx_live.positions[symbol] — one open/flat position per trial symbol. */
 export interface LivePosition {
   inst_id?: string
@@ -276,6 +323,7 @@ export interface ApiPayload {
   backfill?: unknown
   strategies?: Strategy[]
   portfolio?: Portfolio
+  positions?: PositionsContract
   strategy_alerts?: StrategyAlert[]
   okx_live?: OkxLive
   okx_executions?: ExecutionRow[]

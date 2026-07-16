@@ -289,3 +289,98 @@ def test_api_payload_includes_portfolio_and_strategy_pnl(dash):
         pnl = s["strategy_pnl"]
         assert pnl["strategy_id"] == s["strategy_id"]
         assert "realized_net" in pnl and "total_net" in pnl and "trade_count" in pnl
+
+
+# --- positions contract (Positions-First) ------------------------------------
+
+def _leg_row(strategy_id, *, ord_id, leg_kind, side, qty, px, ts, mode="demo",
+             gross=None, fee=None, net=None, inst_id="BTC-USDT-SWAP", exchange="okx"):
+    return {
+        "schema_version": 4, "leg_kind": leg_kind, "exchange": exchange,
+        "inst_id": inst_id, "ord_id": ord_id, "mode": mode,
+        "strategy_id": strategy_id, "side": side, "filled_qty": qty,
+        "avg_px": px, "pnl_gross": gross, "fee_cost": fee,
+        "fee_currency": "USDT", "net_realized_pnl": net, "closed_at_ms": ts,
+    }
+
+
+def test_api_payload_includes_positions(dash):
+    dash_mod, _core, root = dash
+    _write_strategy(root / "strategies", "s1")
+    _seed_ledger(root, [
+        _leg_row("s1", ord_id="o1", leg_kind="open", side="buy", qty=1.0,
+                 px=50000.0, ts=100),
+        _leg_row("s1", ord_id="c1", leg_kind="close", side="sell", qty=1.0,
+                 px=51000.0, ts=200, gross=10.0, fee=-0.5, net=9.5),
+    ])
+    _bust(dash_mod)
+    payload = dash_mod.api_payload()
+
+    assert "positions" in payload
+    pos = payload["positions"]
+    assert set(pos) == {"open", "closed", "drift"}
+    assert pos["open"] == []  # stubbed env snapshots carry no live positions
+    assert len(pos["closed"]) == 1
+    closed = pos["closed"][0]
+    assert closed["strategy_id"] == "s1"
+    assert closed["realized_pnl_net"] == pytest.approx(9.5)
+    assert closed["opened_at_ms"] == 100
+    assert closed["closed_at_ms"] == 200
+    # Identity: sum of closed position net == the strategy card's ledger figure.
+    card = next(s for s in payload["strategies"] if s["strategy_id"] == "s1")
+    assert closed["realized_pnl_net"] == pytest.approx(
+        card["strategy_pnl"]["realized_net"]
+    )
+    assert isinstance(pos["drift"]["count"], int)
+
+
+def test_positions_contract_joins_venue_open_row(dash):
+    dash_mod, _core, root = dash
+    _seed_ledger(root, [
+        _leg_row("s1", ord_id="o1", leg_kind="open", side="buy", qty=1.0,
+                 px=50000.0, ts=100),
+    ])
+    by_env = {"okx:demo": {"ok": True, "positions": {"BTCUSDT": {
+        "inst_id": "BTC-USDT-SWAP", "pos": 1.0, "avg_px": 50100.0,
+        "upl": 12.5, "mark_px": 50200.0, "notional_usd": 50200.0,
+    }}}}
+    pos = dash_mod.positions_contract([], by_env)
+    assert len(pos["open"]) == 1
+    row = pos["open"][0]
+    assert row["qty"] == pytest.approx(1.0)  # venue is truth for qty
+    assert row["upl"] == pytest.approx(12.5)
+    assert row["strategy_id"] == "s1"  # enriched from the ledger open episode
+    assert row["opened_at_ms"] == 100
+    assert pos["drift"]["count"] == 0
+
+
+def test_positions_contract_flags_drift_observe_only(dash):
+    dash_mod, _core, root = dash
+    # Ledger says open, venue (healthy read) says flat -> one drift row, no action.
+    _seed_ledger(root, [
+        _leg_row("s1", ord_id="o1", leg_kind="open", side="buy", qty=1.0,
+                 px=50000.0, ts=100),
+    ])
+    by_env = {"okx:demo": {"ok": True, "positions": {}}}
+    pos = dash_mod.positions_contract([], by_env)
+    assert pos["drift"]["count"] == 1
+    assert pos["drift"]["rows"][0]["kind"] == "ledger_open_venue_flat"
+
+
+def test_positions_contract_skips_drift_for_unhealthy_env(dash):
+    dash_mod, _core, root = dash
+    # A dead executor read must NOT read as "venue flat" drift.
+    _seed_ledger(root, [
+        _leg_row("s1", ord_id="o1", leg_kind="open", side="buy", qty=1.0,
+                 px=50000.0, ts=100),
+    ])
+    by_env = {"okx:demo": {"ok": False, "positions": {}}}
+    pos = dash_mod.positions_contract([], by_env)
+    assert pos["drift"]["count"] == 0
+    assert pos["open"] == []
+
+
+def test_positions_contract_absent_ledger_is_empty(dash):
+    dash_mod, _core, _root = dash
+    pos = dash_mod.positions_contract([], {})
+    assert pos == {"open": [], "closed": [], "drift": {"count": 0, "rows": []}}

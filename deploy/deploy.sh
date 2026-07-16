@@ -436,6 +436,22 @@ else
   phase "4/7 — Tests skipped (--no-tests)"
 fi
 
+# --- 4.5/7 Positions-First migration (one-time, idempotent) --------------------
+# Wipe-clean restart of the transaction ledgers (operator-approved 2026-07-16):
+# backs up then removes closed-trades.jsonl + the order-attribution maps so the
+# leg-aware (leg_kind open|close) ledger starts clean. Stamped under the data
+# dir (.migrations/positions-v1.done) — already-migrated hosts no-op instantly.
+# Runs BEFORE restart so services come up on the clean state; best-effort so a
+# migration hiccup never blocks a deploy (legacy rows still read correctly).
+phase "4.5/7 — Positions-First migration (idempotent)"
+if [[ -f "$ROOT/scripts/migrate-positions-v1.sh" ]]; then
+  bash "$ROOT/scripts/migrate-positions-v1.sh" \
+    && ok "Positions migration checked/applied" \
+    || warn "Positions migration failed — inspect scripts/migrate-positions-v1.sh output"
+else
+  warn "scripts/migrate-positions-v1.sh missing — skipping positions migration"
+fi
+
 # --- 5/7 Restart ---------------------------------------------------------------
 phase "5/7 — Restart services"
 restart_services || { err "systemctl restart failed"; rollback || true; exit 1; }

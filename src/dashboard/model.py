@@ -657,6 +657,100 @@ def portfolio_contract(strategy_pnls) -> PortfolioContract:
     }
 
 
+def positions_contract(annotated_strategies, by_env) -> Dict[str, Any]:
+    """Positions-first view for the /api payload (Positions-First design).
+
+    ``closed`` — ledger-folded closed episodes (pnl_positions.list_positions),
+    each strategy's accounting window applied so the sum of its closed rows'
+    ``realized_pnl_net`` matches the strategy card's ledger aggregate.
+    ``open`` — venue-truth rows (qty/upl from the live env snapshots), enriched
+    with ``opened_at_ms``/``strategy_id``/entry from the matching ledger open
+    episode when one exists.
+    ``drift`` — the observe-only reconcile-by-position comparison, scoped to
+    envs whose snapshot read succeeded (a dead executor is not position drift).
+    Fail-open: any ledger error degrades to empty lists, never a failed payload."""
+    import dashboard as _dash
+    try:
+        from pnl_positions import diff_open_positions, list_positions
+
+        episodes = list_positions()
+    except Exception:
+        return {"open": [], "closed": [], "drift": {"count": 0, "rows": []}}
+    windows = {}
+    for s in annotated_strategies or []:
+        sid = s.get("strategy_id")
+        if sid and s.get("accounting_start_at") is not None:
+            windows[sid] = s["accounting_start_at"]
+    closed = []
+    ledger_open = []
+    for ep in episodes:
+        if ep.get("status") == "open":
+            ledger_open.append(ep)
+            continue
+        window = windows.get(ep.get("strategy_id"))
+        if window is not None and (ep.get("closed_at_ms") or 0) < window:
+            continue
+        closed.append(ep)
+    open_rows = []
+    venue_open = []
+    healthy_envs = set()
+    for env_key, snap in (by_env or {}).items():
+        if not (snap or {}).get("ok"):
+            continue
+        venue, _, mode = str(env_key).partition(":")
+        healthy_envs.add((venue, mode))
+        for sym, pos in ((snap or {}).get("positions") or {}).items():
+            qty = _dash.as_float(pos.get("pos")) or 0.0
+            if qty == 0.0:
+                continue
+            inst_id = pos.get("inst_id")
+            venue_open.append(
+                {"venue": venue, "mode": mode, "inst_id": inst_id, "qty": qty}
+            )
+            row = {
+                "status": "open",
+                "venue": venue,
+                "mode": mode,
+                "inst_id": inst_id,
+                "symbol": sym,
+                "side": "long" if qty > 0 else "short",
+                "qty": abs(qty),
+                "entry_px": _dash.as_float(pos.get("avg_px")),
+                "upl": _dash.as_float(pos.get("upl")),
+                "mark_px": _dash.as_float(pos.get("mark_px")),
+                "notional_usd": _dash.as_float(pos.get("notional_usd")),
+                "strategy_id": None,
+                "opened_at_ms": None,
+                "realized_pnl_net": None,
+            }
+            for ep in ledger_open:
+                if (ep.get("venue"), ep.get("mode"), ep.get("inst_id")) == (venue, mode, inst_id):
+                    row["strategy_id"] = ep.get("strategy_id")
+                    row["opened_at_ms"] = ep.get("opened_at_ms")
+                    row["realized_pnl_net"] = ep.get("realized_pnl_net")
+                    if row["entry_px"] is None:
+                        row["entry_px"] = ep.get("entry_px")
+                    break
+            if row["strategy_id"] is None:
+                for s in annotated_strategies or []:
+                    if s.get("asset") == sym and s.get("env_key") == env_key:
+                        row["strategy_id"] = s.get("strategy_id")
+                        break
+            open_rows.append(row)
+    try:
+        drift_rows = diff_open_positions(
+            [ep for ep in ledger_open if (ep.get("venue"), ep.get("mode")) in healthy_envs],
+            venue_open,
+        )
+    except Exception:
+        drift_rows = []
+    return {
+        "open": open_rows,
+        "closed": closed,
+        "drift": {"count": len(drift_rows), "rows": drift_rows},
+    }
+
+
 def api_payload():
     """The structured model the ``/api`` route serializes.
 
@@ -699,6 +793,10 @@ def api_payload():
     # Phase 4: top-level portfolio roll-up across every strategy's durable P&L.
     portfolio = _dash.portfolio_contract([s.get("strategy_pnl") for s in annotated_strategies])
 
+    # Positions-First: open (venue-truth, ledger-enriched) + closed (ledger-folded)
+    # positions and the observe-only reconcile-by-position drift.
+    positions = _dash.positions_contract(annotated_strategies, _by_env)
+
     # P1-2: read-only reconcile-health (max recorded_at_ms, lag, v3-coverage pct).
     # Never fail the /api response on a ledger read error.
     try:
@@ -714,6 +812,7 @@ def api_payload():
         "backfill": loaded["backfill"],
         "strategies": annotated_strategies,
         "portfolio": portfolio,
+        "positions": positions,
         "strategy_overrides": _overrides,
         "accounting_windows": _acct_windows,
         "trading_state": _dash._get_trading_state(_ctrl),

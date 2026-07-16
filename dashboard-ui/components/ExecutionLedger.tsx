@@ -51,10 +51,23 @@ const stateKindOf = (v: string) => {
 const mono = { fontFamily: 'var(--font-mono), monospace' as const }
 
 export function ExecutionLedger() {
-  const { data } = useDashboardContext()
-  const rows = ((data?.okx_executions ?? []) as Row[]).filter(
-    r => r['status'] !== 'not_submitted' && r['order_status'] !== 'not_submitted'
+  const { data, strategyFilter } = useDashboardContext()
+  const selected = (data?.strategies ?? []).find(
+    (s) => s.strategy_id === strategyFilter
   )
+  const rows = ((data?.okx_executions ?? []) as Row[])
+    .filter(
+      r => r['status'] !== 'not_submitted' && r['order_status'] !== 'not_submitted'
+    )
+    // Rows carry no strategy_id, so the strategy filter matches on the selected
+    // strategy's asset symbol (falling back to strategy_id when a row has one).
+    .filter(
+      r =>
+        !strategyFilter ||
+        r['strategy_id'] === strategyFilter ||
+        (selected?.asset !== undefined && r['symbol'] === selected.asset)
+    )
+    .reverse() // pipeline rows arrive oldest-first; show newest-first
   const skipped = data?.ledger_health?.total_skipped
 
   const columns = [
@@ -114,9 +127,9 @@ export function ExecutionLedger() {
   ]
 
   return (
-    <Section title="EXECUTION LEDGER" defaultOpen={true}>
+    <Section title="EXECUTION EVENTS" defaultOpen={true}>
       <DataTable<Row>
-        label="Execution ledger"
+        label="Execution events"
         columns={columns}
         rows={rows}
         emptyMessage="No executions recorded"

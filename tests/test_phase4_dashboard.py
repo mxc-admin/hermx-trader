@@ -689,3 +689,68 @@ def test_enrich_close_rows_falls_back_to_raw_okx_pnl():
     out = dashboard_mod.enrich_close_rows_with_okx_history([record], [hist])
     assert out[0]["history_enriched"] is True
     assert out[0]["realized_pnl"] == -3.4
+
+# ---------------------------------------------------------------------------
+# Positions-First: /api/positions endpoint (auth-gated, ledger-backed).
+# ---------------------------------------------------------------------------
+
+def _positions_ledger(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMX_DATA_DIR", str(tmp_path))
+    legs = [
+        {"schema_version": 4, "leg_kind": "open", "exchange": "okx",
+         "inst_id": "BTC-USDT-SWAP", "ord_id": "o1", "mode": "demo",
+         "strategy_id": "alpha", "side": "buy", "filled_qty": 1.0,
+         "avg_px": 50000.0, "pnl_gross": None, "fee_cost": None,
+         "fee_currency": None, "net_realized_pnl": None, "closed_at_ms": 100},
+        {"schema_version": 4, "leg_kind": "close", "exchange": "okx",
+         "inst_id": "BTC-USDT-SWAP", "ord_id": "c1", "mode": "demo",
+         "strategy_id": "alpha", "side": "sell", "filled_qty": 1.0,
+         "avg_px": 51000.0, "pnl_gross": 10.0, "fee_cost": -0.5,
+         "fee_currency": "USDT", "net_realized_pnl": 9.5, "closed_at_ms": 200},
+    ]
+    (tmp_path / "closed-trades.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in legs), encoding="utf-8"
+    )
+
+
+def test_api_positions_endpoint_returns_episodes(tmp_path, monkeypatch):
+    _positions_ledger(tmp_path, monkeypatch)
+    monkeypatch.setattr(dashboard_mod, "DASH_AUTH_ENABLED", False)
+    server, thread = _serve(dashboard_mod.Handler)
+    try:
+        status, body = _get(server.server_address[1], "/api/positions")
+        assert status == 200
+        payload = json.loads(body)
+        assert payload["ok"] is True
+        assert payload["count"] == 1
+        pos = payload["positions"][0]
+        assert pos["status"] == "closed"
+        assert pos["strategy_id"] == "alpha"
+        assert pos["realized_pnl_net"] == pytest.approx(9.5)
+        # Filters thread through the query string.
+        status, body = _get(server.server_address[1], "/api/positions?status=open")
+        assert json.loads(body)["count"] == 0
+        status, body = _get(
+            server.server_address[1], "/api/positions?strategy_id=ghost"
+        )
+        assert json.loads(body)["count"] == 0
+    finally:
+        _stop(server, thread)
+
+
+def test_api_positions_endpoint_requires_auth(tmp_path, monkeypatch):
+    _positions_ledger(tmp_path, monkeypatch)
+    monkeypatch.setattr(dashboard_mod, "DASH_AUTH_ENABLED", True)
+    monkeypatch.setattr(dashboard_mod, "DASH_AUTH_TOKEN", "dash-token")
+    server, thread = _serve(dashboard_mod.Handler)
+    try:
+        status, _body = _get(server.server_address[1], "/api/positions")
+        assert status == 401
+        status, body = _get(
+            server.server_address[1], "/api/positions",
+            headers={"Authorization": "Bearer dash-token"},
+        )
+        assert status == 200
+        assert json.loads(body)["ok"] is True
+    finally:
+        _stop(server, thread)

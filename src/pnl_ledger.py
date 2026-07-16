@@ -1,9 +1,10 @@
-"""Durable closed-trade ledger for P&L accounting.
+"""Durable trade-leg ledger for P&L accounting (Positions-First).
 
-Append-only WAL stored at ``HERMX_DATA_DIR / "closed-trades.jsonl"``. Deduped by
-the composite key ``(exchange, inst_id, ord_id, mode)``. Never pruned — it is the
-lifetime realized-P&L record (P&L Master Plan Principle 10: the ledger must not
-inherit the raw-webhook WAL's size-rotation).
+Append-only WAL stored at ``HERMX_DATA_DIR / "closed-trades.jsonl"``. Each row is
+one leg (``leg_kind`` "open"|"close"; pre-v4 rows read back as close legs).
+Deduped by the composite key ``(exchange, inst_id, ord_id, mode, leg_kind)``.
+Never pruned — it is the lifetime realized-P&L record (P&L Master Plan Principle
+10: the ledger must not inherit the raw-webhook WAL's size-rotation).
 
 Paths resolve at call time from the environment (HERMX_DATA_DIR -> HERMX_ROOT ->
 repo root), mirroring dashboard.py, so tests that rebind the root via env need no
@@ -30,8 +31,10 @@ _LOCK = threading.Lock()
 
 # Ledger row schema version. v1 rows have no ``net_realized_pnl``/``schema_version``;
 # ``read_closed_trades`` back-fills net for them on read (Phase 2). Bump on any
-# breaking row-shape change so consumers can branch on it.
-SCHEMA_VERSION = 3
+# breaking row-shape change so consumers can branch on it. v4 adds ``leg_kind``
+# ("open"|"close"): the ledger now records open legs too (Positions-First); rows
+# without the key read back as close legs.
+SCHEMA_VERSION = 4
 
 # Per-venue knowledge: does the exchange's 'pnl' / 'realizedPnl' field already
 # include trading fees (net), or is it gross P&L before fees?
@@ -187,7 +190,12 @@ def _usd_fee_cost(row: dict) -> float | None:
 
 
 def _composite_key(row: dict) -> tuple:
-    return (row.get("exchange"), row.get("inst_id"), row.get("ord_id"), row.get("mode"))
+    # leg_kind is normalized (missing -> "close") so a legacy close row and a v4
+    # close row for the same order share one key — back-fill never re-keys history.
+    return (
+        row.get("exchange"), row.get("inst_id"), row.get("ord_id"), row.get("mode"),
+        row.get("leg_kind") or "close",
+    )
 
 
 def is_hermx_cl_ord_id(cl_ord_id: str | None, exchange_id: str | None = None) -> bool:
@@ -293,12 +301,13 @@ def _parse_operator_close_strategy_id(
     return None
 
 
-def read_closed_trades(
+def read_trade_legs(
     since_ms: int | None = None,
     strategy_id: str | None = None,
     accounting_start_at: int | None = None,
+    leg_kind: str | None = None,
 ) -> list[dict]:
-    """Read ledger entries, oldest-first, tolerant of corrupt/partial lines.
+    """Read ledger legs, oldest-first, tolerant of corrupt/partial lines.
 
     Args:
         since_ms: when set, drop rows whose ``closed_at_ms`` is strictly older.
@@ -308,6 +317,8 @@ def read_closed_trades(
             dropped so a strategy's clean-window total ignores pre-reset history
             WITHOUT deleting it from the append-only ledger. Combined with
             ``since_ms`` by taking the later (stricter) of the two floors.
+        leg_kind: "open"|"close" to scope to one leg kind; None returns both
+            (the positions episode fold). Legacy rows without the key are close legs.
     """
     # One lower bound on closed_at_ms: the later of the freshness floor and the
     # accounting-window floor (both optional). max() of whichever are present.
@@ -333,6 +344,13 @@ def read_closed_trades(
                 if row_ts is not None and row_ts < effective_since:
                     continue
             if strategy_id is not None and row.get("strategy_id") != strategy_id:
+                continue
+            # Back-fill leg_kind for pre-v4 rows: every legacy row is a close leg
+            # (opens were never written before Positions-First). Read-only, never
+            # persisted — same pattern as the net back-fill below.
+            if "leg_kind" not in row:
+                row["leg_kind"] = "close"
+            if leg_kind is not None and row.get("leg_kind") != leg_kind:
                 continue
             # Back-fill net for v1 rows (written before Phase 2 had the field).
             # Derived on read from stored gross+fee; never persisted here so the
@@ -361,17 +379,35 @@ def read_closed_trades(
     # any duplicate that reached disk — legacy data or a pre-fix TOCTOU race. The
     # append path's flock now prevents *new* dupes; this collapses old ones so a
     # single logical close is never double-counted on read (Test H3). A row whose
-    # composite key is fully degenerate ((None, None, None, None)) is malformed, not
-    # a real duplicate — keep every such row rather than collapsing them into one.
+    # identifying key parts are fully degenerate (all None — the normalized
+    # leg_kind is excluded, it can never be None) is malformed, not a real
+    # duplicate — keep every such row rather than collapsing them into one.
     deduped: dict = {}
     malformed: list = []
     for row in rows:
         key = _composite_key(row)
-        if all(part is None for part in key):
+        if all(part is None for part in key[:4]):
             malformed.append(row)
             continue
         deduped[key] = row
     return list(deduped.values()) + malformed
+
+
+def read_closed_trades(
+    since_ms: int | None = None,
+    strategy_id: str | None = None,
+    accounting_start_at: int | None = None,
+) -> list[dict]:
+    """Read close legs only — the realized-P&L view every existing consumer sums.
+
+    Open legs (v4, Positions-First) are invisible here by construction so no
+    aggregate can ever double-count an entry fill as a close."""
+    return read_trade_legs(
+        since_ms=since_ms,
+        strategy_id=strategy_id,
+        accounting_start_at=accounting_start_at,
+        leg_kind="close",
+    )
 
 
 def max_recorded_closed_at(exchange: str, mode: str) -> int | None:
@@ -683,23 +719,32 @@ def _row_ts(row: dict) -> int:
     return 0
 
 
-def _build_entry(row: dict, exchange_id: str, mode: str, side: str, filled: float) -> dict:
+def _build_entry(
+    row: dict, exchange_id: str, mode: str, side: str, filled: float,
+    leg_kind: str = "close",
+) -> dict:
     """Project an exchange order-history row onto the durable ledger schema."""
     inst_id = row.get("instId") or row.get("inst_id")
     ord_id = row.get("ordId") or row.get("id")
-    # Prefer the adapter-normalized realized P&L; fall back to the OKX-native pnl.
-    pnl_gross = _as_float(row.get("realized_pnl"))
-    if pnl_gross is None:
-        pnl_gross = _as_float(row.get("pnl"))
-    if pnl_gross is None:
-        # The venue exposed no realized P&L for this close (e.g. bybit in order
-        # history). Persist the row with gross=None (an honest "unknown", distinct
-        # from a real 0.0) but warn: a genuine close with no PnL signal must not be
-        # indistinguishable from a real break-even zero.
-        logger.warning(
-            "pnl_gross_is_none inst_id=%s ord_id=%s filled=%.8g — writing zero pnl, verify venue",
-            inst_id, ord_id, filled,
-        )
+    if leg_kind == "open":
+        # An entry fill realizes nothing — pnl fields stay an honest None. Fees are
+        # still recorded raw on the row (informational; never summed into the
+        # close-leg USD aggregates, which read close legs only).
+        pnl_gross = None
+    else:
+        # Prefer the adapter-normalized realized P&L; fall back to the OKX-native pnl.
+        pnl_gross = _as_float(row.get("realized_pnl"))
+        if pnl_gross is None:
+            pnl_gross = _as_float(row.get("pnl"))
+        if pnl_gross is None:
+            # The venue exposed no realized P&L for this close (e.g. bybit in order
+            # history). Persist the row with gross=None (an honest "unknown", distinct
+            # from a real 0.0) but warn: a genuine close with no PnL signal must not be
+            # indistinguishable from a real break-even zero.
+            logger.warning(
+                "pnl_gross_is_none inst_id=%s ord_id=%s filled=%.8g — writing zero pnl, verify venue",
+                inst_id, ord_id, filled,
+            )
     fee_cost = _as_float(row.get("fee"))
     fee_currency = row.get("feeCcy")
     # A fee paid in a currency other than the instrument's quote (e.g. BNB, base
@@ -742,6 +787,7 @@ def _build_entry(row: dict, exchange_id: str, mode: str, side: str, filled: floa
         strategy_id = _parse_operator_close_strategy_id(cl_ord_id, inst_id)
     return {
         "schema_version": SCHEMA_VERSION,
+        "leg_kind": leg_kind,
         "exchange": exchange_id,
         "inst_id": inst_id,
         "ord_id": ord_id,
@@ -773,7 +819,7 @@ def _build_entry(row: dict, exchange_id: str, mode: str, side: str, filled: floa
 def reconcile_from_order_history(
     history_rows: list[dict], exchange_id: str, mode: str
 ) -> int:
-    """Extract HermX close rows from exchange order history and append to the ledger.
+    """Extract HermX open + close legs from exchange order history and append to the ledger.
 
     Close detection uses **position-delta**, not just ``reduceOnly`` (Decision 3),
     so it works for spot venues that never set reduceOnly:
@@ -824,6 +870,19 @@ def reconcile_from_order_history(
                 inst_id, prev, side,
             )
         if not is_close:
+            # Positions-First open-leg writer: a terminal HermX entry fill is
+            # ledgered as leg_kind="open" (pnl fields None) so positions fold from
+            # the same durable file. Zero-fill rows (canceled, never filled) and
+            # in-flight partials are skipped; externals are never opened-ledgered.
+            if filled <= 0.0:
+                continue
+            state = row.get("state")
+            if state is not None and str(state).lower() in _NON_TERMINAL_ORDER_STATES:
+                continue
+            cl_ord_id = row.get("clOrdId") or row.get("clientOrderId")
+            if not is_hermx_cl_ord_id(cl_ord_id, exchange_id):
+                continue
+            entries.append(_build_entry(row, exchange_id, mode, side, filled, leg_kind="open"))
             continue
 
         # Opp 10 (folded into B1): observe-only overfill invariant. A close whose filled

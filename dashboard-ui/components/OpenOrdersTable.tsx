@@ -44,8 +44,17 @@ const trunc = (v: string | undefined, len: number) =>
 const mono = { fontFamily: 'var(--font-mono), monospace' as const }
 
 export function OpenOrdersTable() {
-  const { data } = useDashboardContext()
-  const rows = (data?.open_orders?.rows ?? []) as Row[]
+  const { data, strategyFilter } = useDashboardContext()
+  const selected = (data?.strategies ?? []).find(
+    (s) => s.strategy_id === strategyFilter
+  )
+  // Journal rows carry no strategy_id — the strategy filter matches on the
+  // selected strategy's asset symbol.
+  const rows = ((data?.open_orders?.rows ?? []) as Row[]).filter(
+    (r) =>
+      !strategyFilter ||
+      (selected?.asset !== undefined && r['symbol'] === selected.asset)
+  )
   const stats = data?.open_orders?.stats
 
   const columns = [

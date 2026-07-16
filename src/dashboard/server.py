@@ -148,6 +148,31 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_bytes(200, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             return
+        if path in {"/api/positions", "/shadow/api/positions", "/dashboard/api/positions"}:
+            if not self._dashboard_auth_ok():
+                self._auth_challenge()
+                return
+            qs = parse_qs(urlparse(self.path).query)
+
+            def _q(name):
+                value = (qs.get(name) or [None])[0]
+                return str(value).strip() or None if value is not None else None
+
+            try:
+                from pnl_positions import list_positions
+
+                rows = list_positions(
+                    strategy_id=_q("strategy_id"),
+                    status=_q("status"),
+                    mode=_q("mode"),
+                    venue=_q("venue"),
+                )
+            except Exception as exc:  # unexpected ledger/fold failure only
+                self.send_bytes(500, json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+                return
+            payload = {"ok": True, "positions": rows, "count": len(rows)}
+            self.send_bytes(200, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            return
         static_ready = _dash.STATIC_DIR.is_dir()
         if path in {"/dashboard/api", "/dashboard/api/", "/api", "/shadow/dashboard/api"}:
             payload = _dash.api_payload()

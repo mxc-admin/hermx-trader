@@ -40,8 +40,10 @@ const trunc = (v: string | undefined, len: number) =>
 const mono = { fontFamily: 'var(--font-mono), monospace' as const }
 
 export function StrategyAlertLog() {
-  const { data } = useDashboardContext()
-  const rows = (data?.strategy_alerts ?? []) as Row[]
+  const { data, strategyFilter } = useDashboardContext()
+  const rows = ((data?.strategy_alerts ?? []) as Row[]).filter(
+    (r) => !strategyFilter || r['strategy_id'] === strategyFilter
+  )
 
   const columns = [
     {

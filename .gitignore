@@ -54,3 +54,10 @@ dashboard-ui/tsconfig.tsbuildinfo
 
 # Lifetime append-only realized-P&L ledger — per-host live data, never tracked.
 closed-trades.jsonl
+
+# Submit-time attribution maps — per-host live data, never tracked.
+cl-ord-strategy-map.jsonl
+cloid-map.jsonl
+
+# Migration stamps + pre-wipe backups (scripts/migrate-positions-v1.sh)
+.migrations/
