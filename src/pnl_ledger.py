@@ -442,6 +442,24 @@ def external_fills_count(mode: str | None = None) -> int:
     return sum(1 for r in rows if r.get("source") == "external")
 
 
+def unattributed_stats(mode: str | None = None) -> dict:
+    """Count + net realized P&L of ledger rows carrying no ``strategy_id``.
+
+    Reconciled pre-attribution history and external closes are written with
+    ``strategy_id=None``, so every per-strategy sum silently excludes them; this
+    account-level view lets the portfolio disclose that such history exists.
+    Read-only; optionally scoped to a ``mode`` (demo|live)."""
+    rows = read_closed_trades()
+    if mode is not None:
+        rows = [r for r in rows if r.get("mode") == mode]
+    rows = [r for r in rows if not r.get("strategy_id")]
+    return {
+        "count": len(rows),
+        "net_realized_pnl": sum((r.get("net_realized_pnl") or 0.0) for r in rows),
+        "mode": mode or "all",
+    }
+
+
 def net_realized_for_strategy(
     strategy_id: str,
     mode: str | None = None,

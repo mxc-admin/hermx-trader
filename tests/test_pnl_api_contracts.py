@@ -245,7 +245,24 @@ def test_portfolio_contract_empty(dash):
     assert port == {
         "realized_net": 0.0, "realized_gross": 0.0, "fees": 0.0, "upl": 0.0,
         "total_net": 0.0, "trade_count": 0, "strategies": 0,
+        "unattributed": {"count": 0, "net_realized_pnl": 0.0, "mode": "all"},
     }
+
+
+def test_portfolio_contract_discloses_unattributed_rows(dash):
+    dash_mod, _core, root = dash
+    # Pre-attribution history: reconciled rows carry strategy_id=None, so they are
+    # invisible to every per-strategy sum — the portfolio must disclose them.
+    _seed_ledger(root, [
+        _ledger_row(None, ord_id="u1", gross=10.0, fee=-1.0, closed_at_ms=100),
+        _ledger_row(None, ord_id="u2", gross=-3.0, fee=-0.5, closed_at_ms=200),
+        _ledger_row("s1", ord_id="a1", gross=5.0, fee=-0.5, closed_at_ms=300),
+    ])
+    port = dash_mod.portfolio_contract([])
+    unattr = port["unattributed"]
+    assert unattr["count"] == 2
+    assert unattr["net_realized_pnl"] == pytest.approx(10.0 - 1.0 - 3.0 - 0.5)
+    assert unattr["mode"] == "all"
 
 
 # --- api_payload integration -----------------------------------------------

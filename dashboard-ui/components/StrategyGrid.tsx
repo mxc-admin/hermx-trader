@@ -17,11 +17,13 @@ export function StrategyGrid() {
     )
   }
 
+  // Exact strategy_id match when both sides carry one; asset is only a last
+  // resort so two strategies sharing an asset never cross-count alerts.
   const alertCount = (strategy: { strategy_id?: string; asset?: string }) =>
-    alerts.filter(
-      (a) =>
-        (strategy.strategy_id && a.strategy_id === strategy.strategy_id) ||
-        (strategy.asset && a.asset === strategy.asset),
+    alerts.filter((a) =>
+      strategy.strategy_id && a.strategy_id
+        ? a.strategy_id === strategy.strategy_id
+        : Boolean(strategy.asset && a.asset === strategy.asset),
     ).length
 
   return (

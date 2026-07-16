@@ -64,6 +64,8 @@ export interface Portfolio {
   total_net?: number
   trade_count?: number
   strategies?: number // count of strategies carrying P&L data
+  /** Ledger rows with no strategy_id — invisible to per-strategy sums. */
+  unattributed?: { count?: number; net_realized_pnl?: number; mode?: string }
 }
 
 /** A strategy file (strategies/*.json), schema_version 2. */

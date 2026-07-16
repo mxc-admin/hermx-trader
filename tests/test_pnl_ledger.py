@@ -105,6 +105,42 @@ def test_read_closed_trades_strategy_filter(ledger_dir):
     assert [r["ord_id"] for r in rows] == ["2"]
 
 
+# --- unattributed_stats -------------------------------------------------------
+
+def test_unattributed_stats_counts_null_and_missing_sid(ledger_dir):
+    ledger_dir.write_text(
+        json.dumps({"exchange": "okx", "inst_id": "A", "ord_id": "1", "mode": "demo",
+                    "strategy_id": None, "net_realized_pnl": 5.0, "closed_at_ms": 100}) + "\n"
+        + json.dumps({"exchange": "okx", "inst_id": "B", "ord_id": "2", "mode": "demo",
+                      "net_realized_pnl": -1.5, "closed_at_ms": 200}) + "\n"
+        + json.dumps({"exchange": "okx", "inst_id": "C", "ord_id": "3", "mode": "demo",
+                      "strategy_id": "alpha", "net_realized_pnl": 7.0, "closed_at_ms": 300}) + "\n",
+        encoding="utf-8",
+    )
+    stats = pnl_ledger.unattributed_stats()
+    assert stats["count"] == 2
+    assert stats["net_realized_pnl"] == pytest.approx(3.5)
+    assert stats["mode"] == "all"
+
+
+def test_unattributed_stats_mode_filter(ledger_dir):
+    ledger_dir.write_text(
+        json.dumps({"exchange": "okx", "inst_id": "A", "ord_id": "1", "mode": "demo",
+                    "strategy_id": None, "net_realized_pnl": 2.0, "closed_at_ms": 100}) + "\n"
+        + json.dumps({"exchange": "okx", "inst_id": "B", "ord_id": "2", "mode": "live",
+                      "strategy_id": None, "net_realized_pnl": 4.0, "closed_at_ms": 200}) + "\n",
+        encoding="utf-8",
+    )
+    stats = pnl_ledger.unattributed_stats(mode="live")
+    assert stats == {"count": 1, "net_realized_pnl": 4.0, "mode": "live"}
+
+
+def test_unattributed_stats_absent_ledger(ledger_dir):
+    assert pnl_ledger.unattributed_stats() == {
+        "count": 0, "net_realized_pnl": 0.0, "mode": "all",
+    }
+
+
 # --- read-side dedupe -------------------------------------------------------
 
 def test_read_closed_trades_deduplicates_on_read(ledger_dir):

@@ -80,6 +80,7 @@ class PortfolioContract(TypedDict):
     total_net: float
     trade_count: int
     strategies: int
+    unattributed: Dict[str, Any]
 
 
 class DashboardModel(TypedDict, total=False):
@@ -635,6 +636,15 @@ def portfolio_contract(strategy_pnls) -> PortfolioContract:
         trade_count += int(p.get("trade_count") or 0)
         if (p.get("trade_count") or 0) or (p.get("upl") or 0.0):
             active += 1
+    # Rows with strategy_id=None (pre-attribution history, external closes) are
+    # invisible to every per-strategy sum above — disclose them so "0 closes"
+    # can't hide unattributed history. Fail-open zeros on any ledger error.
+    try:
+        from pnl_ledger import unattributed_stats
+
+        unattributed = unattributed_stats()
+    except Exception:
+        unattributed = {"count": 0, "net_realized_pnl": 0.0, "mode": "all"}
     return {
         "realized_net": realized_net,
         "realized_gross": realized_gross,
@@ -643,6 +653,7 @@ def portfolio_contract(strategy_pnls) -> PortfolioContract:
         "total_net": realized_net + upl,
         "trade_count": trade_count,
         "strategies": active,
+        "unattributed": unattributed,
     }
 
 

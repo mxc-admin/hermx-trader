@@ -2,7 +2,7 @@
 import type { CSSProperties } from 'react'
 import { StatCard } from './StatCard'
 import { useDashboardContext } from './DashboardProvider'
-import { envBreakdown } from '../lib/format'
+import { envBreakdown, money } from '../lib/format'
 
 // Mirrors src/dashboard.py:summary_cards() — four at-a-glance status cards.
 type Kind = 'good' | 'bad' | 'warn' | 'muted'
@@ -31,6 +31,7 @@ export function SummaryCards() {
   const { data, health } = useDashboardContext()
 
   const strategies = data?.strategies ?? []
+  const unattributed = data?.portfolio?.unattributed
   const positions = data?.okx_live?.positions ?? {}
   const executor = data?.executor
   const arm = health?.arm ?? {}
@@ -101,39 +102,52 @@ export function SummaryCards() {
     hermesColor = 'var(--negative)'
   }
 
+  const unattrCount = unattributed?.count ?? 0
+
   return (
-    <div className="summary-cards" style={gridStyle}>
-      <StatCard
-        label="SYSTEM STATUS"
-        value={sysLabel}
-        sub={`${strategies.length} strategies active`}
-        accentColor={kindColor(sysKind)}
-        valueColor={kindColor(sysKind)}
-      />
-      <StatCard
-        label="STRATEGIES"
-        value={String(strategies.length)}
-        sub={`${demoCount} demo / ${liveCount} live`}
-        accentColor={kindColor(stratKind)}
-        valueColor={kindColor(stratKind)}
-      />
-      <StatCard
-        label="OPEN POSITIONS"
-        value={String(open.length)}
-        sub={`${longs}L / ${shorts}S`}
-        accentColor={kindColor(posKind)}
-        valueColor={kindColor(posKind)}
-      />
-      <StatCard
-        label="EXECUTION ENGINE"
-        value={`Engine - ${execLabel}`}
-        valueColor={kindColor(execKind)}
-        value2={hermesLabel}
-        value2Color={hermesColor}
-        sub={envBreakdown(executor?.envs) ?? undefined}
-        accentColor={kindColor(execKind)}
-      />
-    </div>
+    <>
+      {unattrCount > 0 && (
+        <div
+          className="font-mono text-xs rounded px-3 py-2 border"
+          style={{ borderColor: 'var(--warning)', color: 'var(--warning)', marginBottom: 12 }}
+        >
+          {unattrCount} close{unattrCount === 1 ? '' : 's'} unattributed ·{' '}
+          {money(unattributed?.net_realized_pnl ?? 0)} net (pre-attribution history)
+        </div>
+      )}
+      <div className="summary-cards" style={gridStyle}>
+        <StatCard
+          label="SYSTEM STATUS"
+          value={sysLabel}
+          sub={`${strategies.length} strategies active`}
+          accentColor={kindColor(sysKind)}
+          valueColor={kindColor(sysKind)}
+        />
+        <StatCard
+          label="STRATEGIES"
+          value={String(strategies.length)}
+          sub={`${demoCount} demo / ${liveCount} live`}
+          accentColor={kindColor(stratKind)}
+          valueColor={kindColor(stratKind)}
+        />
+        <StatCard
+          label="OPEN POSITIONS"
+          value={String(open.length)}
+          sub={`${longs}L / ${shorts}S`}
+          accentColor={kindColor(posKind)}
+          valueColor={kindColor(posKind)}
+        />
+        <StatCard
+          label="EXECUTION ENGINE"
+          value={`Engine - ${execLabel}`}
+          valueColor={kindColor(execKind)}
+          value2={hermesLabel}
+          value2Color={hermesColor}
+          sub={envBreakdown(executor?.envs) ?? undefined}
+          accentColor={kindColor(execKind)}
+        />
+      </div>
+    </>
   )
 }
 
