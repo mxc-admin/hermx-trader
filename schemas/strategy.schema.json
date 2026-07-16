@@ -164,7 +164,7 @@
             "max_notional_usd": {
               "type": "number",
               "exclusiveMinimum": 0,
-              "description": "Phase A (A1) optional absolute per-strategy pre-trade notional ceiling (USD). Independent of budget_usd x leverage. An order whose planned_notional_usd exceeds min(this, HERMX_MAX_NOTIONAL_USD) is refused before it reaches the venue. Unset => no per-strategy cap."
+              "description": "Phase A (A1) optional absolute per-strategy pre-trade notional ceiling (USD). Independent of budget_usd x leverage. An order whose planned_notional_usd exceeds min(this, HERMX_MAX_NOTIONAL_USD) is clamped down to that ceiling; the order still submits at the reduced size (never rejected). Unset => no per-strategy cap."
             }
           },
           "required": ["budget_usd"]

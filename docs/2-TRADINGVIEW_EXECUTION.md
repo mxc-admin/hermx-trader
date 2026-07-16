@@ -189,10 +189,12 @@ which gate fired — unless every gate passes:
    `HERMX_LIVE_TRADING=true`. **A `close_only` record bypasses this gate** (and the symbol
    pause): a close only reduces exposure, and HermX never blocks a close. Live/sandbox
    consistency is also enforced here (no live/sim mixing).
-4. **Pre-trade notional cap** (`_check_pretrade_risk`) — planned notional must not exceed
-   `min(capital.max_notional_usd, HERMX_MAX_NOTIONAL_USD)`. Both are operator-set
-   *absolute* values, deliberately independent of `budget_usd × leverage` (a fat-fingered
-   budget would raise a derived ceiling along with the notional). Unset → no cap.
+4. **Pre-trade notional cap (soft clamp)** (`_apply_notional_ceiling`) — planned notional
+   exceeding `min(capital.max_notional_usd, HERMX_MAX_NOTIONAL_USD)` is clamped down to
+   that ceiling and the order still submits at the reduced size (a WARNING is logged).
+   Both are operator-set *absolute* values, deliberately independent of
+   `budget_usd × leverage` (a fat-fingered budget would raise a derived ceiling along
+   with the notional). Unset → no cap.
 5. **Global `trading_state`** — `active` (normal) or `reducing` (risk-off, set via
    `control-state.json`). In `reducing`, every non-close order is blocked
    (`trading_state_reducing:reversal_blocked`); `close_only` records always pass.

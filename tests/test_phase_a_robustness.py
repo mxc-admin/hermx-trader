@@ -2,10 +2,11 @@
 
 Covers three ship-first pure-gate items, every one flag-gated OFF by default:
 
-  A1  Pre-trade notional cap — refuse any order whose ``planned_notional_usd``
+  A1  Pre-trade notional cap — size any order whose ``planned_notional_usd``
       exceeds an INDEPENDENT absolute ceiling (``capital.max_notional_usd`` per
-      strategy and/or the global ``HERMX_MAX_NOTIONAL_USD`` env). Unset => no cap,
-      byte-identical to today.
+      strategy and/or the global ``HERMX_MAX_NOTIONAL_USD`` env) DOWN to the
+      ceiling; the order still submits at the reduced size, never rejected.
+      Unset => no cap, byte-identical to today.
   A1b Silent under-execution alert — when every order leg clamps to size 0
       (sub-min notional) the strategy silently under-executes; emit a WARNING so
       the operator is not left guessing at a buried ``zero_size`` REJECT.
@@ -95,20 +96,26 @@ def _fake_ok():
 # A1 — pre-trade notional cap gate
 # ===========================================================================
 
-def test_pretrade_gate_blocks_oversized_notional(wr, monkeypatch):
+def test_pretrade_gate_clamps_oversized_notional(wr, monkeypatch):
     monkeypatch.setattr(svc, "HERMX_MAX_NOTIONAL_USD_ENV", 5000.0)
-    cl = "phaseastablenotionalblock0000001"
+    cl = "phaseastablenotionalclamp0000001"
     rec = _armed_record(cl, planned=10000.0)
 
-    with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
+    fake = _fake_ok()
+    with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):
         out = wr.execute_if_enabled(rec)
 
-    create_mock.assert_not_called()
-    assert out["mode"] == "not_submitted"
-    assert out["gate"] == "pretrade_notional"
-    assert out["reason"].startswith("notional_exceeds_max:")
-    # A blocked pre-trade gate writes NO order-journal row (returns before write-ahead).
-    assert wr.latest_order_record(cl) is None
+    # Oversized notional is sized DOWN to the ceiling, never rejected.
+    fake.execute.assert_called_once()
+    sent = fake.execute.call_args[0][0]
+    assert sent["execution_intent"]["planned_notional_usd"] == 5000.0
+    assert out["ok"] is True
+    assert out["mode"] == "submit_enabled"
+    # The clamped size is what reached the write-ahead journal (PLANNED -> SUBMITTED).
+    journal_row = wr.latest_order_record(cl)
+    assert journal_row is not None
+    # (the journal canonicalizes decimal fields to strings)
+    assert float(journal_row["intent"]["planned_notional_usd"]) == 5000.0
 
 
 def test_pretrade_gate_passes_normal_order(wr, monkeypatch):
@@ -142,33 +149,38 @@ def test_pretrade_gate_disabled_when_env_unset(wr, monkeypatch):
 
 
 def test_pretrade_gate_uses_min_of_config_and_env(wr, monkeypatch):
-    # Config cap 500, env cap 300 -> effective ceiling 300 (min wins); planned 400 blocks.
+    # Config cap 500, env cap 300 -> effective ceiling 300 (min wins); planned 400 clamps to 300.
     monkeypatch.setattr(svc, "HERMX_MAX_NOTIONAL_USD_ENV", 300.0)
     _inject_strategy(wr, monkeypatch, "strat-min", max_notional_usd=500.0)
     cl = "phaseastablenotionalmin000000001"
     rec = _armed_record(cl, planned=400.0, strategy_id="strat-min")
 
-    with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
+    fake = _fake_ok()
+    with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):
         out = wr.execute_if_enabled(rec)
 
-    create_mock.assert_not_called()
-    assert out["gate"] == "pretrade_notional"
-    assert "300.00" in out["reason"]  # ceiling is the smaller (env), not 500
+    fake.execute.assert_called_once()
+    sent = fake.execute.call_args[0][0]
+    # Ceiling is the smaller (env, 300), not the strategy's 500.
+    assert sent["execution_intent"]["planned_notional_usd"] == 300.0
+    assert out["mode"] == "submit_enabled"
 
 
 def test_pretrade_gate_per_strategy_tightens_global(wr, monkeypatch):
-    # Global 50000, per-strategy 4000 -> ceiling 4000 (min); planned 6000 blocks.
+    # Global 50000, per-strategy 4000 -> ceiling 4000 (min); planned 6000 clamps to 4000.
     monkeypatch.setattr(svc, "HERMX_MAX_NOTIONAL_USD_ENV", 50000.0)
     _inject_strategy(wr, monkeypatch, "strat-tight", max_notional_usd=4000.0)
     cl = "phaseastablenotionaltight0000001"
     rec = _armed_record(cl, planned=6000.0, strategy_id="strat-tight")
 
-    with mock.patch.object(wr.ExecutorFactory, "create") as create_mock:
+    fake = _fake_ok()
+    with mock.patch.object(wr.ExecutorFactory, "create", return_value=fake):
         out = wr.execute_if_enabled(rec)
 
-    create_mock.assert_not_called()
-    assert out["gate"] == "pretrade_notional"
-    assert "4000.00" in out["reason"]
+    fake.execute.assert_called_once()
+    sent = fake.execute.call_args[0][0]
+    assert sent["execution_intent"]["planned_notional_usd"] == 4000.0
+    assert out["mode"] == "submit_enabled"
 
 
 def test_pretrade_gate_none_planned_notional_passes(wr, monkeypatch):
@@ -212,6 +224,53 @@ def test_pretrade_gate_zero_env_treated_as_unset(wr, monkeypatch):
 
     fake.execute.assert_called_once()
     assert out["mode"] == "submit_enabled"
+
+
+def _readiness_record(strategy_id, *, capital, leverage=2):
+    """A minimal record for build_strategy_execution_readiness (sizing-clamp tests)."""
+    return {
+        "strategy_id": strategy_id,
+        "strategy_config": {
+            "strategy_id": strategy_id,
+            "name": "Clamp Test Strategy",
+            "asset": "BTCUSDT",
+            "instrument": {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap"},
+            "timeframe": "2h",
+            "execution_mode": "demo",
+            "submit_orders": True,
+            "capital": capital,
+            "leverage": leverage,
+            "margin_mode": "isolated",
+        },
+        "normalized": {
+            "strategy_id": strategy_id,
+            "symbol": "BTCUSDT",
+            "side": "buy",
+            "timeframe": "2h",
+            "tv_time": f"2026-07-16T00:00:00Z|{strategy_id}",
+            "tv_signal_price": 50000.0,
+        },
+    }
+
+
+def test_readiness_clamps_planned_notional_to_strategy_cap(wr):
+    # budget 1500 x leverage 2 = 3000 planned; capital.max_notional_usd 2000 clamps it.
+    # base_notional_usd stays the pre-leverage sizing budget (never re-derived from the cap).
+    rec = _readiness_record(
+        "clamp-strat", capital={"budget_usd": 1500, "reinvest": False, "max_notional_usd": 2000}
+    )
+    rd = wr.build_strategy_execution_readiness(rec)
+    assert rd["target_notional_usd"] == 2000.0
+    assert rd["execution_intent"]["planned_notional_usd"] == 2000.0
+    assert rd["execution_intent"]["base_notional_usd"] == 1500.0
+
+
+def test_readiness_no_clamp_when_cap_unset_or_zero(wr):
+    for cap in ({"budget_usd": 1500, "reinvest": False},
+                {"budget_usd": 1500, "reinvest": False, "max_notional_usd": 0}):
+        rd = wr.build_strategy_execution_readiness(_readiness_record("noclamp-strat", capital=cap))
+        assert rd["target_notional_usd"] == 3000.0
+        assert rd["execution_intent"]["planned_notional_usd"] == 3000.0
 
 
 # ===========================================================================

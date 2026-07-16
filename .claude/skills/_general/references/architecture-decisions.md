@@ -202,9 +202,9 @@
 - **Rationale:** The mapping is only knowable at submit time. Reconcile rows from the exchange carry no strategy context. `strategy_id=None` rows are still written — unattributed closes must be visible, not silently dropped.
 
 ### Pre-trade notional cap is independent-absolute (`capital.max_notional_usd` + `HERMX_MAX_NOTIONAL_USD`)
-- **Decision:** `_check_pretrade_risk()` in `ExecutionService.execute()` gates on `min(capital.max_notional_usd, HERMX_MAX_NOTIONAL_USD)`, both independently operator-set absolute values.
-- **Alternatives:** Ceiling derived from `budget_usd × leverage` (rejected — tautological, fat-fingered budget raises both ceiling and notional simultaneously). No cap (rejected for live trading).
-- **Rationale:** Only an independent absolute ceiling can catch a misconfigured strategy. Unset = no cap (safe by default, matches `HERMX_LIVE_TRADING` convention). Gate is inserted after symbol-pause, before WAL write — a blocked order writes no journal row.
+- **Decision:** `_apply_notional_ceiling()` in `ExecutionService.execute()` clamps `planned_notional_usd` down to `min(capital.max_notional_usd, HERMX_MAX_NOTIONAL_USD)`, both independently operator-set absolute values. The clamp is SOFT: the order still submits at the reduced size (WARNING logged), never rejected. The strategy half is also applied at sizing time in `build_strategy_execution_readiness`.
+- **Alternatives:** Ceiling derived from `budget_usd × leverage` (rejected — tautological, fat-fingered budget raises both ceiling and notional simultaneously). No cap (rejected for live trading). Hard reject on breach (original A1 behavior; changed 2026-07-16 — product meaning of `max_notional_usd` is "size down to this ceiling", not "kill the signal").
+- **Rationale:** Only an independent absolute ceiling can catch a misconfigured strategy. Unset = no cap (safe by default, matches `HERMX_LIVE_TRADING` convention). Clamp runs after symbol-pause, before WAL write — the journal records the clamped size. Closes (None/0 planned notional) are never touched.
 
 ### `trading_state` collapsed to `{active, reducing}` — no HALTED state
 - **Decision:** `control-state.json` carries `trading_state: "active" | "reducing"`. `reducing` blocks new reversals/opens; `close_only=True` signals always pass regardless of state.

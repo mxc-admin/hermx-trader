@@ -21,9 +21,10 @@ current code.
 - **Editing the seed requires a receiver restart.** Strategy files are loaded once at import
   (`src/webhook_receiver.py:500`); only the realized-P&L, accounting-window, and mode-override
   components are re-read from disk per signal. See "Editing the budget" below.
-- **Two independent absolute ceilings** can refuse an order before it reaches the venue:
+- **Two independent absolute ceilings** cap an order's size before it reaches the venue:
   `capital.max_notional_usd` and the `HERMX_MAX_NOTIONAL_USD` env var
-  (`src/execution/service.py:23-50`). Both unset = no cap.
+  (`src/execution/service.py`). An oversized order is clamped down to the ceiling and still
+  submits at the reduced size — never rejected. Both unset = no cap.
 - Want the old fixed-size behavior instead of compounding? Set `"reinvest": false` in the
   strategy's `capital` block.
 
@@ -128,21 +129,24 @@ estimate `notional / leverage` (`ccxt_adapter.py:678`).
 
 ## 5. Pre-trade gates that touch budget
 
-Both gates run in `ExecutionService` **before** the write-ahead journal, so a blocked order leaves
-no PLANNED row.
+Both gates run in `ExecutionService` **before** the write-ahead journal. Gate 4 is a soft
+clamp (the order proceeds at reduced size); Gate 6 blocks, leaving no PLANNED row.
 
-**Gate 4 — pre-trade notional cap** (`_check_pretrade_risk`, `src/execution/service.py:23-50`,
-wired at `:203-215`):
+**Gate 4 — pre-trade notional cap (soft clamp)** (`_apply_notional_ceiling`,
+`src/execution/service.py`):
 
 ```
 ceiling = min(capital.max_notional_usd, HERMX_MAX_NOTIONAL_USD env)
-refuse if planned_notional_usd > ceiling
+clamp planned_notional_usd down to ceiling if it exceeds it — the order still submits
 ```
 
-The ceiling is deliberately **independent-absolute** — never derived from `budget × leverage`,
-which could not catch a fat-fingered budget in the same file the notional came from
-(`service.py:15-19`). Unset or non-positive ceiling ⇒ no cap; a `None` planned notional (a close)
-is a fail-safe pass. `HERMX_MAX_NOTIONAL_USD` is read **once at module load**
+The strategy half of the ceiling is also applied at sizing time
+(`src/strategy/readiness.py`), so `target_notional_usd` / `planned_notional_usd` are built
+already capped; the gate re-applies the full `min(strategy, env)` ceiling in place and logs
+a WARNING when it clamps. The ceiling is deliberately **independent-absolute** — never derived
+from `budget × leverage`, which could not catch a fat-fingered budget in the same file the
+notional came from. Unset or non-positive ceiling ⇒ no cap; a `None` planned notional (a close)
+is never touched. `HERMX_MAX_NOTIONAL_USD` is read **once at module load**
 (`service.py:20`) — changing the env var requires a restart.
 
 **Gate 6 — reinvest equity stop** (`src/execution/service.py:236-247`): when `equity_usd <= 0`,

@@ -149,6 +149,20 @@ def build_strategy_execution_readiness(record: dict) -> dict:
             sizing_budget_usd = seed_budget_usd
     base_notional = sizing_budget_usd * float(strategy.get("leverage") or 1.0)
     planned_notional = float(dec_notional(base_notional))
+    # capital.max_notional_usd is a SOFT ceiling: size the order DOWN to it, never
+    # reject the signal. Unset / non-positive => no cap. The env half of the ceiling
+    # (HERMX_MAX_NOTIONAL_USD) is applied identically by the ExecutionService gate.
+    try:
+        max_notional = float((strategy.get("capital") or {}).get("max_notional_usd") or 0.0)
+    except (TypeError, ValueError):
+        max_notional = 0.0
+    if max_notional > 0 and planned_notional > max_notional:
+        logging.warning(
+            "notional clamp strategy_id=%s planned=%.2f ceiling=%.2f",
+            strategy.get("strategy_id") or normalized.get("strategy_id"),
+            planned_notional, max_notional,
+        )
+        planned_notional = float(dec_notional(max_notional))
     # Exchange-agnostic instruction contract (Phase 6 / M3, ARCHITECTURE.md). ``td_mode``
     # below is the OKX translation of this same value, so derive both from one expression.
     margin_mode = strategy.get("margin_mode", "isolated")
