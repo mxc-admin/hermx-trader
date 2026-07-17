@@ -1,7 +1,7 @@
 'use client'
 import type { CSSProperties } from 'react'
 import { useState, useCallback } from 'react'
-import type { Strategy, LivePosition } from '../lib/types'
+import type { Strategy, LivePosition, PnlPoint } from '../lib/types'
 import { money, num, pct, sideColor, sideKind } from '../lib/format'
 import { Badge } from './Badge'
 import { setStrategyMode } from '../lib/api'
@@ -9,7 +9,6 @@ import { setStrategyMode } from '../lib/api'
 interface StrategyCardProps {
   strategy: Strategy
   position?: LivePosition
-  alertCount: number
   liveEnabled: boolean
   onModeChange?: () => void
 }
@@ -87,7 +86,7 @@ function ModePill({
   )
 }
 
-export function StrategyCard({ strategy, position, alertCount, liveEnabled, onModeChange }: StrategyCardProps) {
+export function StrategyCard({ strategy, position, liveEnabled, onModeChange }: StrategyCardProps) {
   const sym = strategy.asset ?? ''
   const side = (position?.side ?? 'FLAT').toUpperCase()
   const isLive = side !== 'FLAT'
@@ -105,7 +104,6 @@ export function StrategyCard({ strategy, position, alertCount, liveEnabled, onMo
   // calc so the Equity tile and the Performance % read from one source and never
   // disagree in production.
   const pnl = strategy.strategy_pnl
-  const closes = pnl?.trade_count ?? 0
   // Equity now: read the durable value; fall back to the local formula only when
   // strategy_pnl is entirely absent.
   const equityNowDisplay = pnl ? pnl.equity_now_usd : equityNow
@@ -244,10 +242,53 @@ export function StrategyCard({ strategy, position, alertCount, liveEnabled, onMo
           color={uplColor}
         />
         <Metric label="Mark price" value={num(position?.last, 4)} />
-        <Metric label="Alerts | Closes" value={`${alertCount} | ${closes}`} />
         <Metric label="Performance" value={pct(perfPct)} color={perfColor} />
       </div>
+
+      {/* Equity curve: cumulative realized net over closed episodes (closed-only;
+          UPnL stays a separate scalar above). */}
+      <div>
+        <span className="metric-label">PnL curve (closed)</span>
+        <Sparkline points={pnl?.pnl_series ?? []} />
+      </div>
     </section>
+  )
+}
+
+function Sparkline({ points }: { points: PnlPoint[] }) {
+  const values = points.map((p) => p.cum_net ?? 0)
+  if (values.length < 2) {
+    return (
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+        Not enough closed trades
+      </div>
+    )
+  }
+  const w = 260
+  const h = 36
+  const pad = 2
+  const min = Math.min(...values, 0)
+  const max = Math.max(...values, 0)
+  const range = max - min || 1
+  const x = (i: number) => pad + (i * (w - 2 * pad)) / (values.length - 1)
+  const y = (v: number) => h - pad - ((v - min) * (h - 2 * pad)) / range
+  const path = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ')
+  const last = values[values.length - 1]
+  const stroke = last > 0 ? 'var(--positive)' : last < 0 ? 'var(--negative)' : 'var(--text-muted)'
+  return (
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      width="100%"
+      height={h}
+      role="img"
+      aria-label={`Cumulative realized PnL over ${values.length} closes, now ${last.toFixed(2)}`}
+      style={{ display: 'block', marginTop: 4 }}
+    >
+      {min < 0 && max > 0 && (
+        <line x1={pad} x2={w - pad} y1={y(0)} y2={y(0)} stroke="var(--border-dim)" strokeDasharray="3 3" />
+      )}
+      <polyline points={path} fill="none" stroke={stroke} strokeWidth={1.5} />
+    </svg>
   )
 }
 

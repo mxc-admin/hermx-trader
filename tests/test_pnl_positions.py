@@ -257,6 +257,58 @@ def test_open_plus_closed_realized_equals_aggregate_under_partial_close(ledger_d
     )
 
 
+# --- pnl_series (equity curve from closed episodes) ----------------------------
+
+def test_pnl_series_empty_ledger(ledger_dir):
+    assert pnl_positions.pnl_series() == []
+
+
+def test_pnl_series_cumulative_sorted_ascending(ledger_dir):
+    legs = _round_trip("alpha", base_ts=1000) + _round_trip("alpha", base_ts=100)
+    legs[0]["ord_id"], legs[1]["ord_id"] = "o-2", "c-2"
+    _seed(ledger_dir, legs)
+    series = pnl_positions.pnl_series(strategy_id="alpha", mode="demo")
+    assert [p["closed_at_ms"] for p in series] == [200, 1100]
+    assert [p["pnl_net"] for p in series] == [pytest.approx(9.5), pytest.approx(9.5)]
+    assert series[-1]["cum_net"] == pytest.approx(19.0)
+
+
+def test_pnl_series_excludes_open_and_respects_window(ledger_dir):
+    _seed(ledger_dir, _round_trip("alpha", base_ts=100) + [
+        _leg(kind="open", ord_id="o-live", side="buy", qty=1.0, px=1.0, ts=150,
+             inst="ETH-USDT-SWAP"),
+    ])
+    # Window past the close drops it; the open episode never appears.
+    assert pnl_positions.pnl_series(strategy_id="alpha", accounting_start_at=500) == []
+    series = pnl_positions.pnl_series(strategy_id="alpha")
+    assert len(series) == 1
+    assert series[0]["cum_net"] == pytest.approx(9.5)
+
+
+def test_pnl_series_caps_points_but_keeps_full_cumulative(ledger_dir):
+    legs = []
+    for i in range(5):
+        rt = _round_trip("alpha", base_ts=100 + i * 1000)
+        rt[0]["ord_id"], rt[1]["ord_id"] = f"o-{i}", f"c-{i}"
+        legs += rt
+    _seed(ledger_dir, legs)
+    series = pnl_positions.pnl_series(strategy_id="alpha", max_points=2)
+    assert len(series) == 2
+    # Cumulative spans all 5 closes even though only the last 2 points remain.
+    assert series[-1]["cum_net"] == pytest.approx(5 * 9.5)
+
+
+def test_pnl_series_mode_filter(ledger_dir):
+    legs = _round_trip("alpha")
+    live = _round_trip("alpha", base_ts=5000)
+    for leg in live:
+        leg["mode"] = "live"
+        leg["ord_id"] += "-live"
+    _seed(ledger_dir, legs + live)
+    assert len(pnl_positions.pnl_series(strategy_id="alpha", mode="demo")) == 1
+    assert len(pnl_positions.pnl_series(strategy_id="alpha", mode="live")) == 1
+
+
 # --- diff_open_positions (observe-only reconcile-by-position) -------------------
 
 def test_diff_no_drift_when_matching():

@@ -12,6 +12,22 @@ const mono = { fontFamily: 'var(--font-mono), monospace' as const }
 const ageMs = (ms: number | null | undefined) =>
   ms ? age(new Date(ms).toISOString()) : '—'
 
+// Relative age with the full ISO timestamp on hover.
+const AgeMs = ({ ms }: { ms: number | null | undefined }) =>
+  ms ? <span title={new Date(ms).toISOString()}>{ageMs(ms)}</span> : <>—</>
+
+const TYPE_SUFFIXES = new Set(['SWAP', 'FUTURES', 'FUTURE', 'PERP', 'SPOT', 'MARGIN', 'OPTION'])
+
+// BTC-USDT-SWAP / BTC/USDT:USDT -> BTCUSDT (display-only compaction, mirrors
+// the backend strategy_asset derivation).
+const compactInstId = (instId: string) => {
+  const parts = instId.split(':', 1)[0].split(/[-/]/).filter(Boolean)
+  if (parts.length >= 3 && TYPE_SUFFIXES.has(parts[parts.length - 1].toUpperCase())) {
+    parts.pop()
+  }
+  return parts.join('').toUpperCase()
+}
+
 const pnlColor = (n: number | null | undefined) =>
   n === null || n === undefined
     ? 'var(--text-muted)'
@@ -28,7 +44,8 @@ const Pnl = ({ value }: { value: number | null | undefined }) => (
 const SideBadge = ({ side }: { side: string | null | undefined }) =>
   side ? <Badge label={side.toUpperCase()} kind={sideKind(side)} /> : <>—</>
 
-const asset = (row: PositionRow) => row.symbol ?? row.inst_id ?? '—'
+const asset = (row: PositionRow) =>
+  row.symbol ?? (row.inst_id ? compactInstId(row.inst_id) : '—')
 
 export function PositionsTable() {
   const { data, strategyFilter } = useDashboardContext()
@@ -40,6 +57,7 @@ export function PositionsTable() {
   const driftCount = positions?.drift?.count ?? 0
 
   const openColumns = [
+    { key: 'opened', header: 'Opened', render: (r: PositionRow) => <AgeMs ms={r.opened_at_ms} /> },
     { key: 'strategy', header: 'Strategy', render: (r: PositionRow) => r.strategy_id ?? '—' },
     { key: 'asset', header: 'Asset', render: asset },
     { key: 'env', header: 'Env', render: (r: PositionRow) => `${r.venue ?? '—'}:${r.mode ?? '—'}` },
@@ -48,10 +66,10 @@ export function PositionsTable() {
     { key: 'entry', header: 'Entry', render: (r: PositionRow) => num(r.entry_px, 4) },
     { key: 'mark', header: 'Mark', render: (r: PositionRow) => num(r.mark_px, 4) },
     { key: 'upl', header: 'UPnL', render: (r: PositionRow) => <Pnl value={r.upl} /> },
-    { key: 'opened', header: 'Opened', render: (r: PositionRow) => ageMs(r.opened_at_ms) },
   ]
 
   const closedColumns = [
+    { key: 'opened', header: 'Opened', render: (r: PositionRow) => <AgeMs ms={r.opened_at_ms} /> },
     { key: 'strategy', header: 'Strategy', render: (r: PositionRow) => r.strategy_id ?? '—' },
     { key: 'asset', header: 'Asset', render: asset },
     { key: 'env', header: 'Env', render: (r: PositionRow) => `${r.venue ?? '—'}:${r.mode ?? '—'}` },
@@ -61,8 +79,7 @@ export function PositionsTable() {
     { key: 'exit', header: 'Exit', render: (r: PositionRow) => num(r.exit_px, 4) },
     { key: 'net', header: 'Net PnL', render: (r: PositionRow) => <Pnl value={r.realized_pnl_net} /> },
     { key: 'fees', header: 'Fees', render: (r: PositionRow) => money(r.fees ?? null) },
-    { key: 'opened', header: 'Opened', render: (r: PositionRow) => ageMs(r.opened_at_ms) },
-    { key: 'closed', header: 'Closed', render: (r: PositionRow) => ageMs(r.closed_at_ms) },
+    { key: 'closed', header: 'Closed', render: (r: PositionRow) => <AgeMs ms={r.closed_at_ms} /> },
   ]
 
   return (

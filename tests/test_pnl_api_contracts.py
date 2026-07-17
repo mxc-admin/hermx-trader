@@ -196,6 +196,36 @@ def test_strategy_pnl_contract_mode_scopes_rows(dash):
     assert pnl["trade_count"] == 1
 
 
+def test_strategy_pnl_contract_carries_pnl_series(dash):
+    dash_mod, _core, root = dash
+    _seed_ledger(root, [
+        _ledger_row("s1", ord_id="1", gross=10.0, fee=-0.5, closed_at_ms=100),
+        _ledger_row("s1", ord_id="2", gross=5.0, fee=-0.25, closed_at_ms=300),
+        _ledger_row("s1", ord_id="3", mode="live", gross=99.0, fee=0.0, closed_at_ms=200),
+    ])
+    strategy = {"strategy_id": "s1", "asset": "BTCUSDT", "execution_mode": "demo",
+                "budget_usd": 1000, "instrument": {"exchange": "okx"}}
+    pnl = dash_mod._strategy_pnl_contract(strategy, None, {}, {})
+    series = pnl["pnl_series"]
+    # Closed-only, demo-scoped, ascending closed_at_ms, cumulative realized net.
+    assert [p["closed_at_ms"] for p in series] == [100, 300]
+    assert series[0]["cum_net"] == pytest.approx(9.5)
+    assert series[-1]["cum_net"] == pytest.approx(pnl["realized_net"])
+
+
+def test_strategy_pnl_contract_pnl_series_respects_window(dash):
+    dash_mod, _core, root = dash
+    _seed_ledger(root, [
+        _ledger_row("s1", ord_id="old", gross=100.0, fee=0.0, closed_at_ms=100),
+        _ledger_row("s1", ord_id="new", gross=7.0, fee=0.0, closed_at_ms=300),
+    ])
+    strategy = {"strategy_id": "s1", "asset": "BTCUSDT", "execution_mode": "demo",
+                "budget_usd": 1000, "instrument": {"exchange": "okx"}}
+    pnl = dash_mod._strategy_pnl_contract(strategy, 200, {}, {})
+    assert [p["closed_at_ms"] for p in pnl["pnl_series"]] == [300]
+    assert pnl["pnl_series"][0]["cum_net"] == pytest.approx(7.0)
+
+
 def test_strategy_pnl_contract_absent_ledger_is_zero(dash):
     dash_mod, _core, root = dash
     strategy = {"strategy_id": "ghost", "asset": "BTCUSDT", "execution_mode": "demo",

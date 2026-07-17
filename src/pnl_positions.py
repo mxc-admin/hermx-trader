@@ -207,6 +207,44 @@ def list_positions(
     return out
 
 
+def pnl_series(
+    strategy_id: str | None = None,
+    mode: str | None = None,
+    accounting_start_at: int | None = None,
+    max_points: int = 200,
+) -> list[dict]:
+    """Cumulative realized-net curve from CLOSED episodes (equity curve source).
+
+    Points are closed episodes sorted by ``closed_at_ms`` ascending; ``cum_net``
+    is the running sum of ``realized_pnl_net`` — the same figures the strategy
+    aggregate sums, scoped by the same filters (strategy_id, mode,
+    accounting_start_at). Open UPnL is deliberately NOT folded in. Capped to the
+    most recent ``max_points`` points (cumulative sum still spans everything in
+    the window). Missing ledger -> ``[]``.
+    """
+    closed = list_positions(
+        strategy_id=strategy_id,
+        status="closed",
+        mode=mode,
+        accounting_start_at=accounting_start_at,
+    )
+    closed.sort(key=lambda p: p.get("closed_at_ms") or 0)
+    points = []
+    cum = 0.0
+    for ep in closed:
+        cum += ep.get("realized_pnl_net") or 0.0
+        points.append(
+            {
+                "closed_at_ms": ep.get("closed_at_ms"),
+                "pnl_net": ep.get("realized_pnl_net") or 0.0,
+                "cum_net": cum,
+            }
+        )
+    if max_points and len(points) > max_points:
+        points = points[-max_points:]
+    return points
+
+
 def diff_open_positions(
     ledger_open: list[dict], venue_open: list[dict], qty_tolerance: float = 0.01
 ) -> list[dict]:

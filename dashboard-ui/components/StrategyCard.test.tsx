@@ -28,7 +28,6 @@ function renderCard(props: Partial<Parameters<typeof StrategyCard>[0]> = {}) {
     <StrategyCard
       strategy={props.strategy ?? makeStrategy()}
       position={props.position}
-      alertCount={props.alertCount ?? 0}
       liveEnabled={props.liveEnabled ?? false}
       onModeChange={props.onModeChange}
     />,

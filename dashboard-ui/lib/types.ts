@@ -33,6 +33,13 @@ export interface Capital {
  * live open `upl`. The `*_usd` / `closed_*` fields are Phase-3 aliases kept for
  * back-compat; the flat names below are the Phase-4 contract. `total_net = realized_net + upl`.
  */
+/** One point of strategy_pnl.pnl_series — a closed episode's running total. */
+export interface PnlPoint {
+  closed_at_ms?: number | null
+  pnl_net?: number
+  cum_net?: number
+}
+
 export interface StrategyPnl {
   strategy_id?: string
   venue?: string
@@ -45,6 +52,8 @@ export interface StrategyPnl {
   total_net?: number
   trade_count?: number
   last_close_at_ms?: number | null
+  /** Cumulative realized-net curve over closed episodes (capped ~200 points). */
+  pnl_series?: PnlPoint[]
   // Phase-3 aggregate aliases (same numbers, legacy names).
   budget_usd?: number
   closed_realized_pnl_usd?: number

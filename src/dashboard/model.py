@@ -68,6 +68,7 @@ class StrategyPnlContract(TypedDict, total=False):
     upl: float
     total_net: float
     trade_count: int
+    pnl_series: List[Dict[str, Any]]
 
 
 class PortfolioContract(TypedDict):
@@ -595,6 +596,16 @@ def _strategy_pnl_contract(strategy, accounting_start_at, by_env, by_mode) -> St
         "trade_count": agg.get("closed_order_count") or 0,
         "last_close_at_ms": agg.get("last_close_at_ms"),
     })
+    # Equity-curve source: cumulative realized-net over closed episodes, same
+    # filters as the aggregate. Closed-only — UPnL stays a separate scalar.
+    try:
+        from pnl_positions import pnl_series
+
+        agg["pnl_series"] = pnl_series(
+            strategy_id=sid, mode=mode_key, accounting_start_at=accounting_start_at
+        )
+    except Exception:
+        agg["pnl_series"] = []
     return agg
 
 
