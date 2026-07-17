@@ -160,7 +160,7 @@ Each strategy lives as a single file in `strategies/`. It defines the instrument
 |---|---|
 | `strategy_id` | Unique ID. Every alert must reference it so KAIRO knows which strategy to run. |
 | `instrument.exchange` | **The only source of venue routing.** The alert never picks an exchange. |
-| `instrument.inst_id` | The exact exchange instrument. The traded asset is **derived** from it (`SOL-USDT-SWAP` → `SOLUSDT`) — there is no separate `asset` field. |
+| `instrument.inst_id` | The exact exchange instrument. The traded asset is **derived** from it (`SOL-USDT-SWAP` → `SOLUSDT`); an optional explicit `instrument.asset` overrides the derivation. |
 | `timeframe` | Must match the TradingView alert's timeframe. |
 | `capital.budget_usd` | The starting margin budget (the "seed"). Not the leveraged notional. |
 | `capital.reinvest` | Compounding switch (default **on**). See [Budget & Sizing](#page-6-budget-sizing--compounding). |
@@ -169,7 +169,7 @@ Each strategy lives as a single file in `strategies/`. It defines the instrument
 
 ## Rules to remember
 
-- The asset derived from `instrument.inst_id` **must match** the alert's `symbol`, or the alert is quarantined.
+- The strategy's asset (`instrument.asset` if set, else derived from `instrument.inst_id`) **should match** the alert's `symbol`; a mismatch is a soft warning (`strategy_warning: strategy_symbol_mismatch`) — the alert still executes on the strategy's instrument, and a close is never blocked.
 - The strategy's `timeframe` **must match** the alert's `timeframe`.
 - `execution_mode` is a two-value enum. **Only `live` is real money** — and it additionally requires the global kill switch (`KAIRO_LIVE_TRADING=true`) to be released. `demo` always routes to the exchange sandbox.
 - One asset can have **multiple strategies** (e.g. a 3H production strategy and a research strategy). This is exactly why `strategy_id` is required on every alert.
@@ -300,7 +300,7 @@ Validation happens in two stages. **Stage 1 (transport)** returns an HTTP status
 | `side_not_allowed` (400) | 2 | `action` missing or not `buy`/`sell`/`close`. |
 | `missing_strategy_id` (400) | 2 | A recognized alert arrived with no `strategy_id`. Hard-rejected, not queued. |
 | `unknown_strategy_id` (404) | 2 | No matching file in `strategies/`. Hard-rejected, not queued. |
-| `strategy_symbol_mismatch` (202) | 2 | `symbol` doesn't match the strategy's asset. |
+| `strategy_symbol_mismatch` (warning) | 2 | `symbol` doesn't match the strategy's asset. SOFT: still executes on the strategy's instrument; recorded as `strategy_warning`. |
 | `strategy_timeframe_mismatch` (202) | 2 | Alert on the wrong timeframe. |
 | `symbol_not_allowed` (400) | 2 | A no-`strategy_id` alert for a symbol no strategy trades. |
 | `non_tradingview_source` (202) | 2 | `source` isn't `tradingview`; acknowledged but ignored. |

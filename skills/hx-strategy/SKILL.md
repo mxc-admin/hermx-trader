@@ -396,8 +396,9 @@ print(tmpl("close"))
 print()
 if any(k in ("instrument.inst_id", "timeframe") for k, _b, _a in changes):
     print("!! symbol/timeframe changed — every existing TradingView alert for this "
-          "strategy MUST be updated to the templates above, or the receiver rejects "
-          "it (strategy_symbol_mismatch / strategy_timeframe_mismatch).")
+          "strategy MUST be updated to the templates above: a wrong timeframe is "
+          "rejected (strategy_timeframe_mismatch); a wrong symbol still executes "
+          "but records a strategy_symbol_mismatch warning.")
 print("Webhook: POST https://<host>/webhook with the X-Webhook-Secret header — "
       "see /hx-tv-alerts for the full wiring guide.")
 print("NOT LIVE until /hx-restart — receiver+dashboard load strategies at import time.")

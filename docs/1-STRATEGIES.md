@@ -49,15 +49,20 @@ Current total assigned demo budget: `$6,000` (4 × `$1,500`).
 }
 ```
 
-The **asset is derived** from `instrument.inst_id` — `SOL-USDT-SWAP` → `SOLUSDT`. There is no
-separate `asset` field. Fields removed in v2: `asset`, `status`, `validation_source`, `auto_alpha`,
+The **asset is derived** from `instrument.inst_id` — `SOL-USDT-SWAP` → `SOLUSDT`. An optional
+explicit `instrument.asset` (uppercase `[A-Z0-9]+`, e.g. `BTCUSDT`) overrides the derivation
+when the inst_id doesn't compact cleanly; precedence is `instrument.asset` → legacy top-level
+`asset` → derived from `inst_id` (a diverging explicit value is honored but logged as a
+warning). Fields removed in v2: top-level `asset`, `status`, `validation_source`, `auto_alpha`,
 `chart_type`, `upper_band_mult`, `lower_band_mult`, `indicator_version`, `okx_inst_id`,
 and the top-level `budget_usd` (now `capital.budget_usd`).
 
 ## Strategy Rules
 
 - `strategy_id` must be unique.
-- The asset derived from `instrument.inst_id` must match the TradingView alert.
+- The asset (explicit `instrument.asset` or derived from `instrument.inst_id`) should match
+  the TradingView alert's `symbol`; a mismatch is a soft `strategy_symbol_mismatch` warning
+  (the alert still executes on the strategy's instrument — matching is `strategy_id`-first).
 - `timeframe` must match the TradingView alert.
 - `instrument.inst_id` must be the actual exchange swap instrument; `instrument.exchange` selects the venue.
 - `capital.budget_usd` is the margin budget, not the leveraged notional.

@@ -265,11 +265,15 @@ Corrected (use a `strategy_id` that exists on disk):
 {"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","action":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```
 
-### Wrong `symbol` for the strategy — `strategy_symbol_mismatch` (status 202, quarantined)
+### Wrong `symbol` for the strategy — `strategy_symbol_mismatch` (SOFT warning, still executes)
 
 `symbol` (uppercased, separators stripped) does not equal the strategy's derived asset.
+Matching is strategy_id-first, so this NO LONGER quarantines: the alert executes on the
+strategy's own `instrument` block and the record carries
+`strategy_warning: "strategy_symbol_mismatch"`. A close is never blocked by a symbol
+mismatch. Still fix the alert — the warning signals the alert sits on the wrong chart.
 
-Invalid (`solusdt_duo_base_dev_3h` trades `SOLUSDT`, not `BTCUSDT`):
+Warned (`solusdt_duo_base_dev_3h` trades `SOLUSDT`, not `BTCUSDT`):
 ```json
 {"strategy_id":"solusdt_duo_base_dev_3h","symbol":"BTCUSDT","timeframe":"3h","action":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}
 ```

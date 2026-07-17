@@ -122,6 +122,12 @@ strategy, its account mode (demo|live), and its accounting window:
 - `fees` — summed fees; `realized_net = gross + signed fees`.
 - `upl` — open unrealized P&L from the strategy's own (venue, mode) snapshot.
 - `total_net = realized_net + upl`; plus `trade_count`, `last_close_at_ms`, `budget_usd`, `equity_now_usd`.
+- `pnl_series` — the equity-curve source: closed episodes sorted by `closed_at_ms`
+  ascending, each point `{closed_at_ms, pnl_net, cum_net}` where `cum_net` is the
+  running sum of realized net. Same filters as the aggregate (strategy, mode,
+  accounting window); capped to the most recent ~200 points (the cumulative sum
+  still spans the whole window). **Closed-only** — UPnL stays a separate scalar.
+  The `StrategyCard` renders it as an inline SVG sparkline.
 
 **Gross vs net:** `ORDER_PNL_IS_NET` (`src/pnl_ledger.py`) is `False` for every
 venue until its fee-inclusion semantics are verified empirically on a real close.
@@ -162,6 +168,11 @@ Semantics worth knowing:
 - A closed episode's `realized_pnl_net` sums the same close-leg figures the strategy
   card aggregates, so **the sum of a strategy's closed rows matches its
   `strategy_pnl` ledger aggregate** (accounting window applied to both).
+- **Partial-close identity:** while an episode is only partially closed, its
+  realized-so-far P&L lives on the OPEN row (`realized_pnl_net`), not on a closed
+  row. Closed rows + open rows together always reconcile to the close-leg
+  aggregate — but a partially-closed episode's realized figure is not yet part of
+  `pnl_series` (the curve adds it only when the episode fully closes).
 - **Open rows in the UI are venue truth** (qty, entry, mark, UPnL from the live
   snapshot), *enriched* with `opened_at_ms` / `strategy_id` / entry fallback from
   the matching ledger open episode when one exists. The ledger never invents an

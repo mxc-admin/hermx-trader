@@ -131,8 +131,11 @@ to the caller**. The statuses below are the `status` field in those rows. Order:
    (default false), an invalid alert is quarantined with status 202, reason
    `alert_schema_invalid:<field>`.
 6. **Strategy match** (`validate_strategy_alert`): missing `strategy_id` (for a recognized
-   strategy alert), unknown `strategy_id`, `strategy_symbol_mismatch`, or
-   `strategy_timeframe_mismatch` → status 202, quarantined. A non-strategy alert whose symbol
+   strategy alert), unknown `strategy_id`, or `strategy_timeframe_mismatch` → status 202,
+   quarantined. A `symbol` that disagrees with the strategy's asset is SOFT: the alert still
+   executes (routed on the strategy's own `instrument` block) with
+   `strategy_warning: "strategy_symbol_mismatch"` recorded — a close is never blocked by a
+   symbol mismatch. A non-strategy alert whose symbol
    no loaded strategy trades → status 400 `symbol_not_allowed`.
 7. **Dedupe** (`check_and_mark_signal`, `src/signals/dedupe.py`): duplicate by `signal_id` or
    by the composite key `strategy_id|symbol|action|timeframe|tv_time` within a 24 h window →
@@ -265,8 +268,9 @@ terminal state against the venue.
 - `action` values other than `buy`/`sell`/`close` (e.g. `long`/`short`) → 400
   `side_not_allowed` (legacy error string — the gated field is `action`). Casing is fine
   (the receiver lowercases), the *value* is not. An alert-level `side` field is ignored.
-- Alert placed on the wrong chart/timeframe → `strategy_symbol_mismatch` /
-  `strategy_timeframe_mismatch` quarantine.
+- Alert placed on the wrong `timeframe` → `strategy_timeframe_mismatch` quarantine. A wrong
+  chart `symbol` no longer quarantines — it executes with a `strategy_symbol_mismatch`
+  warning recorded on the record.
 - `timeframe` outside the schema enum (`30m 1h 2h 3h 4h`) fails schema validation.
 - Missing/wrong `secret_key` body field (or, for relay setups, `X-Webhook-Secret` header) →
   `401 forbidden`; TradingView shows the webhook as failing but gives no detail — verify the
@@ -285,7 +289,8 @@ terminal state against the venue.
 | `400 invalid_json` | Malformed message body (trailing comma, unquoted placeholder) | Alert message box; the exact body in the 400 `detail` |
 | `200 queued` but no order | Rejected/quarantined asynchronously, or no strategy matched | `logs/pipeline.jsonl` (`quarantine`/`error` stage, `reason` field) |
 | `quarantine: unknown_strategy_id` | `strategy_id` has no file in `strategies/` | `strategies/` directory |
-| `quarantine: strategy_symbol_mismatch` / `strategy_timeframe_mismatch` | Alert on the wrong chart or wrong hard-coded `timeframe` | Alert vs strategy file |
+| `quarantine: strategy_timeframe_mismatch` | Wrong hard-coded `timeframe` | Alert vs strategy file |
+| `strategy_warning: strategy_symbol_mismatch` (executed, not quarantined) | Alert on the wrong chart — symbol ≠ strategy asset | Alert vs strategy file |
 | `dedup_reject` | Same `signal_id` or same `strategy_id\|symbol\|action\|timeframe\|tv_time` within 24 h | `logs/signals.jsonl` (`first_seen_at`) |
 | Signal processed but `not_submitted` | An ExecutionService gate fired — the `gate` field says which (kill switch, `pretrade_notional`, `trading_state`, `symbol_pause`, `idempotency`, `equity_stop`, …) | `okx_execution` result in the execution ledger / pipeline rows; dashboard |
 | Alerts vanish after a restart | Normal restarts replay from the WAL; time-less payloads are dropped by design (non-deterministic `signal_id`) | `logs/raw-webhooks.jsonl` (`phase: intake/dropped`); receiver startup log |

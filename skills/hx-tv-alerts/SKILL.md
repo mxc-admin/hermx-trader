@@ -88,8 +88,10 @@ CLOSE (flatten position):
 - **The alert carries no `exchange` field.** Venue routing comes entirely from
   `strategy.instrument.exchange`, matched on `strategy_id` — never from the payload.
 - **`symbol` is hard-coded to the resolved symbol**, not `{{ticker}}`. `{{ticker}}` also
-  validates (the receiver uppercases + strips `-`/`/`), but hard-coding guarantees the
-  `strategy_symbol_mismatch` gate passes regardless of which chart the alert sits on.
+  validates (the receiver uppercases + strips `-`/`/`), but hard-coding keeps the record
+  free of `strategy_symbol_mismatch` warnings regardless of which chart the alert sits on
+  (a mismatch is soft — it executes on the strategy's instrument — but it flags a
+  misplaced alert).
 
 ## Procedure
 ```bash
@@ -189,9 +191,9 @@ PY
 - [ ] All templates parse as JSON and validate against
       `schemas/tradingview-alert.schema.json` (7 required fields including `action`;
       `action` ∈ `buy|sell|close`; `timeframe` ∈ the schema enum).
-- [ ] `symbol` matches the strategy's `instrument.inst_id`-derived asset and `timeframe`
-      matches the strategy file (so neither `strategy_symbol_mismatch` nor
-      `strategy_timeframe_mismatch` would fire).
+- [ ] `symbol` matches the strategy's asset (`instrument.asset` if set, else derived from
+      `instrument.inst_id`) and `timeframe` matches the strategy file (no
+      `strategy_timeframe_mismatch` quarantine, no `strategy_symbol_mismatch` warning).
 - [ ] BUY, SELL, CLOSE: direction is carried by `action` only (`buy`/`sell`/`close`);
       **no** template emits a `side` field (the receiver ignores it).
 - [ ] No `exchange` field is present in any payload; `timeframe` is
