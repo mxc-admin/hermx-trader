@@ -67,22 +67,31 @@ const stateKindOf = (v: string) => {
 const mono = { fontFamily: 'var(--font-mono), monospace' as const }
 
 export function ExecutionLedger() {
-  const { data, strategyFilter } = useDashboardContext()
+  const { data, strategyFilter, positionFilter, setPositionFilter } = useDashboardContext()
   const selected = (data?.strategies ?? []).find(
     (s) => s.strategy_id === strategyFilter
   )
+  // Position click filter: EXACT cl_ord_id membership. An empty id list (legacy
+  // episodes without recorded cl_ord_ids) matches nothing — zero events beats
+  // wrong events.
+  const positionIds = positionFilter ? new Set(positionFilter.clOrdIds) : null
   const rows = ((data?.okx_executions ?? []) as Row[])
     .filter(
       r => r['status'] !== 'not_submitted' && r['order_status'] !== 'not_submitted'
     )
-    // Rows carry no strategy_id, so the strategy filter matches on the selected
-    // strategy's asset symbol (falling back to strategy_id when a row has one).
+    // New rows carry a stamped strategy_id (exact match); historical rows fall
+    // back to the selected strategy's asset symbol.
     .filter(
       r =>
         !strategyFilter ||
         r['strategy_id'] === strategyFilter ||
         (selected?.asset !== undefined && r['symbol'] === selected.asset)
     )
+    .filter(r => {
+      if (!positionIds) return true
+      const cl = str(pick(r, 'cl_ord_id', 'client_order_id'))
+      return cl !== undefined && positionIds.has(cl)
+    })
     .reverse() // pipeline rows arrive oldest-first; show newest-first
   const skipped = data?.ledger_health?.total_skipped
 
@@ -138,6 +147,41 @@ export function ExecutionLedger() {
 
   return (
     <Section title="EXECUTION EVENTS" defaultOpen={true}>
+      {positionFilter && (
+        <div
+          role="status"
+          style={{
+            ...mono,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '6px 12px',
+            fontSize: 11,
+            color: 'var(--text-secondary)',
+          }}
+        >
+          <span>
+            Position filter: {positionFilter.label} ({positionFilter.clOrdIds.length} order
+            {positionFilter.clOrdIds.length === 1 ? '' : 's'})
+          </span>
+          <button
+            type="button"
+            onClick={() => setPositionFilter(null)}
+            style={{
+              ...mono,
+              fontSize: 11,
+              padding: '1px 8px',
+              borderRadius: 4,
+              border: '1px solid var(--border-dim)',
+              background: 'transparent',
+              color: 'var(--text-secondary)',
+              cursor: 'pointer',
+            }}
+          >
+            Clear ✕
+          </button>
+        </div>
+      )}
       <DataTable<Row>
         label="Execution events"
         columns={columns}

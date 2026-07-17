@@ -135,6 +135,9 @@ export interface PositionRow {
   notional_usd?: number | null
   open_leg_count?: number
   close_leg_count?: number
+  /** Exact cl_ord_ids of the episode's open/close orders (event-filter keys). */
+  open_cl_ord_ids?: string[]
+  close_cl_ord_ids?: string[]
 }
 
 /** Observe-only reconcile-by-position drift row (never auto-traded). */

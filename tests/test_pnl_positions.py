@@ -16,13 +16,13 @@ import pnl_positions
 
 
 def _leg(*, kind, ord_id, side, qty, px, ts, sid="alpha", inst="BTC-USDT-SWAP",
-         exchange="okx", mode="demo", gross=None, fee=None, net=None):
+         exchange="okx", mode="demo", gross=None, fee=None, net=None, cl=None):
     return {
         "schema_version": 4, "leg_kind": kind, "exchange": exchange,
         "inst_id": inst, "ord_id": ord_id, "mode": mode, "strategy_id": sid,
         "side": side, "filled_qty": qty, "avg_px": px, "pnl_gross": gross,
         "fee_cost": fee, "fee_currency": "USDT", "net_realized_pnl": net,
-        "closed_at_ms": ts,
+        "closed_at_ms": ts, "cl_ord_id": cl,
     }
 
 
@@ -307,6 +307,48 @@ def test_pnl_series_mode_filter(ledger_dir):
     _seed(ledger_dir, legs + live)
     assert len(pnl_positions.pnl_series(strategy_id="alpha", mode="demo")) == 1
     assert len(pnl_positions.pnl_series(strategy_id="alpha", mode="live")) == 1
+
+
+# --- cl_ord_id projection (position click -> exact event filter) -------------
+
+def test_episode_carries_open_and_close_cl_ord_ids(ledger_dir):
+    _seed(ledger_dir, [
+        _leg(kind="open", ord_id="o1", side="buy", qty=1.0, px=50000.0, ts=100,
+             cl="mxcopen1"),
+        _leg(kind="close", ord_id="c1", side="sell", qty=1.0, px=51000.0,
+             ts=200, gross=10.0, fee=-0.5, net=9.5, cl="opclsabc"),
+    ])
+    rows = pnl_positions.list_positions()
+    assert len(rows) == 1
+    assert rows[0]["open_cl_ord_ids"] == ["mxcopen1"]
+    assert rows[0]["close_cl_ord_ids"] == ["opclsabc"]
+
+
+def test_legacy_legs_without_cl_ord_id_yield_empty_lists(ledger_dir):
+    # Legacy rows (cl_ord_id None/absent): empty lists so a click filters to
+    # ZERO events, never wrong ones.
+    _seed(ledger_dir, _round_trip())
+    rows = pnl_positions.list_positions()
+    assert rows[0]["open_cl_ord_ids"] == []
+    assert rows[0]["close_cl_ord_ids"] == []
+
+
+def test_reversal_order_id_lands_on_both_episodes(ledger_dir):
+    # The reversal sell both closes the long (close id) and opens the fresh
+    # short (open id) — the one order belongs to both episodes.
+    _seed(ledger_dir, [
+        _leg(kind="open", ord_id="o1", side="buy", qty=1.0, px=50000.0, ts=100,
+             cl="mxcopen1"),
+        _leg(kind="close", ord_id="c1", side="sell", qty=1.5, px=51000.0,
+             ts=200, gross=10.0, fee=0.0, net=10.0, cl="mxcrev1"),
+    ])
+    rows = pnl_positions.list_positions()
+    closed_pos = [r for r in rows if r["status"] == "closed"][0]
+    open_pos = [r for r in rows if r["status"] == "open"][0]
+    assert closed_pos["open_cl_ord_ids"] == ["mxcopen1"]
+    assert closed_pos["close_cl_ord_ids"] == ["mxcrev1"]
+    assert open_pos["open_cl_ord_ids"] == ["mxcrev1"]
+    assert open_pos["close_cl_ord_ids"] == []
 
 
 # --- diff_open_positions (observe-only reconcile-by-position) -------------------

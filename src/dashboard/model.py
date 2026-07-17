@@ -796,12 +796,18 @@ def positions_contract(annotated_strategies, by_env) -> Dict[str, Any]:
                 "strategy_id": None,
                 "opened_at_ms": None,
                 "realized_pnl_net": None,
+                # Exact-match event-filter keys; empty when no ledger episode
+                # matches (filters to zero events, never wrong ones).
+                "open_cl_ord_ids": [],
+                "close_cl_ord_ids": [],
             }
             for ep in ledger_open:
                 if (ep.get("venue"), ep.get("mode"), ep.get("inst_id")) == (venue, mode, inst_id):
                     row["strategy_id"] = ep.get("strategy_id")
                     row["opened_at_ms"] = ep.get("opened_at_ms")
                     row["realized_pnl_net"] = ep.get("realized_pnl_net")
+                    row["open_cl_ord_ids"] = list(ep.get("open_cl_ord_ids") or [])
+                    row["close_cl_ord_ids"] = list(ep.get("close_cl_ord_ids") or [])
                     if row["entry_px"] is None:
                         row["entry_px"] = ep.get("entry_px")
                     break

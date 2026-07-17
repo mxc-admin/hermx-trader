@@ -47,14 +47,34 @@ const SideBadge = ({ side }: { side: string | null | undefined }) =>
 const asset = (row: PositionRow) =>
   row.symbol ?? (row.inst_id ? compactInstId(row.inst_id) : '—')
 
+// Stable click identity for a position row (episodes have no server id).
+const rowKey = (r: PositionRow) =>
+  [r.status, r.strategy_id, r.venue, r.mode, r.inst_id, r.opened_at_ms, r.closed_at_ms].join('|')
+
 export function PositionsTable() {
-  const { data, strategyFilter } = useDashboardContext()
+  const { data, strategyFilter, positionFilter, setPositionFilter } = useDashboardContext()
   const positions = data?.positions
   const byStrategy = (rows: PositionRow[] | undefined) =>
     (rows ?? []).filter((r) => !strategyFilter || r.strategy_id === strategyFilter)
   const open = byStrategy(positions?.open)
   const closed = byStrategy(positions?.closed)
   const driftCount = positions?.drift?.count ?? 0
+
+  // Click a position -> filter EXECUTION EVENTS to exactly its orders (exact
+  // cl_ord_id match). Click the same row again to clear.
+  const toggleSelect = (r: PositionRow) => {
+    const key = rowKey(r)
+    if (positionFilter?.key === key) {
+      setPositionFilter(null)
+      return
+    }
+    setPositionFilter({
+      key,
+      label: `${asset(r)} ${r.status ?? ''}${r.strategy_id ? ` · ${r.strategy_id}` : ''}`.trim(),
+      clOrdIds: [...(r.open_cl_ord_ids ?? []), ...(r.close_cl_ord_ids ?? [])],
+    })
+  }
+  const isSelected = (r: PositionRow) => positionFilter?.key === rowKey(r)
 
   const openColumns = [
     { key: 'opened', header: 'Opened', render: (r: PositionRow) => <AgeMs ms={r.opened_at_ms} /> },
@@ -107,6 +127,8 @@ export function PositionsTable() {
         rows={open}
         emptyMessage="No open positions"
         maxHeight="240px"
+        onRowClick={toggleSelect}
+        rowSelected={isSelected}
       />
       <div style={{ ...mono, padding: '10px 12px 2px', fontSize: 10, letterSpacing: '0.08em', color: 'var(--text-muted)' }}>
         CLOSED
@@ -116,7 +138,12 @@ export function PositionsTable() {
         columns={closedColumns}
         rows={closed}
         emptyMessage="No closed positions"
+        onRowClick={toggleSelect}
+        rowSelected={isSelected}
       />
+      <div style={{ ...mono, padding: '4px 12px', fontSize: 10, color: 'var(--text-muted)' }}>
+        Click a position to filter execution events to its orders
+      </div>
     </Section>
   )
 }

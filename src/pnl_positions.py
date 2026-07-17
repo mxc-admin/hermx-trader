@@ -47,7 +47,19 @@ def _new_episode(leg: dict) -> dict:
         "pnl_net": 0.0,
         "open_leg_count": 0,
         "close_leg_count": 0,
+        "open_cl_ord_ids": [],
+        "close_cl_ord_ids": [],
     }
+
+
+def _collect_cl_ord_id(ep: dict, leg: dict, bucket: str) -> None:
+    """Record the leg's cl_ord_id on the episode (exact-match UI filter key).
+
+    Legacy rows without the key contribute nothing — an episode with empty lists
+    filters to zero events rather than wrong ones."""
+    cl = leg.get("cl_ord_id")
+    if cl and cl not in ep[bucket]:
+        ep[bucket].append(cl)
 
 
 def _apply_open(ep: dict, leg: dict, qty: float, px: float | None) -> None:
@@ -63,6 +75,7 @@ def _apply_open(ep: dict, leg: dict, qty: float, px: float | None) -> None:
     if ts and (ep["opened_at_ms"] is None or ts < ep["opened_at_ms"]):
         ep["opened_at_ms"] = ts
     ep["open_leg_count"] += 1
+    _collect_cl_ord_id(ep, leg, "open_cl_ord_ids")
 
 
 def _apply_close(ep: dict, leg: dict, qty: float, px: float | None) -> None:
@@ -79,6 +92,7 @@ def _apply_close(ep: dict, leg: dict, qty: float, px: float | None) -> None:
     ep["fees"] += _usd_fee_cost(leg) or 0.0
     ep["pnl_net"] += leg.get("net_realized_pnl") or 0.0
     ep["close_leg_count"] += 1
+    _collect_cl_ord_id(ep, leg, "close_cl_ord_ids")
 
 
 def _project(ep: dict, status: str) -> dict:
@@ -108,6 +122,8 @@ def _project(ep: dict, status: str) -> dict:
         "upl": None,
         "open_leg_count": ep["open_leg_count"],
         "close_leg_count": ep["close_leg_count"],
+        "open_cl_ord_ids": list(ep["open_cl_ord_ids"]),
+        "close_cl_ord_ids": list(ep["close_cl_ord_ids"]),
     }
 
 
@@ -156,6 +172,8 @@ def _build_episodes_from_legs(legs: list[dict]) -> list[dict]:
                 fresh["open_px_qty"] = abs(after)
             fresh["opened_at_ms"] = _leg_ts(leg) or None
             fresh["open_leg_count"] = 1
+            # The reversal order is also the fresh episode's entry order.
+            _collect_cl_ord_id(fresh, leg, "open_cl_ord_ids")
             state[key] = fresh
     for ep in state.values():
         if abs(ep["signed"]) > QTY_EPS:

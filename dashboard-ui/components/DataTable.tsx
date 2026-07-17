@@ -13,6 +13,10 @@ interface DataTableProps<T> {
   emptyMessage?: string
   maxHeight?: string
   className?: string
+  /** When set, rows are clickable (pointer cursor, keyboard-activatable). */
+  onRowClick?: (row: T, idx: number) => void
+  /** Marks a row visually selected (used with onRowClick toggle filters). */
+  rowSelected?: (row: T, idx: number) => boolean
 }
 
 export function DataTable<T>({
@@ -22,6 +26,8 @@ export function DataTable<T>({
   emptyMessage = 'No data',
   maxHeight = '400px',
   className,
+  onRowClick,
+  rowSelected,
 }: DataTableProps<T>) {
   return (
     <div
@@ -85,19 +91,39 @@ export function DataTable<T>({
               </td>
             </tr>
           ) : (
-            rows.map((row, idx) => (
+            rows.map((row, idx) => {
+              const selected = rowSelected?.(row, idx) ?? false
+              const baseBg = selected
+                ? 'var(--bg-hover)'
+                : idx % 2 === 0
+                  ? 'var(--bg-panel)'
+                  : 'var(--bg-panel-raised)'
+              return (
               <tr
                 key={idx}
+                onClick={onRowClick ? () => onRowClick(row, idx) : undefined}
+                onKeyDown={
+                  onRowClick
+                    ? (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          onRowClick(row, idx)
+                        }
+                      }
+                    : undefined
+                }
+                tabIndex={onRowClick ? 0 : undefined}
+                aria-selected={onRowClick ? selected : undefined}
                 style={{
-                  background:
-                    idx % 2 === 0 ? 'var(--bg-panel)' : 'var(--bg-panel-raised)',
+                  background: baseBg,
+                  cursor: onRowClick ? 'pointer' : undefined,
+                  outline: selected ? '1px solid var(--border)' : undefined,
                 }}
                 onMouseEnter={(e) => {
                   e.currentTarget.style.background = 'var(--bg-hover)'
                 }}
                 onMouseLeave={(e) => {
-                  e.currentTarget.style.background =
-                    idx % 2 === 0 ? 'var(--bg-panel)' : 'var(--bg-panel-raised)'
+                  e.currentTarget.style.background = baseBg
                 }}
               >
                 {columns.map((col) => (
@@ -114,7 +140,8 @@ export function DataTable<T>({
                   </td>
                 ))}
               </tr>
-            ))
+              )
+            })
           )}
         </tbody>
       </table>
