@@ -428,6 +428,36 @@ def max_recorded_closed_at(exchange: str, mode: str) -> int | None:
     return best
 
 
+def detect_history_ageout(rows: list | None, venue: str, mode: str) -> None:
+    """P0-1 age-out detector: saturated history window may have dropped unledgered closes.
+
+    A saturated (100-row) window whose oldest row post-dates our newest recorded
+    close means a close may have aged out of the readable window before any
+    reconcile folded it into the ledger. Detection-only; never raises to the
+    caller. Shared by the dashboard snapshot fold and the backend ledger sweep.
+    """
+    try:
+        saturated = len(rows or []) >= 100
+        if not saturated or not rows:
+            return
+        oldest_ms = min(_row_ts(r) for r in rows)
+        high_water = max_recorded_closed_at(venue, mode)
+        if high_water is None or oldest_ms <= high_water:
+            return
+        from reconcile.alerts import RECONCILE_ALERT_MISMATCH, emit_reconcile_alert
+
+        emit_reconcile_alert(RECONCILE_ALERT_MISMATCH, {
+            "stage": "history_window_ageout",
+            "venue": venue,
+            "mode": mode,
+            "oldest_ms": oldest_ms,
+            "high_water_ms": high_water,
+            "gap_ms": oldest_ms - high_water,
+        })
+    except Exception:
+        pass
+
+
 def reconcile_health_stats() -> dict:
     """Read-only reconcile-health view for the ``/api`` payload and the lag gate.
 

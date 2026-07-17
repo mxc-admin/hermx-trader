@@ -339,38 +339,13 @@ def strategy_order_history_snapshot(strategy_config, mode):
     try:
         inst_ids = [_dash.strategy_inst_id(config, sym) for sym in _dash._venue_symbols(venue)]
         rows = executor.get_order_history_raw(inst_ids, limit=100)
-        # P0-1: age-out detector. A saturated (100-row) window whose oldest row
-        # post-dates our newest recorded close means a close may have aged out of
-        # the readable window before any reconcile folded it into the ledger.
-        # Detection-only; wrapped so it can never fail the read-only snapshot.
+        # P0-1 age-out + ledger fold. Detection and fold are fail-open so neither
+        # can break the read-only snapshot. Age-out lives on pnl_ledger so the
+        # backend ledger sweep shares the same detector.
         try:
-            from pnl_ledger import _row_ts, max_recorded_closed_at
+            from pnl_ledger import detect_history_ageout, reconcile_from_order_history
 
-            saturated = len(rows or []) >= 100
-            if saturated and rows:
-                oldest_ms = min(_row_ts(r) for r in rows)
-                high_water = max_recorded_closed_at(venue, mode_key)
-                if high_water is not None and oldest_ms > high_water:
-                    from webhook_receiver import (
-                        RECONCILE_ALERT_MISMATCH,
-                        emit_reconcile_alert,
-                    )
-
-                    emit_reconcile_alert(RECONCILE_ALERT_MISMATCH, {
-                        "stage": "history_window_ageout",
-                        "venue": venue,
-                        "mode": mode_key,
-                        "oldest_ms": oldest_ms,
-                        "high_water_ms": high_water,
-                        "gap_ms": oldest_ms - high_water,
-                    })
-        except Exception:
-            pass
-        # Fold HermX close rows into the durable ledger with THIS strategy's venue+mode.
-        # Wrapped so a reconcile failure can never fail the (read-only) snapshot.
-        try:
-            from pnl_ledger import reconcile_from_order_history
-
+            detect_history_ageout(rows or [], venue, mode_key)
             reconcile_from_order_history(rows or [], venue, mode_key)
         except Exception:
             pass
