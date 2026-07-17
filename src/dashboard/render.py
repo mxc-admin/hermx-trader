@@ -267,9 +267,6 @@ def okx_execution_table(rows, live_info=None):
     for row in reversed(rows[-80:]):
         row_key = row.get("order_id") or row.get("client_order_id") or f"{row.get('received_at')}:{row.get('symbol')}:{row.get('okx_action')}"
         is_live = row_key in live_info
-        pnl = live_info[row_key]["open_pnl"] if is_live else row.get("realized_pnl")
-        show_pnl = is_live or str(row.get("okx_action") or "").upper().startswith("CLOSE")
-        pnl_kind = "good" if (pnl or 0) > 0 else ("bad" if pnl is not None and pnl < 0 else "neutral")
         tr_class = ' class="live-row"' if is_live else ""
         body.append(f"""
         <tr{tr_class}>
@@ -285,14 +282,13 @@ def okx_execution_table(rows, live_info=None):
           <td>{money(row.get('notional'), 0)}</td>
           <td>{badge(exchange_reduce_only_label(row), 'muted' if exchange_reduce_only_label(row) == 'Yes' else 'neutral')}</td>
           <td>{money(row.get('fee'), 4)}</td>
-          <td>{badge(money(pnl, 2) if show_pnl and pnl is not None else "-", pnl_kind)}</td>
           <td>{esc(row.get('margin_mode') or '-')} / {esc(row.get('leverage') or '-')}x</td>
           <td>{okx_row_details(row, is_live)}</td>
         </tr>
         """)
     return f"""
     <table>
-      <thead><tr><th>Fecha</th><th>Asset</th><th>Signal</th><th>Leg</th><th>Status</th><th>Alert</th><th>Fill</th><th>Slip</th><th>Size</th><th>Value</th><th>RO</th><th>Fee</th><th>PnL</th><th>Mode</th><th>Details</th></tr></thead>
+      <thead><tr><th>Fecha</th><th>Asset</th><th>Signal</th><th>Leg</th><th>Status</th><th>Alert</th><th>Fill</th><th>Slip</th><th>Size</th><th>Value</th><th>RO</th><th>Fee</th><th>Mode</th><th>Details</th></tr></thead>
       <tbody>{''.join(body)}</tbody>
     </table>
     """

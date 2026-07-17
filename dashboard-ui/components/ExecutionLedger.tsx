@@ -40,6 +40,22 @@ const sideKindOf = (v: string) => {
   return 'muted' as const
 }
 
+// Mirrors render.py exchange_leg_label/exchange_leg_kind: okx_action is the
+// executed leg (OPEN_LONG / CLOSE_SHORT / ...), truer than the alert side.
+const ACTION_LABELS: Record<string, string> = {
+  OPEN_LONG: 'Open Long',
+  OPEN_SHORT: 'Open Short',
+  CLOSE_LONG: 'Close Long',
+  CLOSE_SHORT: 'Close Short',
+}
+
+const actionKindOf = (v: string) => {
+  const u = v.toUpperCase()
+  if (u.startsWith('OPEN_LONG') || u.startsWith('CLOSE_SHORT')) return 'good' as const
+  if (u.startsWith('OPEN_SHORT') || u.startsWith('CLOSE_LONG')) return 'bad' as const
+  return 'neutral' as const
+}
+
 const stateKindOf = (v: string) => {
   const u = v.toUpperCase()
   if (u === 'FILLED') return 'good' as const
@@ -83,9 +99,16 @@ export function ExecutionLedger() {
       render: (row: Row) => str(pick(row, 'symbol', 'strategy_id', 'inst_id')) ?? '—',
     },
     {
-      key: 'side',
-      header: 'Side',
+      key: 'action',
+      header: 'Action',
       render: (row: Row) => {
+        const action = str(row['okx_action'])
+        if (action && action !== '-') {
+          const label = ACTION_LABELS[action.toUpperCase()] ?? action
+          return <Badge label={label} kind={actionKindOf(action)} />
+        }
+        // Rows without an executed leg (older/sparse records) fall back to the
+        // alert side so the column never goes blank retroactively.
         const v = str(pick(row, 'signal', 'okx_side', 'side'))
         return v ? <Badge label={v} kind={sideKindOf(v)} /> : '—'
       },
@@ -108,22 +131,9 @@ export function ExecutionLedger() {
         return v ? <Badge label={v} kind={stateKindOf(v)} /> : '—'
       },
     },
-    {
-      key: 'pnl',
-      header: 'PnL',
-      render: (row: Row) => {
-        const n = moneyNum(pick(row, 'realized_pnl'))
-        const color =
-          n === null
-            ? 'var(--text-muted)'
-            : n > 0
-              ? 'var(--positive)'
-              : n < 0
-                ? 'var(--negative)'
-                : 'var(--text-secondary)'
-        return <span style={{ ...mono, color }}>{money(n)}</span>
-      },
-    },
+    // Per-event PnL intentionally hidden: position-level Net PnL (PositionsTable)
+    // is the accounting truth; the enrichment path still populates realized_pnl
+    // on rows for the details payload and future use.
   ]
 
   return (
