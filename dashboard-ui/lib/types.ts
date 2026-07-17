@@ -231,6 +231,8 @@ export interface StrategyAlert {
   okx_mode?: string | null
   block_reason?: string | null
   latency?: number | null
+  /** Joined execution outcome (exact received_at match): FILLED | BLOCKED | NO FILL. */
+  outcome?: string | null
 }
 
 /** A row in open_orders.rows[] (order journal, non-terminal states). */

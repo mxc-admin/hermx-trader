@@ -1304,7 +1304,7 @@ def _execute_authoritative(record: dict) -> dict:
             "reason": "execution_unavailable",
         }
         try:
-            record_pipeline_event("execution", _signal_id_of(record), {"received_at": record.get("received_at"), "okx_execution": result})
+            record_pipeline_event("execution", _signal_id_of(record), {"received_at": record.get("received_at"), "strategy_id": (record.get("execution_readiness") or {}).get("strategy_id") or None, "okx_execution": result})
         except Exception as exc:  # pipeline ledger is observability; must never block the outcome
             logging.warning("execution ledger append failed: %s", exc)
         return result

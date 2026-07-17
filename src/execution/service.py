@@ -136,7 +136,14 @@ class ExecutionService:
             # FIRST in precedence order) so the operator never has to guess. ``ok`` stays
             # True because a refusal-to-submit is a successful, expected control outcome.
             result = {"ok": True, "mode": "not_submitted", "reason": reason, "gate": gate, **extra}
-            append_jsonl(execution_ledger, {"received_at": record.get("received_at"), "okx_execution": result})
+            # received_at passes through the intake string verbatim (it is the
+            # alert<->execution join key); strategy_id is stamped from readiness so
+            # outcome rows are attributable without cl_ord_id hash reversal.
+            append_jsonl(execution_ledger, {
+                "received_at": record.get("received_at"),
+                "strategy_id": readiness.get("strategy_id") or None,
+                "okx_execution": result,
+            })
             return result
 
         # Gate 1 -- arming + health. Both demo and live submit orders; the difference
@@ -505,5 +512,11 @@ class ExecutionService:
         else:
             _record_tentative_outcome()
 
-        append_jsonl(execution_ledger, {"received_at": record.get("received_at"), "okx_execution": result})
+        # Same stamp contract as the blocked-gate write above: verbatim intake
+        # received_at (join key) + readiness strategy_id (attribution).
+        append_jsonl(execution_ledger, {
+            "received_at": record.get("received_at"),
+            "strategy_id": readiness.get("strategy_id") or None,
+            "okx_execution": result,
+        })
         return result

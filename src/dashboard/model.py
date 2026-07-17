@@ -235,16 +235,79 @@ def _alerts_rows(kind, limit, scan=None):
     return rows, stats
 
 
+def _execution_outcome_label(exec_row):
+    """Collapse one execution-stage pipeline row to an alert Outcome label.
+
+    FILLED  -- at least one executed order reached a filled/closed state
+    BLOCKED -- the service refused to submit (mode=not_submitted gate outcome)
+    NO FILL -- an execution attempt exists but no order filled
+    None    -- unrecognizable row (caller fails open and renders a dash)
+    """
+    result = exec_row.get("exec_result") or exec_row.get("okx_execution") or {}
+    if not isinstance(result, dict) or not result:
+        return None
+    if str(result.get("mode") or "").lower() == "not_submitted":
+        return "BLOCKED"
+    adapter = result.get("payload") or {}
+    fill = adapter.get("fill_summary") or {}
+    inner = adapter.get("payload") or {}
+    statuses = [str(fill.get("status") or "").lower()]
+    for order in inner.get("executed_orders") or []:
+        if not isinstance(order, dict):
+            continue
+        ccxt_order = order.get("order") if isinstance(order.get("order"), dict) else {}
+        statuses.append(str(ccxt_order.get("status") or order.get("status") or "").lower())
+    if any(s in ("filled", "closed") for s in statuses):
+        return "FILLED"
+    return "NO FILL"
+
+
+def _execution_outcomes_by_received_at(limit):
+    """Map intake ``received_at`` -> {outcome, strategy_id} from execution-stage rows.
+
+    ``received_at`` is the microsecond-ISO intake join key: the ExecutionService
+    writes it back verbatim on the outcome row, so an exact string match is the
+    correlation (never fuzzy symbol+time). Later rows win -- the final outcome for
+    a signal supersedes earlier gate rows. Fail-open: unreadable rows are skipped."""
+    import dashboard as _dash
+    exec_rows, _stats = _dash._pipeline_rows("execution", limit)
+    outcomes = {}
+    for ex in exec_rows:
+        received_at = ex.get("received_at")
+        if not received_at:
+            continue
+        label = _execution_outcome_label(ex)
+        if label:
+            outcomes[str(received_at)] = {"outcome": label, "strategy_id": ex.get("strategy_id")}
+    return outcomes
+
+
 def strategy_alert_rows(limit=500):
     import dashboard as _dash
     rows, _stats = _dash._pipeline_rows("strategy_match", limit)
+    try:
+        outcomes = _execution_outcomes_by_received_at(limit)
+    except Exception:  # observability join; must never break the alert log
+        outcomes = {}
     out = []
     for row in rows:
         norm = row.get("normalized") or {}
         strategy = row.get("strategy_config") or {}
         if not norm.get("strategy_id"):
             continue
+        # Exact received_at join to the execution outcome. Go-forward safety: when
+        # the outcome row carries a strategy_id (new stamped rows) it must agree
+        # with the alert's; historical unstamped rows join on the key alone.
+        # No match -> outcome None (renders as a dash, never "orphan").
+        matched = outcomes.get(str(row.get("received_at") or ""))
+        outcome = None
+        if matched and (
+            not matched.get("strategy_id")
+            or str(matched["strategy_id"]) == str(norm.get("strategy_id"))
+        ):
+            outcome = matched["outcome"]
         out.append({
+            "outcome": outcome,
             "received_at": row.get("received_at"),
             "received_colombia": _dash.colombia_time(row.get("received_at")),
             "strategy_id": norm.get("strategy_id"),

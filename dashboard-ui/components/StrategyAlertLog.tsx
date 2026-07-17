@@ -34,6 +34,16 @@ const decisionKindOf = (v: string) => {
   return 'neutral' as const
 }
 
+// Server-joined execution outcome (exact received_at match). A missing outcome
+// (historical rows, in-flight signals) renders as a plain dash — never "orphan".
+const outcomeKindOf = (v: string) => {
+  const u = v.toUpperCase()
+  if (u === 'FILLED') return 'good' as const
+  if (u === 'BLOCKED') return 'bad' as const
+  if (u === 'NO FILL') return 'warn' as const
+  return 'neutral' as const
+}
+
 const trunc = (v: string | undefined, len: number) =>
   v && v.length > len ? `${v.slice(0, len)}…` : (v ?? '—')
 
@@ -85,6 +95,14 @@ export function StrategyAlertLog() {
       render: (row: Row) => {
         const v = row['duplicate'] ? 'DUPLICATE' : str(pick(row, 'decision'))
         return v ? <Badge label={v} kind={decisionKindOf(v)} /> : '—'
+      },
+    },
+    {
+      key: 'outcome',
+      header: 'Outcome',
+      render: (row: Row) => {
+        const v = str(row['outcome'])
+        return v ? <Badge label={v} kind={outcomeKindOf(v)} /> : '—'
       },
     },
     {

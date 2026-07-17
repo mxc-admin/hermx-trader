@@ -766,6 +766,9 @@ def exchange_execution_records(config, limit=500):
         base = {
             "received_at": received_at,
             "received_colombia": _dash.colombia_time(received_at),
+            # Stamped at write time by ExecutionService (go-forward); historical
+            # rows have none and the UI falls back to symbol matching.
+            "strategy_id": row.get("strategy_id"),
             "tv_time": None,
             "symbol": symbol,
             "inst_id": inst_id,

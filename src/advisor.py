@@ -188,7 +188,7 @@ def execute_with_advisor(record: dict) -> dict:
                 "advisor": {"risk_note": decision.get("risk_note"), "score": decision.get("score")},
             }
             try:
-                _wr.record_pipeline_event("execution", _wr._signal_id_of(record), {"received_at": record.get("received_at"), "okx_execution": result})
+                _wr.record_pipeline_event("execution", _wr._signal_id_of(record), {"received_at": record.get("received_at"), "strategy_id": (record.get("execution_readiness") or {}).get("strategy_id") or None, "okx_execution": result})
             except Exception as exc:  # pipeline ledger is observability; must never block the veto outcome
                 logging.warning("execution ledger append failed: %s", exc)
             return result
