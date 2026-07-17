@@ -31,7 +31,7 @@ Use this when creating or auditing TradingView alerts.
 - `strategy_id` exists.
 - `symbol` matches strategy.
 - `timeframe` matches strategy.
-- `side` is correct.
+- `action` is correct (`buy` / `sell` / `close`; alert-level `side` is ignored).
 - `tv_signal_price` uses `{{close}}`.
 - `tv_time` uses `{{time}}`.
 - The `secret_key` field is set to the correct `HERMX_SECRET` value (or, for relay setups, the `X-Webhook-Secret` header is).

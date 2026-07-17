@@ -39,16 +39,14 @@ Validated against `schemas/tradingview-alert.schema.json`. See
 | `tv_signal_price` | number or string | use `{{close}}` |
 | `tv_time` | string or number | use `{{time}}` |
 | `source` | string | must be `"tradingview"` |
-
-**Direction** (schema `anyOf` — at least one required):
-
-| Field | Type | Notes |
-|---|---|---|
-| `action` | string | enum `buy` `sell` `close`; primary field. `close` flattens reduce-only |
-| `side` | string | enum `buy` `sell`; legacy. If both present as `buy`/`sell`, they must match |
+| `action` | string | enum `buy` `sell` `close`; the sole direction field. `close` flattens reduce-only |
 
 **Optional**: `strategy_name`, `indicator`, `signal_id` (receiver derives one when absent),
 `extras` (object, observe-only debug context — see 3-TRADINGVIEW_ALERTS.md).
+
+An alert-level `side` field is **dead/ignored** — the receiver never reads it. Direction
+comes exclusively from `action`. (A derived `side` mirror still appears in *normalized*
+records for downstream consumers, but it is computed from `action`, never from the alert.)
 
 There is **no `exchange` field** in the alert schema. Venue routing comes exclusively from
 the strategy file (`strategy.instrument.exchange`, § 4). `normalize()` backfills an
@@ -64,7 +62,7 @@ Example alert message (TradingView placeholders substituted at fire time):
   "indicator": "duo-base-dev",
   "symbol": "{{ticker}}",
   "timeframe": "3h",
-  "side": "{{strategy.order.action}}",
+  "action": "{{strategy.order.action}}",
   "tv_signal_price": "{{close}}",
   "tv_time": "{{time}}",
   "source": "tradingview"
@@ -114,33 +112,34 @@ A worker dequeues and processes; outcomes are written to `logs/pipeline.jsonl`
 (stages `error`, `quarantine`, `dedup_reject`, `strategy_match`, `decision`) — **never returned
 to the caller**. The statuses below are the `status` field in those rows. Order:
 
-1. **`normalize()`** (`src/signals/normalize.py`): lowercases `action`/`side`, uppercases
-   `symbol` and strips `OKX:` / `-` / `/`, canonicalizes `timeframe`, backfills a missing
-   `tv_time` with server time, and derives `signal_id =
+1. **`normalize()`** (`src/signals/normalize.py`): lowercases `action` (the raw alert `side`
+   is never read; a derived `side = action` mirror is written for downstream consumers),
+   uppercases `symbol` and strips `OKX:` / `-` / `/`, canonicalizes `timeframe`, backfills a
+   missing `tv_time` with server time, and derives `signal_id =
    sha256(strategy_id|symbol|action|timeframe|tv_time)` when the alert didn't send one.
-2. **Conflict gate**: `action` and `side` both present as opposing open sides → status 400
-   `action_side_conflict`.
-3. **Close branch**: `action=close` diverts to the reduce-only close path *before* the side
-   gate (a close carries no side). It flows through the operator-close machinery with
+2. **Close branch**: `action=close` diverts to the reduce-only close path *before* the
+   invalid-action gate. It flows through the operator-close machinery with
    `close_only=True` (§ 4).
-4. **Side gate**: `side` not `buy`/`sell` after lowercasing → status 400 `side_not_allowed`.
-5. **Source gate**: `source != "tradingview"` → status 202 `non_tradingview_source`
+3. **Invalid-action gate**: `action` not `buy`/`sell` after lowercasing (a `close` has
+   already branched above) → status 400 `side_not_allowed`. The error string is kept for
+   API stability, but the gated field is `action` — alert-level `side` is ignored.
+4. **Source gate**: `source != "tradingview"` → status 202 `non_tradingview_source`
    (acknowledged, never processed).
-6. **Schema validation** (`validate_alert_schema` against
+5. **Schema validation** (`validate_alert_schema` against
    `schemas/tradingview-alert.schema.json`): observe-only by default (logged + counted, still
    processed). With the runtime-config key `strategy_engine.enforce_alert_schema` set true
    (default false), an invalid alert is quarantined with status 202, reason
    `alert_schema_invalid:<field>`.
-7. **Strategy match** (`validate_strategy_alert`): missing `strategy_id` (for a recognized
+6. **Strategy match** (`validate_strategy_alert`): missing `strategy_id` (for a recognized
    strategy alert), unknown `strategy_id`, `strategy_symbol_mismatch`, or
    `strategy_timeframe_mismatch` → status 202, quarantined. A non-strategy alert whose symbol
    no loaded strategy trades → status 400 `symbol_not_allowed`.
-8. **Dedupe** (`check_and_mark_signal`, `src/signals/dedupe.py`): duplicate by `signal_id` or
-   by the composite key `strategy_id|symbol|side|timeframe|tv_time` within a 24 h window →
+7. **Dedupe** (`check_and_mark_signal`, `src/signals/dedupe.py`): duplicate by `signal_id` or
+   by the composite key `strategy_id|symbol|action|timeframe|tv_time` within a 24 h window →
    recorded as `dedup_reject`, **not executed**. A first-seen signal is appended to
    `logs/signals.jsonl` — the single dedup authority and the hard backstop against
    double-execution on replay.
-9. A strategy-matched, non-duplicate alert gets an execution-readiness block and is handed to
+8. A strategy-matched, non-duplicate alert gets an execution-readiness block and is handed to
    the execution path (`execute_with_advisor` → `execute_if_enabled` → `ExecutionService`).
    With no strategy match the alert is recorded observe-only and never executed.
 
@@ -239,7 +238,7 @@ terminal state against the venue.
    is used.)
 5. **Paste the message JSON** (see § 2, or the ready-made per-strategy templates in
    [3-TRADINGVIEW_ALERTS.md](3-TRADINGVIEW_ALERTS.md) § *TradingView Message Templates*). Placeholders:
-   `{{ticker}}` → `symbol`, `{{strategy.order.action}}` → `side` (emits `buy`/`sell`),
+   `{{ticker}}` → `symbol`, `{{strategy.order.action}}` → `action` (emits `buy`/`sell`),
    `{{close}}` → `tv_signal_price`, `{{time}}` → `tv_time`. Hard-code `strategy_id`,
    `timeframe`, and `source`.
 6. **Test with curl before going live**:
@@ -248,13 +247,13 @@ terminal state against the venue.
    # Default (direct TradingView-native alert): secret in the JSON body.
    curl -sS -X POST "https://<your-host>/webhook" \
      -H "Content-Type: application/json" \
-     -d '{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview","secret_key":"'"$HERMX_SECRET"'"}'
+     -d '{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","action":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview","secret_key":"'"$HERMX_SECRET"'"}'
 
    # Alternative (relay/proxy setups): secret in the X-Webhook-Secret header.
    curl -sS -X POST "https://<your-host>/webhook" \
      -H "Content-Type: application/json" \
      -H "X-Webhook-Secret: $HERMX_SECRET" \
-     -d '{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","side":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}'
+     -d '{"strategy_id":"solusdt_duo_base_dev_3h","symbol":"SOLUSDT","timeframe":"3h","action":"buy","tv_signal_price":"171.42","tv_time":"2026-07-01T12:00:00Z","source":"tradingview"}'
    ```
 
    Expect `200 {"ok": true, "status": "queued", ...}`, then check `logs/pipeline.jsonl` for
@@ -263,9 +262,9 @@ terminal state against the venue.
 
 **Common pitfalls**
 
-- `side` values other than `buy`/`sell` (e.g. `long`/`short`) → `side_not_allowed`. Casing
-  is fine (the receiver lowercases), the *value* is not.
-- Both `action` and `side` present but disagreeing → `action_side_conflict` (400).
+- `action` values other than `buy`/`sell`/`close` (e.g. `long`/`short`) → 400
+  `side_not_allowed` (legacy error string — the gated field is `action`). Casing is fine
+  (the receiver lowercases), the *value* is not. An alert-level `side` field is ignored.
 - Alert placed on the wrong chart/timeframe → `strategy_symbol_mismatch` /
   `strategy_timeframe_mismatch` quarantine.
 - `timeframe` outside the schema enum (`30m 1h 2h 3h 4h`) fails schema validation.
@@ -287,7 +286,7 @@ terminal state against the venue.
 | `200 queued` but no order | Rejected/quarantined asynchronously, or no strategy matched | `logs/pipeline.jsonl` (`quarantine`/`error` stage, `reason` field) |
 | `quarantine: unknown_strategy_id` | `strategy_id` has no file in `strategies/` | `strategies/` directory |
 | `quarantine: strategy_symbol_mismatch` / `strategy_timeframe_mismatch` | Alert on the wrong chart or wrong hard-coded `timeframe` | Alert vs strategy file |
-| `dedup_reject` | Same `signal_id` or same `strategy_id\|symbol\|side\|timeframe\|tv_time` within 24 h | `logs/signals.jsonl` (`first_seen_at`) |
+| `dedup_reject` | Same `signal_id` or same `strategy_id\|symbol\|action\|timeframe\|tv_time` within 24 h | `logs/signals.jsonl` (`first_seen_at`) |
 | Signal processed but `not_submitted` | An ExecutionService gate fired — the `gate` field says which (kill switch, `pretrade_notional`, `trading_state`, `symbol_pause`, `idempotency`, `equity_stop`, …) | `okx_execution` result in the execution ledger / pipeline rows; dashboard |
 | Alerts vanish after a restart | Normal restarts replay from the WAL; time-less payloads are dropped by design (non-deterministic `signal_id`) | `logs/raw-webhooks.jsonl` (`phase: intake/dropped`); receiver startup log |
 | `429 rate_limited` / `503 queue_full` | Alert storm exceeding 120 req/60 s per IP, or worker stalled (queue maxsize 200) | Receiver logs; queue-saturation operator alerts |

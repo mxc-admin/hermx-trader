@@ -62,7 +62,6 @@ BUY/SELL (long/short):
   "symbol": "<resolved-symbol>",
   "timeframe": "<from-strategy>",
   "action": "buy",
-  "side": "buy",
   "tv_signal_price": "{{close}}",
   "tv_time": "{{time}}",
   "source": "tradingview"
@@ -80,12 +79,10 @@ CLOSE (flatten position):
   "source": "tradingview"
 }
 ```
-- `action` is the primary field (`buy`/`sell`/`close`). `side` is derived/legacy
-  (`buy`/`sell` only, present for back-compat) and is included in the buy/sell templates
-  during the transition; the close template carries **only** `action` and no `side`.
-- BUY vs SELL differ only in `action`/`side` (`buy` (long) / `sell` (short)). The schema
-  enums are exactly `buy`/`sell` for `side` and `buy`/`sell`/`close` for `action` — not
-  `long`/`short`.
+- `action` is the sole direction field (`buy`/`sell`/`close`), required by the schema.
+  An alert-level `side` field is dead — the receiver ignores it; never emit one.
+- BUY vs SELL differ only in `action` (`buy` (long) / `sell` (short)). The schema enum
+  is exactly `buy`/`sell`/`close` — not `long`/`short`.
 - `tv_signal_price` = `{{close}}` and `tv_time` = `{{time}}` are Pine Script placeholders
   TradingView substitutes at fire time; leave them literal.
 - **The alert carries no `exchange` field.** Venue routing comes entirely from
@@ -122,7 +119,7 @@ timeframe = data.get("timeframe") or h.UNKNOWN
 venue = inst.get("exchange") or "okx"             # context only; not an alert field
 mode = str(data.get("execution_mode") or "demo").lower()
 
-def tmpl(action, side=None):
+def tmpl(action):
     payload = {
         "strategy_id": sid,
         "symbol": symbol,
@@ -136,18 +133,16 @@ def tmpl(action, side=None):
         # secret_key right after auth so it never persists. Omit only for relay/header setups.
         "secret_key": "<HERMX_SECRET>",
     }
-    if side:
-        payload["side"] = side
     return json.dumps(payload, separators=(",", ":"))   # compact single-line, matches the contract
 
 print(f"strategy : {sid}  ({data.get('name') or sid})")
 print(f"symbol   : {symbol}   timeframe: {timeframe}   venue: {venue}   mode: {mode}")
 print()
 print("# BUY (long) — paste into the BUY signal alert's Message box")
-print(tmpl("buy", side="buy"))
+print(tmpl("buy"))
 print()
 print("# SELL (short) — paste into the SELL signal alert's Message box")
-print(tmpl("sell", side="sell"))
+print(tmpl("sell"))
 print()
 print("# CLOSE (flatten position) — paste into the CLOSE signal alert's Message box")
 print(tmpl("close"))
@@ -177,7 +172,7 @@ PY
   `strategy_timeframe_mismatch` rather than silently accepted.
 - **CLOSE alert:** its condition = the strategy's exit/close signal (the Pine strategy's
   exit condition if you have one) or a separate manual alert. Paste the CLOSE template into
-  its Message box — it needs **no `side`**, only `action=close`.
+  its Message box — `action=close`, same fields as the others.
 
 ## Reporting
 - Print both templates as compact single-line JSON so a copy-paste drops cleanly into the
@@ -192,16 +187,13 @@ PY
 - [ ] `resolve_strategy` returns a unique `strategy_id`; an ambiguous symbol prints
       candidates and emits **no** template.
 - [ ] All templates parse as JSON and validate against
-      `schemas/tradingview-alert.schema.json` (6 base required fields + `anyOf` satisfied by
-      `side` or `action`; `side` ∈ `buy|sell`; `action` ∈ `buy|sell|close`; `timeframe` ∈
-      the schema enum).
+      `schemas/tradingview-alert.schema.json` (7 required fields including `action`;
+      `action` ∈ `buy|sell|close`; `timeframe` ∈ the schema enum).
 - [ ] `symbol` matches the strategy's `instrument.inst_id`-derived asset and `timeframe`
       matches the strategy file (so neither `strategy_symbol_mismatch` nor
       `strategy_timeframe_mismatch` would fire).
-- [ ] BUY, SELL, CLOSE: buy/sell include both `action` and `side`; close has
-      `action=close` and **no** `side`.
-- [ ] CLOSE template validates against the schema without `side` (schema `anyOf` satisfied
-      by `action`).
+- [ ] BUY, SELL, CLOSE: direction is carried by `action` only (`buy`/`sell`/`close`);
+      **no** template emits a `side` field (the receiver ignores it).
 - [ ] No `exchange` field is present in any payload; `timeframe` is
       hard-coded, not `{{interval}}`.
 - [ ] Webhook URL, `secret_key` auth (with `X-Webhook-Secret` header noted as the relay

@@ -65,6 +65,11 @@ and the top-level `budget_usd` (now `capital.budget_usd`).
 - `execution_mode` is a two-value enum: `demo` or `live`. **Only `live` is a real-money mode**
   — it routes to the real account and additionally requires `HERMX_LIVE_TRADING=true`.
   `demo` routes to the exchange sandbox/paper account (treated as `simulated_trading`).
+- `side_policy` (optional, enum `long_only` / `short_only` / `long_short`, default
+  `long_short`) is the strategy-level directional constraint. `long_only` suppresses the
+  OPEN leg of short signals (and `short_only` the mirror); the opposite-close leg always
+  runs, so a policy change can never strand an open position. Absent = `long_short`
+  (both directions trade normally).
 
 ## Future Strategy Extensions
 

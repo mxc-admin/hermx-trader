@@ -1,6 +1,9 @@
 # Plan: Rework `side` — strategy-capability gate, `action`-driven direction
 
-> Status: **Planning only — not yet implemented.** Produced via CC2 codebase analysis, 2026-07-09.
+> Status: **SHIPPED (2026-07-16 note)** — W2's strategy gate landed as `side_policy`
+> (`long_only`/`short_only`/`long_short`) and W1's legacy removal landed: alert-level `side`
+> is dropped, `action` is the sole direction field (invalid action still returns the legacy
+> `side_not_allowed` error string). Historical plan below, produced via CC2 codebase analysis, 2026-07-09.
 > Companion doc: `docs/EXECUTION_STRATEGY_DESIGN.md` (§3.2, §4) already specifies the strategy-level `side` gate this plan adopts and extends.
 
 ## 0. Key finding up front

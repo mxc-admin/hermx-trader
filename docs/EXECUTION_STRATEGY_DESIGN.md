@@ -1,5 +1,9 @@
 # Execution Strategy Design — Signal-Timing Refinement, Side Restriction, Capital Circuit Breaker, External Risk Veto, Message-Driven SL/TP (2026-07-04)
 
+> **Status note (2026-07-16):** the side restriction shipped as the strategy-level
+> `side_policy` field (`long_only`/`short_only`/`long_short`); alert-level `side` was
+> dropped — `action` is the sole alert direction field. Historical doc, not updated.
+
 > Design exploration for nine operator-proposed features:
 > `side` restriction, `buy-execution` (retrace + delay), `sell-execution`
 > (top-wick + delay), `max-loss` circuit breaker, `risk-engine-check` external

@@ -49,15 +49,15 @@ If you run an HMAC signing relay (`HERMX_REQUIRE_HMAC=true`), see
   "indicator": "duo-base-dev",
   "symbol": "REPLACE_ME",
   "timeframe": "REPLACE_ME",
-  "side": "buy",
+  "action": "buy",
   "tv_signal_price": "{{close}}",
   "tv_time": "{{time}}",
-  "exchange": "okx",
   "source": "tradingview",
   "secret_key": "<HERMX_SECRET>"
 }
 ```
 
-Use `side = sell` for sell alerts. Replace `<HERMX_SECRET>` with the actual value from
+Use `action = sell` for sell alerts (and `action = close` for a flatten alert; a close
+carries no other direction field). Replace `<HERMX_SECRET>` with the actual value from
 `.env`. Omit `secret_key` only if a relay injects the `X-Webhook-Secret` header instead.
 

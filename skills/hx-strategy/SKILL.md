@@ -218,7 +218,7 @@ print(f"outcome: written | file: {dest} | confirm re-read: "
 
 # TradingView alert templates — identical payload shape to /hx-tv-alerts's tmpl().
 symbol = h._symbol_from_inst_id(doc["instrument"]["inst_id"])
-def tmpl(action, side=None):
+def tmpl(action):
     payload = {
         "strategy_id": sid,
         "symbol": symbol,
@@ -228,15 +228,13 @@ def tmpl(action, side=None):
         "tv_time": "{{time}}",
         "source": "tradingview",
     }
-    if side:
-        payload["side"] = side
     return json.dumps(payload, separators=(",", ":"))   # compact single-line
 print()
 print("# BUY (long) — paste into the BUY signal alert's Message box")
-print(tmpl("buy", side="buy"))
+print(tmpl("buy"))
 print()
 print("# SELL (short) — paste into the SELL signal alert's Message box")
-print(tmpl("sell", side="sell"))
+print(tmpl("sell"))
 print()
 print("# CLOSE (flatten position) — paste into the CLOSE signal alert's Message box")
 print(tmpl("close"))
@@ -375,7 +373,7 @@ print(f"outcome: updated | file: {path} | confirm re-read: "
 
 # Refreshed TradingView alert templates — identical shape to /hx-tv-alerts's tmpl().
 symbol = h._symbol_from_inst_id((new.get("instrument") or {}).get("inst_id"))
-def tmpl(action, side=None):
+def tmpl(action):
     payload = {
         "strategy_id": sid,
         "symbol": symbol,
@@ -385,15 +383,13 @@ def tmpl(action, side=None):
         "tv_time": "{{time}}",
         "source": "tradingview",
     }
-    if side:
-        payload["side"] = side
     return json.dumps(payload, separators=(",", ":"))   # compact single-line
 print()
 print("# BUY (long) — paste into the BUY signal alert's Message box")
-print(tmpl("buy", side="buy"))
+print(tmpl("buy"))
 print()
 print("# SELL (short) — paste into the SELL signal alert's Message box")
-print(tmpl("sell", side="sell"))
+print(tmpl("sell"))
 print()
 print("# CLOSE (flatten position) — paste into the CLOSE signal alert's Message box")
 print(tmpl("close"))
@@ -535,4 +531,4 @@ writes additionally log the explicit `yes`.
 - [ ] Templates match the exact `/hx-tv-alerts` payload shape: parseable compact JSON,
       all required fields (`strategy_id`, `symbol`, `timeframe`, `action`,
       `tv_signal_price="{{close}}"`, `tv_time="{{time}}"`, `source="tradingview"`);
-      buy/sell carry `side`, close carries **no** `side`; no `exchange` field.
+      direction is carried by `action` only — no `side` field, no `exchange` field.
