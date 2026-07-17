@@ -7,33 +7,37 @@ interface SectionProps {
   children: React.ReactNode
   defaultOpen?: boolean
   className?: string
+  actions?: React.ReactNode
 }
 
-export function Section({ title, children, defaultOpen = true, className }: SectionProps) {
+export function Section({ title, children, defaultOpen = true, className, actions }: SectionProps) {
   const [open, setOpen] = useState(defaultOpen)
 
   return (
     <section className={className}>
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-        className="section-header"
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          width: '100%',
-          background: 'transparent',
-          border: 'none',
-          borderBottom: '1px solid var(--border-dim)',
-          cursor: 'pointer',
-          textAlign: 'left',
-        }}
-      >
-        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        {title}
-      </button>
+      <div className="section-header-row">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          className="section-header"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            flex: 1,
+            background: 'transparent',
+            border: 'none',
+            marginBottom: 0,
+            cursor: 'pointer',
+            textAlign: 'left',
+          }}
+        >
+          {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          {title}
+        </button>
+        {actions}
+      </div>
       {open && children}
     </section>
   )

@@ -4,6 +4,7 @@ import { DataTable } from './DataTable'
 import { Badge } from './Badge'
 import { money, num, age, sideKind } from '../lib/format'
 import { Section } from './Section'
+import { StrategyFilter } from './StrategyFilter'
 import type { PositionRow } from '../lib/types'
 
 const mono = { fontFamily: 'var(--font-mono), monospace' as const }
@@ -65,7 +66,7 @@ export function PositionsTable() {
   ]
 
   return (
-    <Section title="POSITIONS" defaultOpen={true}>
+    <Section title="POSITIONS" defaultOpen={true} actions={<StrategyFilter />}>
       {driftCount > 0 && (
         <div
           role="status"

@@ -193,6 +193,59 @@ body {
   margin-bottom: 16px;
 }
 
+.section-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--border-dim);
+  margin-bottom: 16px;
+}
+
+/* ── Select / Filter Bar ────────────────────────────── */
+.hx-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.hx-select-label {
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font-mono), monospace;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+.hx-select-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.hx-select {
+  appearance: none;
+  font-size: 11px;
+  font-family: var(--font-mono), monospace;
+  padding: 4px 24px 4px 8px;
+  background: var(--bg-panel-raised);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.hx-select:hover {
+  background: var(--bg-hover);
+}
+.hx-select:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+}
+.hx-select-chevron {
+  position: absolute;
+  right: 8px;
+  pointer-events: none;
+  color: var(--text-muted);
+}
+
 /* ── Live Badge ─────────────────────────────────────── */
 .live-dot {
   width: 6px;
