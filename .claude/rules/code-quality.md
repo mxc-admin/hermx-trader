@@ -100,6 +100,9 @@ Tests and code can change between when a plan is written and when it is executed
 ### Static analysis can close empirical "needs a live check" validations
 Not every "requires a live/production check" item actually does. `ord_id` uniqueness across venues and legacy-path reachability were both answered conclusively by reading the code plus existing tests. Attempt static resolution (source + tests) before scheduling a live experiment; reserve live checks for genuinely runtime-only facts (e.g. venue fee-inclusion semantics).
 
+### Moving an emission into a new module requires retargeting every monkeypatch
+`detect_history_ageout` imports `emit_reconcile_alert` at call time from `reconcile.alerts`, but a dashboard test still patched `webhook_receiver.emit_reconcile_alert` — a re-export the production path never reads, so the patch silently stopped intercepting. After moving a function into a new module, retarget every monkeypatch to the module the caller actually imports from; patching a re-export silently stops intercepting.
+
 ## Anti-Patterns (populated by /learn)
 <!-- Entries added here as anti-patterns are identified -->
 

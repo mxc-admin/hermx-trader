@@ -179,7 +179,9 @@ def read_state(dashboard_base=DASHBOARD_BASE, secret=None):
     """Fetch /api and /health; normalize into a single state dict.
 
     Encodes the UNKNOWN-never-flat rule: positions are UNKNOWN unless the executor
-    read is present, ``ok``, and not degraded. Returns a dict shaped like::
+    read is present, ``ok``, and not degraded. Positions aggregate every active
+    (venue, mode) env from ``exch_live_by_env`` when the dashboard exposes it,
+    falling back to the legacy ``okx_live`` snapshot. Returns a dict shaped like::
 
         {
           "reachable": {"dashboard": bool, "receiver": bool},
@@ -226,15 +228,42 @@ def read_state(dashboard_base=DASHBOARD_BASE, secret=None):
             state["strategy_count"] = len(files)
 
     if isinstance(api, dict):
-        state["executor"] = api.get("executor") or {}
-        state["freshness"] = freshness_flag(api)
-        okx = api.get("okx_live") or {}
         executor = api.get("executor") or {}
-        # UNKNOWN-never-flat: only trust positions on a healthy, non-degraded read.
-        if okx.get("ok") and not executor.get("degraded"):
-            state["positions"] = okx.get("positions") or {}
-            state["positions_status"] = "OK"
-        # else: leave positions == UNKNOWN
+        state["executor"] = executor
+        state["freshness"] = freshness_flag(api)
+        by_env = api.get("exch_live_by_env")
+        if isinstance(by_env, dict) and by_env:
+            # Env-aware (Phase 0.5+): aggregate every active env's own snapshot
+            # instead of only the legacy OKX-demo read, which reports UNKNOWN on
+            # hosts whose strategies trade elsewhere (e.g. Hyperliquid-only).
+            # The executor summary's ``envs`` map names exactly the active envs;
+            # without it, every fetched env snapshot counts.
+            envs = executor.get("envs")
+            env_keys = list(envs) if isinstance(envs, dict) and envs else list(by_env)
+            snaps = [by_env.get(k) for k in env_keys]
+            # UNKNOWN-never-flat: every env must read healthy; one failed venue
+            # makes the whole view UNKNOWN, never a partial "flat".
+            if all(isinstance(s, dict) and s.get("ok") for s in snaps) \
+                    and not executor.get("degraded"):
+                merged = {}
+                for snap in snaps:
+                    for sym, pos in (snap.get("positions") or {}).items():
+                        held = merged.get(sym)
+                        held_side = str((held or {}).get("side", "")).upper()
+                        # An open position on any env wins over flat on another.
+                        if held is None or held_side in ("", "FLAT"):
+                            merged[sym] = pos
+                state["positions"] = merged
+                state["positions_status"] = "OK"
+            # else: leave positions == UNKNOWN
+        else:
+            # Older dashboards without the per-env map: legacy OKX-demo read.
+            okx = api.get("okx_live") or {}
+            # UNKNOWN-never-flat: only trust positions on a healthy, non-degraded read.
+            if okx.get("ok") and not executor.get("degraded"):
+                state["positions"] = okx.get("positions") or {}
+                state["positions_status"] = "OK"
+            # else: leave positions == UNKNOWN
     return state
 
 
@@ -255,6 +284,11 @@ def freshness_flag(state):
     freshness = freshness if isinstance(freshness, dict) else {}
     if executor.get("degraded") or executor.get("stale"):
         return "STALE"
+    if isinstance(executor.get("envs"), dict) and executor.get("envs") and executor.get("ok"):
+        # Env-aware executor summary: its verdict already reflects every active
+        # env's own read age. The legacy freshness block below keys off the
+        # okx_live snapshot and misreports non-OKX hosts as stale/no_data.
+        return "OK"
     if freshness.get("no_data") or freshness.get("stale"):
         return "STALE"
     if executor.get("ok"):

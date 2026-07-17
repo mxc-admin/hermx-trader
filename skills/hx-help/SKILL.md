@@ -94,11 +94,12 @@ Ask `/hx-help <command>` for syntax, guards, and examples on any one.
 
 ### `/hx-positions`
 - **Type:** read-only.
-- **Does:** reads `/api` → `okx_live.positions`; renders SYMBOL/SIDE/POS/AVG_PX/MARK/
+- **Does:** reads `/api` → aggregates every active env in `exch_live_by_env`
+  (legacy fallback: `okx_live.positions`); renders SYMBOL/SIDE/POS/AVG_PX/MARK/
   UPL/LEV/MGN.
-- **Guards:** read failure, `okx_live.ok == false`, `executor.degraded`, or
-  `freshness.no_data` → **UNKNOWN**. Only a healthy, non-degraded, empty book is FLAT —
-  never infer "flat" from a failed read.
+- **Guards:** read failure, any active env snapshot `ok == false`,
+  `executor.degraded`, or `freshness.no_data` → **UNKNOWN**. Only a healthy,
+  non-degraded, empty book is FLAT — never infer "flat" from a failed read.
 - **Examples:**
   - `rtk claude -p "/hx-positions" --permission-mode dontAsk`
   - "what are we holding?" → `/hx-positions`

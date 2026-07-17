@@ -1,6 +1,6 @@
 ---
 name: hx-positions
-description: "Use when the operator asks what positions are open on HermX — open size, side, entry, mark, unrealized PnL. Read-only. Reads the local dashboard /api okx_live.positions over loopback. On any read failure or a stale/degraded executor it reports UNKNOWN — never 'flat'. Never places or closes an order."
+description: "Use when the operator asks what positions are open on HermX — open size, side, entry, mark, unrealized PnL. Read-only. Reads the local dashboard /api over loopback, aggregating every active (venue, mode) env from exch_live_by_env (legacy fallback: okx_live.positions). On any read failure or a stale/degraded executor it reports UNKNOWN — never 'flat'. Never places or closes an order."
 version: 0.1.0
 author: HermX
 license: MIT
@@ -22,7 +22,10 @@ metadata:
 
 # /hx-positions — HermX open positions
 
-Read-only. Reads `GET {dashboard}/api` → `okx_live.positions` and renders a table.
+Read-only. Reads `GET {dashboard}/api` and renders a table. Positions aggregate
+every active `(venue, mode)` env from `exch_live_by_env` (an open position on any
+env wins over flat); older dashboards without that map fall back to
+`okx_live.positions`.
 
 > Note (Positions-First): `/api` also carries a `positions` block — `open`
 > (venue truth enriched with ledger open time / strategy), `closed`
@@ -38,9 +41,10 @@ Endpoint shapes, auth, freshness, and the **UNKNOWN-never-flat** rule live in
 - Do NOT use to close a position (Phase-2 mutating command).
 
 ## The one rule that matters: UNKNOWN, never "flat"
-A read failure, `okx_live.ok == false`, `executor.degraded == true`, or `freshness.no_data`
-must be reported as **UNKNOWN**. Only a **healthy, non-degraded** executor read may
-report an empty positions map as genuinely **FLAT**. Never let a failed read look like
+A read failure, any active env snapshot with `ok == false` (legacy:
+`okx_live.ok == false`), `executor.degraded == true`, or `freshness.no_data`
+must be reported as **UNKNOWN**. Only when **every** active env reads healthy and
+non-degraded may an empty positions map be reported as genuinely **FLAT**. Never let a failed read look like
 "$0 / no positions".
 
 ## Procedure
@@ -64,7 +68,7 @@ PY
 - Never compute or suggest a size; sizing is owned by the Python execution layer.
 
 ## Verification checklist
-- [ ] Executor-down (`okx_live.ok == false`) → output says **UNKNOWN**, not flat.
+- [ ] Executor-down (any active env snapshot `ok == false`) → output says **UNKNOWN**, not flat.
 - [ ] Stale executor (`executor.degraded`/`stale`) → **UNKNOWN** + STALE freshness.
 - [ ] Healthy + empty positions → **FLAT (no open positions)**.
 - [ ] Healthy + open positions → table with side/size/UPL populated.

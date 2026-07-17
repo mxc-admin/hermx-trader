@@ -86,6 +86,66 @@ def test_read_state_degraded_returns_unknown_positions(monkeypatch):
     assert st["positions_status"] == h.UNKNOWN
 
 
+def test_read_state_env_aware_flat_on_non_okx_host(monkeypatch):
+    """Hyperliquid-only host: healthy per-env snapshot → OK/FLAT, not UNKNOWN."""
+    def payload(req):
+        if req.full_url.endswith("/api"):
+            return {
+                "exch_live_by_env": {
+                    "hyperliquid:live": {"ok": True, "positions": {"BTCUSDT": {"side": "FLAT", "pos": 0}}},
+                },
+                "executor": {"ok": True, "degraded": False,
+                             "envs": {"hyperliquid:live": {"ok": True}}},
+            }
+        return {"ok": True, "arm": {"armed": False}, "mode": "demo"}
+
+    _install_urlopen(monkeypatch, payload=payload)
+    st = h.read_state()
+    assert st["positions_status"] == "OK"
+    assert st["freshness"] == "OK"
+    assert h.format_positions(st["positions"]) == "FLAT (no open positions)"
+
+
+def test_read_state_env_aware_unknown_when_any_env_fails(monkeypatch):
+    """One failed env snapshot taints the whole view: UNKNOWN, never partial flat."""
+    def payload(req):
+        if req.full_url.endswith("/api"):
+            return {
+                "exch_live_by_env": {
+                    "hyperliquid:live": {"ok": True, "positions": {}},
+                    "okx:demo": {"ok": False, "positions": {}, "error": "boom"},
+                },
+                "executor": {"ok": False, "degraded": True,
+                             "envs": {"hyperliquid:live": {"ok": True}, "okx:demo": {"ok": False}}},
+            }
+        return {"ok": True, "arm": {"armed": False}, "mode": "demo"}
+
+    _install_urlopen(monkeypatch, payload=payload)
+    st = h.read_state()
+    assert st["positions"] == h.UNKNOWN
+    assert st["positions_status"] == h.UNKNOWN
+
+
+def test_read_state_env_aware_open_wins_over_flat(monkeypatch):
+    """Same symbol flat on one env, open on another → merged view is OPEN."""
+    def payload(req):
+        if req.full_url.endswith("/api"):
+            return {
+                "exch_live_by_env": {
+                    "okx:demo": {"ok": True, "positions": {"BTCUSDT": {"side": "FLAT", "pos": 0}}},
+                    "hyperliquid:live": {"ok": True, "positions": {"BTCUSDT": {"side": "LONG", "pos": 1.5}}},
+                },
+                "executor": {"ok": True, "degraded": False,
+                             "envs": {"okx:demo": {"ok": True}, "hyperliquid:live": {"ok": True}}},
+            }
+        return {"ok": True, "arm": {"armed": False}, "mode": "demo"}
+
+    _install_urlopen(monkeypatch, payload=payload)
+    st = h.read_state()
+    assert st["positions_status"] == "OK"
+    assert st["positions"]["BTCUSDT"]["side"] == "LONG"
+
+
 def test_read_position_for_symbol_unknown_when_state_unreadable():
     res = h.read_position_for_symbol({"positions": h.UNKNOWN}, "BTCUSDT")
     assert res["status"] == h.UNKNOWN

@@ -373,7 +373,7 @@ def _ageout_setup(dash_mod, monkeypatch, n_rows, oldest_ms, high_water_ms):
 
     captured: list[tuple] = []
     monkeypatch.setattr(
-        webhook_receiver, "emit_reconcile_alert",
+        "reconcile.alerts.emit_reconcile_alert",
         lambda kind, detail: captured.append((kind, detail)) or {},
     )
     return captured

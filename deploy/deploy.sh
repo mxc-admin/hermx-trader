@@ -168,7 +168,30 @@ detect_drift() {
   # The unquoted $(printf ...) is intentional word-splitting to expand one
   # ':(exclude)<path>' pathspec per CONFIG_PATHS entry. `|| true` keeps set -e
   # happy (a non-repo / no-diff still returns empty, never aborts the deploy).
-  git diff --name-only HEAD -- . $(printf ':(exclude)%s ' "${CONFIG_PATHS[@]}") ':(exclude)closed-trades.jsonl' 2>/dev/null || true
+  local _raw _ref _branch _p
+  _raw="$(git diff --name-only HEAD -- . $(printf ':(exclude)%s ' "${CONFIG_PATHS[@]}") ':(exclude)closed-trades.jsonl' 2>/dev/null || true)"
+  [[ -z "$_raw" ]] && return 0
+  # Self-update (above) refreshes deploy/ from origin's default branch WITHOUT
+  # moving HEAD, so right after it those files differ from HEAD by design — that
+  # is upstream content, not an operator edit, and a rollback reset loses nothing
+  # that origin doesn't already hold. Exempt any drifted path whose working-tree
+  # content is identical to origin's default branch; a path that differs from
+  # BOTH HEAD and origin is a genuine local edit and still blocks. Re-resolve the
+  # branch here (the self-update block is skipped in the re-exec'd process and
+  # under --check-drift-only); read the local origin ref only — no network.
+  _branch="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
+  [[ -z "$_branch" || "$_branch" == "HEAD" ]] && _branch="main"
+  _ref="origin/$_branch"
+  if ! git rev-parse --verify --quiet "$_ref" >/dev/null 2>&1; then
+    printf '%s\n' "$_raw"
+    return 0
+  fi
+  while IFS= read -r _p; do
+    [[ -z "$_p" ]] && continue
+    if ! git diff --quiet "$_ref" -- "$_p" 2>/dev/null; then
+      printf '%s\n' "$_p"
+    fi
+  done <<< "$_raw"
 }
 
 print_drift() {
