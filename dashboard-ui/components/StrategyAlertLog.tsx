@@ -50,10 +50,29 @@ const trunc = (v: string | undefined, len: number) =>
 const mono = { fontFamily: 'var(--font-mono), monospace' as const }
 
 export function StrategyAlertLog() {
-  const { data, strategyFilter } = useDashboardContext()
-  const rows = ((data?.strategy_alerts ?? []) as Row[]).filter(
-    (r) => !strategyFilter || r['strategy_id'] === strategyFilter
-  )
+  const { data, strategyFilter, positionFilter, setPositionFilter } = useDashboardContext()
+  // Position click filter: alerts carry no cl_ord_id, so join through the
+  // execution rows -- cl_ord_id -> the exec row's received_at -> the alert's
+  // received_at (the exact intake join key, same chain the server outcome join
+  // uses). An empty chain matches nothing — zero alerts beats wrong alerts.
+  let alertKeys: Set<string> | null = null
+  if (positionFilter) {
+    const ids = new Set(positionFilter.clOrdIds)
+    alertKeys = new Set()
+    for (const r of (data?.okx_executions ?? []) as Row[]) {
+      const cl = str(pick(r, 'cl_ord_id', 'client_order_id'))
+      const ra = str(r['received_at'])
+      if (cl !== undefined && ra !== undefined && ids.has(cl)) alertKeys.add(ra)
+    }
+  }
+  const rows = ((data?.strategy_alerts ?? []) as Row[])
+    .filter((r) => !strategyFilter || r['strategy_id'] === strategyFilter)
+    .filter((r) => {
+      if (!alertKeys) return true
+      const ra = str(r['received_at'])
+      return ra !== undefined && alertKeys.has(ra)
+    })
+    .reverse() // server rows are oldest-first (legacy table reverses too); show newest-first
 
   const columns = [
     {
@@ -126,6 +145,38 @@ export function StrategyAlertLog() {
 
   return (
     <Section title="STRATEGY ALERTS" defaultOpen={true}>
+      {positionFilter && (
+        <div
+          role="status"
+          style={{
+            ...mono,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '6px 12px',
+            fontSize: 11,
+            color: 'var(--text-secondary)',
+          }}
+        >
+          <span>Position filter: {positionFilter.label}</span>
+          <button
+            type="button"
+            onClick={() => setPositionFilter(null)}
+            style={{
+              ...mono,
+              fontSize: 11,
+              padding: '1px 8px',
+              borderRadius: 4,
+              border: '1px solid var(--border-dim)',
+              background: 'transparent',
+              color: 'var(--text-secondary)',
+              cursor: 'pointer',
+            }}
+          >
+            Clear ✕
+          </button>
+        </div>
+      )}
       <DataTable<Row>
         label="Strategy alerts"
         columns={columns}

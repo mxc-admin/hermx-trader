@@ -263,12 +263,16 @@ def _execution_outcome_label(exec_row):
 
 
 def _execution_outcomes_by_received_at(limit):
-    """Map intake ``received_at`` -> {outcome, strategy_id} from execution-stage rows.
+    """Map intake ``received_at`` -> {outcome, strategy_id, block_reason} from
+    execution-stage rows.
 
     ``received_at`` is the microsecond-ISO intake join key: the ExecutionService
     writes it back verbatim on the outcome row, so an exact string match is the
     correlation (never fuzzy symbol+time). Later rows win -- the final outcome for
-    a signal supersedes earlier gate rows. Fail-open: unreadable rows are skipped."""
+    a signal supersedes earlier gate rows. Fail-open: unreadable rows are skipped.
+
+    ``block_reason`` is the service gate's refusal reason (every ``_blocked`` /
+    fail-closed write stamps ``reason``); only BLOCKED rows carry one."""
     import dashboard as _dash
     exec_rows, _stats = _dash._pipeline_rows("execution", limit)
     outcomes = {}
@@ -278,7 +282,12 @@ def _execution_outcomes_by_received_at(limit):
             continue
         label = _execution_outcome_label(ex)
         if label:
-            outcomes[str(received_at)] = {"outcome": label, "strategy_id": ex.get("strategy_id")}
+            result = ex.get("exec_result") or ex.get("okx_execution") or {}
+            outcomes[str(received_at)] = {
+                "outcome": label,
+                "strategy_id": ex.get("strategy_id"),
+                "block_reason": result.get("reason") if label == "BLOCKED" else None,
+            }
     return outcomes
 
 
@@ -301,11 +310,13 @@ def strategy_alert_rows(limit=500):
         # No match -> outcome None (renders as a dash, never "orphan").
         matched = outcomes.get(str(row.get("received_at") or ""))
         outcome = None
+        gate_block_reason = None
         if matched and (
             not matched.get("strategy_id")
             or str(matched["strategy_id"]) == str(norm.get("strategy_id"))
         ):
             outcome = matched["outcome"]
+            gate_block_reason = matched.get("block_reason")
         out.append({
             "outcome": outcome,
             "received_at": row.get("received_at"),
@@ -322,7 +333,9 @@ def strategy_alert_rows(limit=500):
             "decision": _dash.nested_get(row, "strategy_decision", "decision") or _dash.nested_get(row, "decision", "decision"),
             "mode": row.get("mode"),
             "okx_mode": _dash.nested_get(row, "exec_result", "mode") or _dash.nested_get(row, "okx_execution", "mode"),
-            "block_reason": _dash.nested_get(row, "execution_readiness", "block_reason"),
+            # Readiness-time reason (trial not approved) wins; otherwise fall back
+            # to the joined service-gate refusal (kill switch, auth, watchdog, ...).
+            "block_reason": _dash.nested_get(row, "execution_readiness", "block_reason") or gate_block_reason,
             "latency": _dash.nested_get(row, "latency", "latency_seconds"),
         })
     out.sort(key=lambda r: _dash.parse_dt(r.get("tv_time") or r.get("received_at")) or datetime.min.replace(tzinfo=timezone.utc))

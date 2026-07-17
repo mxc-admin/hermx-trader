@@ -95,6 +95,8 @@ def test_alert_outcome_filled_via_received_at_join(wr, wr_root):
     rows = [r for r in dash_mod.strategy_alert_rows() if r["strategy_id"] == SID]
     assert len(rows) == 1
     assert rows[0]["outcome"] == "FILLED"
+    # A filled outcome must never manufacture a block reason.
+    assert rows[0]["block_reason"] is None
 
 
 def test_alert_outcome_blocked(wr, wr_root, monkeypatch):
@@ -105,6 +107,9 @@ def test_alert_outcome_blocked(wr, wr_root, monkeypatch):
     rows = [r for r in dash_mod.strategy_alert_rows() if r["strategy_id"] == SID]
     assert len(rows) == 1
     assert rows[0]["outcome"] == "BLOCKED"
+    # Readiness carries no block_reason (trial approved), so the joined
+    # fail-closed reason surfaces in the alert row.
+    assert rows[0]["block_reason"] == "execution_unavailable"
 
 
 def test_alert_outcome_no_fill_when_submitted_without_fill(wr, wr_root):
@@ -147,6 +152,36 @@ def test_historical_alert_without_execution_row_fails_open(wr, wr_root):
     assert rows[0]["outcome"] is None
 
 
+def test_alert_block_reason_from_service_gate_join(wr, wr_root):
+    # A service-gate refusal (e.g. kill switch) writes {mode: not_submitted,
+    # reason, gate} on the execution row; the alert row must surface that reason
+    # via the received_at join when readiness itself carries no block_reason.
+    shared_key = "2025-06-02T00:00:00.000003+00:00"
+    alert = {
+        "ts": shared_key, "stage": "strategy_match", "signal_id": "g1",
+        "received_at": shared_key,
+        "normalized": {"strategy_id": SID, "symbol": "BTCUSDT", "action": "buy",
+                       "timeframe": "2h", "tv_time": "2025-06-02T00:00:00Z"},
+        "strategy_config": {"name": "G"},
+    }
+    exec_row = {
+        "ts": shared_key, "stage": "execution", "signal_id": "g1",
+        "received_at": shared_key, "strategy_id": SID,
+        "okx_execution": {"ok": True, "mode": "not_submitted",
+                          "reason": "live_trading_disabled",
+                          "gate": "live_trading_kill_switch"},
+    }
+    with (wr_root / "logs" / "pipeline.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(alert) + "\n")
+        fh.write(json.dumps(exec_row) + "\n")
+
+    dash_mod = _dashboard_for(wr_root)
+    rows = [r for r in dash_mod.strategy_alert_rows() if r["strategy_id"] == SID]
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "BLOCKED"
+    assert rows[0]["block_reason"] == "live_trading_disabled"
+
+
 def test_stamped_strategy_id_mismatch_refuses_join(wr, wr_root):
     # Same received_at but the outcome row is stamped with a DIFFERENT strategy_id
     # (adversarial/corrupt row): the join must refuse rather than mislabel.
@@ -171,3 +206,5 @@ def test_stamped_strategy_id_mismatch_refuses_join(wr, wr_root):
     rows = [r for r in dash_mod.strategy_alert_rows() if r["strategy_id"] == SID]
     assert len(rows) == 1
     assert rows[0]["outcome"] is None
+    # A refused join must not leak the mismatched row's gate reason either.
+    assert rows[0]["block_reason"] is None
