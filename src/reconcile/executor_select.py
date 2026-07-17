@@ -116,6 +116,34 @@ def active_venue_mode_currencies() -> "set[tuple[str, bool, str]]":
     return triples
 
 
+def active_venue_mode_instruments() -> "dict[tuple[str, bool], set[str]]":
+    """Instrument-aware sibling of :func:`active_venue_modes` for the ledger sweep.
+
+    Same ``(venue, simulated_trading)`` domain as :func:`active_venue_modes`,
+    mapped to the set of ``inst_id`` strings loaded strategies trade on that
+    env. ``get_order_history_raw`` requires concrete inst_ids (empty list yields
+    no rows), so the ledger fold cannot call it with ``None``.
+
+    Venue and mode resolve IDENTICALLY to ``active_venue_modes`` (lazy
+    STRATEGIES, ``effective_execution_mode`` including control-state override).
+    Strategies without a resolvable venue or ``inst_id`` are skipped.
+    """
+    import webhook_receiver as _wr
+    out: "dict[tuple[str, bool], set[str]]" = {}
+    for sid, strategy in (getattr(_wr, "STRATEGIES", None) or {}).items():
+        inst = strategy_instrument(strategy) or {}
+        venue = str(inst.get("exchange") or "").strip().lower()
+        if not venue:
+            continue
+        inst_id = str(inst.get("inst_id") or "").strip()
+        if not inst_id:
+            continue
+        mode = effective_execution_mode(strategy, sid)
+        key = (venue, mode != "live")
+        out.setdefault(key, set()).add(inst_id)
+    return out
+
+
 def _effective_execution_config(order_intent: "dict | None" = None) -> dict:
     """The execution config the write path actually resolves: the adapter selector
     (EXEC_BACKEND, which already honors HERMX_EXEC_BACKEND) plus the venue+mode to

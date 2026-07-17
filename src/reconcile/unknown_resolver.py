@@ -35,7 +35,11 @@ from orders.journal import (
     load_open_orders,
     record_order_state,
 )
-from reconcile.executor_select import _executor_for_order, active_venue_mode_currencies
+from reconcile.executor_select import (
+    _executor_for_order,
+    active_venue_mode_currencies,
+    active_venue_mode_instruments,
+)
 from reconcile.orders import reconcile_order_once, _order_is_present
 from reconcile.alerts import (
     emit_reconcile_alert,
@@ -63,6 +67,11 @@ def _env_int(name: str, default: int) -> int:
 # the sweep (the resolver itself keeps running). Module global (not wr-resident like
 # the other resolver constants) so tests monkeypatch it here without a wr reload.
 HERMX_DRIFT_CHECK_EVERY_N_TICKS = _env_int("HERMX_DRIFT_CHECK_EVERY_N_TICKS", 10)
+
+# Backend ledger/P&L fold cadence: every Nth resolver tick (default 2 ~= 60 s at the
+# 30 s tick). <= 0 disables the ledger sweep alone; the resolver keeps running.
+# Module global so tests monkeypatch it here without a wr reload.
+HERMX_LEDGER_SWEEP_EVERY_N_TICKS = _env_int("HERMX_LEDGER_SWEEP_EVERY_N_TICKS", 2)
 
 
 def _run_balance_drift_checks() -> None:
@@ -106,6 +115,57 @@ def _run_balance_drift_checks() -> None:
                 "balance drift check failed venue=%s mode=%s currency=%s: %s",
                 venue, mode, currency, exc,
             )
+
+
+def _run_ledger_sweep() -> None:
+    """Venue-agnostic ledger fold: for every (venue, mode) the loaded strategies
+    can trade on, fetch order history and fold HermX open/close legs into
+    ``closed-trades.jsonl`` via :func:`pnl_ledger.reconcile_from_order_history`.
+
+    This is the durable P&L writer that must survive dashboard downtime. Unlike
+    :func:`_run_balance_drift_checks` (live-only — sandbox balances are fake),
+    this sweep **includes demo pairs**: demo P&L is a real product surface and
+    the dashboard fold already writes demo legs.
+
+    OBSERVE-ONLY and fail-open at every layer: per-pair failures are logged at
+    WARNING and the sweep continues; it must never block or crash the resolver's
+    order-state work. Double-run with the dashboard fold is safe (flock +
+    composite-key dedupe on ``append_closed_trades``).
+    """
+    import webhook_receiver as _wr
+    import pnl_ledger as _pnl
+
+    pairs_done = 0
+    rows_written = 0
+    for (venue, simulated), inst_ids in sorted(active_venue_mode_instruments().items()):
+        if not inst_ids:
+            continue
+        mode = "demo" if simulated else "live"
+        try:
+            executor = _wr._reconciliation_executor(
+                {"venue": venue, "simulated_trading": simulated}
+            )
+            if executor is None:
+                continue
+            rows = executor.get_order_history_raw(list(inst_ids), limit=100) or []
+            try:
+                _pnl.detect_history_ageout(rows, venue, mode)
+            except Exception:
+                pass
+            written = _pnl.reconcile_from_order_history(rows, venue, mode)
+            pairs_done += 1
+            if isinstance(written, int):
+                rows_written += written
+        except Exception as exc:
+            logging.warning(
+                "ledger sweep failed venue=%s mode=%s: %s",
+                venue, mode, exc,
+            )
+    if pairs_done:
+        logging.info(
+            "ledger sweep pairs=%d rows_written=%d",
+            pairs_done, rows_written,
+        )
 
 
 def _order_age_seconds(order_record: dict, now_ts: "str | None" = None) -> "float | None":
@@ -424,6 +484,15 @@ def unknown_resolver_loop(stop_event: "threading.Event | None" = None, sleep=tim
                 _run_balance_drift_checks()
             except Exception as exc:  # pragma: no cover - defensive
                 logging.warning("balance drift sweep failed: %s", exc)
+
+        # Backend ledger fold: every Nth tick after order-state + balance drift.
+        # Bare-name globals re-read each tick so tests monkeypatch them here.
+        ledger_n = HERMX_LEDGER_SWEEP_EVERY_N_TICKS
+        if ledger_n > 0 and tick % ledger_n == 0:
+            try:
+                _run_ledger_sweep()
+            except Exception as exc:  # pragma: no cover - defensive
+                logging.warning("ledger sweep failed: %s", exc)
 
         if stop_event is not None:
             if stop_event.wait(interval):
