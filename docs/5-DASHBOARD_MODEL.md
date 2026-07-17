@@ -31,7 +31,8 @@ Component names match files in `dashboard-ui/components/`.
 | Header | `TopBar` | Title, live dot, "Updated Ns ago" (or the last fetch error in red). |
 | Summary row | `SummaryCards` (4 × `StatCard`) | **SYSTEM STATUS** (ARMED / DEMO / DISARMED), **STRATEGIES** (count, demo/live split), **OPEN POSITIONS** (count, longs/shorts), **EXECUTION ENGINE** (`Engine - OK / STALE / ERROR` plus a Hermes advisor line). |
 | Strategy cards | `StrategyGrid` → one `StrategyCard` per file in `strategies/*.json` | Per-strategy state: symbol, timeframe, config badges (indicator, leverage, margin mode, instrument type, exchange), the **Pause / Demo / Live** mode pill, position side badge (LONG/SHORT/FLAT + live dot), Budget, Equity now, UPnL, Mark price, Alerts count. |
-| Execution ledger | `ExecutionLedger` | Trade rows from the execution pipeline: Time, Asset, Side, Fill Px, Notional, State (FILLED green / REJECTED red / UNKNOWN amber), PnL. Skipped (`not_submitted`) rows are filtered out. |
+| Positions | `PositionsTable` | **First-class positions view** — an OPEN table (venue-truth qty/entry/mark/UPnL, enriched with ledger open time and strategy) and a CLOSED table (ledger-folded round trips with entry/exit, net P&L, fees). A **Strategy filter** dropdown in the section header scopes this section *and* the Execution ledger, Strategy alerts, and Open orders tables below. A warning line appears when observe-only **position drift** (ledger vs venue) is detected. See §4a. |
+| Execution ledger | `ExecutionLedger` | Trade rows from the execution pipeline: Time, Asset, Side, Fill Px, Notional, State (FILLED green / REJECTED red / UNKNOWN amber), PnL. Skipped (`not_submitted`) rows are filtered out. These are **order events**, not positions — for the P&L/positions surface use the Positions section above. |
 | Strategy alerts | `StrategyAlertLog` | Every TradingView signal matched to a strategy: TV time, strategy, side, price, decision (TRADE / SKIP / DUPLICATE / BLOCKED), block reason, latency. |
 | Open orders | `OpenOrdersTable` | Order-journal rows in non-terminal states (everything not FILLED/REJECTED — i.e. in-flight and **UNKNOWN** orders). |
 | Reconcile alerts | `ReconcileAlerts` | Rows from `logs/alerts.jsonl` with `kind="reconcile"` — reconcile mismatches, including **position drift** (`stage="position_drift"`, journal vs venue quantity; observe-only, never auto-corrected). |
@@ -109,7 +110,7 @@ writes are the control-state fields in §5.
 | `logs/pipeline.jsonl` | ExecutionLedger (`stage="execution"`), StrategyAlertLog (`stage="strategy_match"`) | Every signal-processing event, tagged by stage. |
 | `logs/alerts.jsonl` | ReconcileAlerts / OperatorAlerts (`kind="reconcile"` / `"operator"`) | Reconcile mismatches, drift, operator actions. |
 | `logs/order-journal.jsonl` (+ checkpoint) | OpenOrdersTable | Order lifecycle `PLANNED → SUBMITTED → (FILLED \| REJECTED \| UNKNOWN)`. The panel shows non-terminal rows. |
-| `closed-trades.jsonl` (in `HERMX_DATA_DIR`) | `strategy_pnl` / `portfolio` in `/api` | **Append-only lifetime P&L ledger.** Never rotated or pruned. Deduped at read time by (exchange, inst_id, ord_id, mode). |
+| `closed-trades.jsonl` (in `HERMX_DATA_DIR`) | `strategy_pnl` / `portfolio` / `positions` in `/api`, `/api/positions` | **Append-only lifetime trade-leg ledger.** Never rotated or pruned. Schema v4: each fill is one leg tagged `leg_kind` `"open"` or `"close"` (pre-v4 rows read back as close legs). Deduped at read time by (exchange, inst_id, ord_id, mode, leg_kind). |
 
 ### Per-strategy P&L: the `strategy_pnl` contract
 
@@ -142,15 +143,62 @@ strategy without deleting ledger history. Set/clear via the API (§5); the curre
 value is echoed as `accounting_start_at` on each strategy and in the
 `accounting_windows` map in `/api`.
 
+### §4a. Positions: open, closed, drift (Positions-First)
+
+Positions are a first-class read model, not a by-product of the execution ledger.
+`src/pnl_positions.py:list_positions()` folds the trade-leg ledger
+(`closed-trades.jsonl`, schema v4 with `leg_kind` `open`|`close`) into *position
+episodes* — one flat-to-flat round trip per `(venue, mode, inst_id, strategy_id)`
+key. Open legs accumulate the entry; close legs reduce it; the episode closes when
+the running signed quantity returns to zero. A reversal fill finalizes the old
+episode and starts a fresh one with the remainder as its entry; an orphan close
+(legacy history or an externally opened position) becomes a single-leg closed
+episode so its realized P&L still lands in exactly one row.
+
+Semantics worth knowing:
+
+- **Closed qty = the sum of close-leg fills** (not the peak open size); open qty is
+  the remaining net exposure.
+- A closed episode's `realized_pnl_net` sums the same close-leg figures the strategy
+  card aggregates, so **the sum of a strategy's closed rows matches its
+  `strategy_pnl` ledger aggregate** (accounting window applied to both).
+- **Open rows in the UI are venue truth** (qty, entry, mark, UPnL from the live
+  snapshot), *enriched* with `opened_at_ms` / `strategy_id` / entry fallback from
+  the matching ledger open episode when one exists. The ledger never invents an
+  open position the venue doesn't show.
+- **Position drift is observe-only.** `diff_open_positions()` compares ledger-derived
+  open exposure vs the venue's live positions per `(venue, mode, inst_id)` and
+  reports `ledger_open_venue_flat`, `venue_open_ledger_unknown`, or `qty_mismatch`
+  (1% relative tolerance). Drift rows are logged/warned and surfaced in the `/api`
+  `positions.drift` block and the Positions section banner — **nothing is ever
+  auto-corrected**. Envs whose snapshot read failed are excluded (a dead executor
+  is not drift).
+
+In `/api`, the `positions` object carries `open` (venue-truth, ledger-enriched),
+`closed` (ledger-folded, per-strategy accounting windows applied), and
+`drift {count, rows}`. A dedicated `GET /api/positions` returns the raw ledger fold
+with query filters (§5). Any ledger error degrades to empty lists — the payload
+never fails because of the positions fold.
+
+### The strategy filter
+
+The dropdown in the Positions section header sets a single page-wide filter: it
+scopes the open/closed positions tables (by `strategy_id`), the Execution ledger
+(by `strategy_id`, falling back to the selected strategy's symbol), the Strategy
+alerts log (by `strategy_id`), and Open orders (journal rows carry no
+`strategy_id`, so they match on the selected strategy's symbol). "All strategies"
+clears it.
+
 ## 5. API endpoints and controls
 
 All routes live on the dashboard server (same port). Read routes:
 
 | Route | Returns |
 |---|---|
-| `GET /api` | Full model: `strategies` (with `effective_mode`, `venue`, `strategy_pnl`, `accounting_start_at`), `portfolio`, `trading_state`, `strategy_overrides`, `accounting_windows`, `okx_live` / `okx_live_by_env` positions, `okx_executions`, `strategy_alerts`, `open_orders`, `reconcile_alerts`, `operator_alerts`, `executor` / `ledger_health` / `freshness` / `reconcile_health` verdicts. |
+| `GET /api` | Full model: `strategies` (with `effective_mode`, `venue`, `strategy_pnl`, `accounting_start_at`), `portfolio`, `positions` (`open` / `closed` / `drift`, §4a), `trading_state`, `strategy_overrides`, `accounting_windows`, `okx_live` / `exch_live_by_env` positions, `okx_executions`, `strategy_alerts`, `open_orders`, `reconcile_alerts`, `operator_alerts`, `executor` / `ledger_health` / `freshness` / `reconcile_health` verdicts. |
 | `GET /health` | Service + arming: `arm.kill_switch_engaged`, `arm.live_trading_enabled`, `arm.armed`, demo/live counts, `strategy_files`. |
 | `GET /api/signals?n=50&symbol=BTCUSDT` | Last *n* execution events (TV-triggered + operator closes), most recent first. `n` capped at 500. |
+| `GET /api/positions?strategy_id=X&status=open\|closed&mode=demo\|live&venue=okx` | Raw ledger-folded position episodes (§4a) as `{ok, positions, count}`. All query params optional and ANDed. Sort: open episodes first, then newest-first. Unlike the `positions` block in `/api`, this is the pure ledger fold — no venue enrichment and no accounting-window scoping. |
 
 Control routes (all require auth; `TOKEN` is `HERMX_SECRET`):
 
@@ -204,7 +252,9 @@ exits, set `trading_state` to `reducing` instead.
 4. For the P&L side of a close, confirm `strategy_pnl.trade_count` ticked up (or grep `closed-trades.jsonl` for the `ord_id`).
 
 **"Something looks wrong with positions."**
-Check **ReconcileAlerts** for `position_drift` rows — journal vs venue quantity
+Check the **Positions** section's drift banner and the `positions.drift` rows in
+`/api` — ledger vs venue exposure mismatches (§4a, observe-only). Also check
+**ReconcileAlerts** for `position_drift` rows — journal vs venue quantity
 mismatches are detected and alerted (observe-only). Also check `symbol_pauses` in
 `control-state.json`: a symbol the resolver paused stops trading silently from the
 UI's perspective.

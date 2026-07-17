@@ -88,7 +88,7 @@ Every server binds `127.0.0.1` only. The sole public surface is the Tailscale Fu
 6. **Parse + raw-intake ledger.** The JSON body is parsed (`400 invalid_json` on failure) and appended verbatim to `logs/shadow-intake.jsonl` with its `received_at`.
 7. **Enqueue** — `_queue_work_item()` reserves a per-symbol ordering ticket and pushes onto the bounded `PROCESS_QUEUE` (`HERMX_QUEUE_MAXSIZE`, default 200). A full queue → `503 queue_full` plus a `QUEUE_SATURATION` alert. The receiver answers `200 queued` immediately; all heavy work is async.
 8. **Worker dequeue** — `worker_loop()` pulls an item, honors the per-symbol ticket turn (in-order per symbol), takes the symbol lock, and calls `process_payload_async()` → `build_record()`.
-9. **Normalize** — `normalize()` uppercases the symbol (stripping `OKX:`/`/`/`-`), canonicalizes the timeframe via `canonical_timeframe()` (shared `hermx_shared`), lowercases side/exchange/source, and synthesizes a deterministic `signal_id` when absent.
+9. **Normalize** — `normalize()` uppercases the symbol (stripping `OKX:`/`/`/`-`), canonicalizes the timeframe via `canonical_timeframe()` (shared `hermx_shared`), lowercases action/exchange/source (the raw alert `side` is never read — `action` is the sole direction field, mirrored into a derived `side` for downstream consumers), and synthesizes a deterministic `signal_id` when absent.
 10. **Alert schema validate** — `validate_alert_schema()` checks the normalized alert against `schemas/tradingview-alert.schema.json` (Draft 2020-12). Observe-only by default; quarantines only when `strategy_engine.enforce_alert_schema` is true. Fails open if `jsonschema`/schema is unavailable.
 11. **Dedupe** — `check_and_mark_signal()` consults a `HERMX_SIGNAL_DEDUPE_WINDOW_SECONDS` (default 86400) seen-signals window; duplicates are ledgered and short-circuited.
 12. **Strategy validation** — `validate_strategy_alert()` resolves `STRATEGIES.get(strategy_id)` and applies post-selection guards: asset match, canonical-timeframe match, and status ∈ {`trial_candidate`, `active_demo`}. A failure routes to the strategy-alert quarantine ledger (`202`).
@@ -252,12 +252,21 @@ All ledgers live under `logs/` except `latest.json` (repo root). Writes use `app
 | `logs/state-alerts.jsonl` | Fail-closed state-write errors (e.g. ENOSPC) | receiver | operator |
 | `logs/seen-signals.jsonl` / `shadow-duplicates.jsonl` | Dedupe window + duplicate hits | receiver | dashboard |
 | `latest.json` (repo root) | Last processed signal snapshot | receiver | hermx-control skill, `/latest` |
+| `closed-trades.jsonl` (in `HERMX_DATA_DIR`) | **Lifetime P&L trade-leg ledger** (schema v4): one row per fill, tagged `leg_kind` `open`\|`close`; append-only, never rotated or pruned; read-side dedup by (exchange, inst_id, ord_id, mode, leg_kind) | reconcilers (`pnl_ledger.append_closed_trades`) | dashboard (`strategy_pnl`, `positions`), `pnl_positions` |
 
 The legacy OKX-named mirrors (`logs/okx-executions.jsonl` / `okx-execution-plan.jsonl`) were removed — nothing wrote them after the CCXT cutover. The dashboard keeps a read-only historical fallback so a pre-cutover box still renders old executions.
 
 ### 6.2 Corruption handling
 
 `read_jsonl_tolerant()` performs bounded reverse-tail reads (no OOM on large logs). A corrupt or partially-written tail line is **quarantined, not fatal** — `startup_quarantine_partial_ledgers()` runs at boot, and `LEDGER_READ_STATS` records per-file skipped-line counts that the dashboard surfaces in its health view. The position journal additionally supports verified checkpoints (`_read_checkpoint` validates a sha256 of canonical state before trusting it) and segment rotation/retention, so journal-mode startup replay stays bounded and a missing/corrupt snapshot rebuilds by replay rather than silently resetting to empty.
+
+### 6.3 Positions projection (Positions-First)
+
+Positions are a **read-only projection over the trade-leg ledger**, not a separate store. `src/pnl_positions.py:list_positions()` folds `closed-trades.jsonl` (the single ledger — open and close legs alike, `leg_kind` `open`|`close`) into flat-to-flat *position episodes* per `(venue, mode, inst_id, strategy_id)` key: open legs accumulate the entry, close legs reduce it, and the episode closes when the running signed quantity returns to zero (reversal fills split into a closed episode plus a fresh entry; orphan closes become single-leg closed episodes).
+
+A closed episode's realized P&L sums the same close-leg figures `aggregate_strategy_pnl` sums, so the **strategy-card identity holds**: the sum of a strategy's closed position rows equals its ledger P&L aggregate. The dashboard's `positions` contract (`positions_contract` in `src/dashboard/model.py`) serves `open` (venue-truth rows enriched from ledger open episodes), `closed` (accounting-window-scoped episodes), and `drift` — the **observe-only** `diff_open_positions()` reconcile-by-position comparison of ledger exposure vs venue positions (warn/surface only, never auto-corrected).
+
+The cutover to the leg-aware ledger is a one-time **wipe-clean migration**: `deploy/deploy.sh` runs `scripts/migrate-positions-v1.sh` (idempotent via the `$HERMX_DATA_DIR/.migrations/positions-v1.done` stamp), which backs up then removes `closed-trades.jsonl` and the order-attribution maps so the v4 ledger starts clean; operator config is never touched. See INSTALL.md for the operator-facing warning.
 
 ---
 

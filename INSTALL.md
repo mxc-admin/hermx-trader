@@ -569,6 +569,21 @@ bash deploy/deploy.sh
 offline test gate, restarts the services, and **auto-rolls back** to the prior commit if the
 post-restart health check fails.
 
+> **⚠️ One-time Positions-First migration (first deploy on or after 2026-07-16).**
+> `deploy/deploy.sh` runs `scripts/migrate-positions-v1.sh` once per host (step 4.5/7,
+> before the service restart). If the stamp file
+> `$HERMX_DATA_DIR/.migrations/positions-v1.done` is missing, the migration **wipes**
+> the transaction ledgers so the new leg-aware (`leg_kind` open|close) ledger starts
+> clean: `closed-trades.jsonl` (P&L trade-leg ledger), `cl-ord-strategy-map.jsonl`
+> (submit-time order→strategy map), and `cloid-map.jsonl` (Hyperliquid cloid map).
+> Every wiped file is **backed up first** under
+> `$HERMX_DATA_DIR/.migrations/backup-positions-v1-<timestamp>/` — nothing is deleted
+> outright. Operator config is never touched: `engine-config.json`, `strategies/`,
+> `.env`, and `control-state.json` all survive unchanged. Once the stamp exists,
+> re-runs (and every later deploy) are a silent no-op; a fresh install just writes
+> the stamp. If you need the pre-migration P&L history, read it from the backup
+> directory — do **not** copy old rows back into the live ledger.
+
 #### A · Mac / local (foreground)
 
 No supervisor — you run the two processes directly in two terminals and stop them with Ctrl-C. The
@@ -904,9 +919,10 @@ Show this to the user — it's the URL every alert posts to.
 ### 7.c Per-strategy alert details
 
 For **each enabled strategy** from Phase 3, give the user the exact alert message. This template is
-**schema-compliant** — `strategy_id`, `symbol`, `timeframe`, `side`, `tv_signal_price`, `tv_time`,
-`exchange`, and `source` are all required by `schemas/tradingview-alert.schema.json`. Create one
-**BUY** and one **SELL** alert per strategy (only `side` changes).
+**schema-compliant** — `strategy_id`, `symbol`, `timeframe`, `tv_signal_price`, `tv_time`,
+`source`, and `action` are all required by `schemas/tradingview-alert.schema.json` (`exchange` is
+**not** required — the receiver backfills it, and venue routing always comes from the strategy
+file). Create one **BUY** and one **SELL** alert per strategy (only `action` changes).
 
 **BTCUSDT 2H** — alert name suggestion: `HermX BTC 2h BUY` / `HermX BTC 2h SELL`
 
@@ -915,10 +931,9 @@ For **each enabled strategy** from Phase 3, give the user the exact alert messag
   "strategy_id": "btcusdt_duo_base_dev_2h",
   "symbol": "{{ticker}}",
   "timeframe": "2h",
-  "side": "{{strategy.order.action}}",
+  "action": "{{strategy.order.action}}",
   "tv_signal_price": {{close}},
   "tv_time": "{{timenow}}",
-  "exchange": "okx",
   "source": "tradingview",
   "secret_key": "<the HERMX_SECRET value from Phase 2>"
 }
@@ -933,7 +948,7 @@ For **each enabled strategy** from Phase 3, give the user the exact alert messag
 **XRPUSDT 4H** — `strategy_id: xrpusdt_duo_base_dev_4h`, `timeframe: 4h`
 
 > Use the same template, swapping `strategy_id` and `timeframe`. If you create separate BUY and SELL
-> alerts (instead of a strategy-driven alert), hardcode `"side": "buy"` or `"side": "sell"` instead
+> alerts (instead of a strategy-driven alert), hardcode `"action": "buy"` or `"action": "sell"` instead
 > of `{{strategy.order.action}}`. `symbol` must resolve to the uppercase asset (e.g. `BTCUSDT`);
 > `{{ticker}}` works when the chart symbol matches.
 
@@ -975,10 +990,9 @@ curl -s -X POST http://127.0.0.1:8891/webhook \
     "strategy_id": "btcusdt_duo_base_dev_2h",
     "symbol": "BTCUSDT",
     "timeframe": "2h",
-    "side": "buy",
+    "action": "buy",
     "tv_signal_price": "65000",
     "tv_time": "2026-06-28T00:00:00Z",
-    "exchange": "okx",
     "source": "tradingview",
     "secret_key": "<HERMX_SECRET>"
   }'

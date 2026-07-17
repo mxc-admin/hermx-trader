@@ -24,6 +24,12 @@ metadata:
 
 Read-only. Reads `GET {dashboard}/api` → `okx_live.positions` and renders a table.
 
+> Note (Positions-First): `/api` also carries a `positions` block — `open`
+> (venue truth enriched with ledger open time / strategy), `closed`
+> (ledger-derived round trips), and `drift` (observe-only ledger-vs-venue
+> mismatch rows). If `positions.drift.count > 0`, surface it alongside the
+> table — drift means the venue view alone may not tell the whole story.
+
 Endpoint shapes, auth, freshness, and the **UNKNOWN-never-flat** rule live in
 [`../hermx-ops/references/api-contract.md`](../hermx-ops/references/api-contract.md).
 
