@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KAIRO Benefits</title>
+  <style>
+    /* ── Self-contained Featurebase embed ───────────────────────────────
+       Paste this entire file into a Featurebase custom HTML / embed block.
+       No external assets. Companion page to architecture-embed.html —
+       same tokens, same dark theme.
+    ──────────────────────────────────────────────────────────────────── */
+    :root {
+      --bg: #0b0f14;
+      --panel: #121820;
+      --panel-2: #18212c;
+      --border: #2a3644;
+      --border-soft: #1e2833;
+      --text: #e8eef5;
+      --muted: #8b9bb0;
+      --accent: #3dd6c6;
+      --accent-dim: rgba(61, 214, 198, 0.12);
+      --accent-line: rgba(61, 214, 198, 0.45);
+      --warn: #f0b429;
+      --warn-dim: rgba(240, 180, 41, 0.12);
+      --core: #152028;
+      --radius: 10px;
+      --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 28px 20px 36px;
+    }
+
+    /* Header */
+    .header {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+    .header .eyebrow {
+      display: inline-block;
+      font-size: 11px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--accent);
+      background: var(--accent-dim);
+      border: 1px solid rgba(61, 214, 198, 0.25);
+      padding: 4px 10px;
+      border-radius: 999px;
+      margin-bottom: 12px;
+      font-weight: 600;
+    }
+    .header h1 {
+      font-size: clamp(22px, 3vw, 30px);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 8px;
+    }
+    .header p {
+      color: var(--muted);
+      font-size: 14px;
+      max-width: 660px;
+      margin: 0 auto;
+    }
+
+    /* Benefits grid */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 600px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 0;
+    }
+    .card.core {
+      background: linear-gradient(180deg, #152830 0%, var(--core) 100%);
+      border-color: var(--accent-line);
+      box-shadow: 0 0 0 1px rgba(61, 214, 198, 0.06), 0 8px 28px rgba(0, 0, 0, 0.35);
+    }
+    .card.advisory {
+      background: var(--warn-dim);
+      border-color: rgba(240, 180, 41, 0.35);
+      border-style: dashed;
+    }
+
+    .mono-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      color: var(--accent);
+      background: var(--accent-dim);
+      border: 1px solid rgba(61, 214, 198, 0.3);
+      flex: none;
+    }
+    .card.advisory .mono-badge {
+      color: var(--warn);
+      background: rgba(240, 180, 41, 0.1);
+      border-color: rgba(240, 180, 41, 0.35);
+    }
+
+    .card-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .card h2 {
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .card p {
+      font-size: 12.5px;
+      color: var(--muted);
+    }
+    .card p strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: auto;
+      padding-top: 6px;
+    }
+    .chip {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 3px 7px;
+      white-space: nowrap;
+    }
+    .chip.accent {
+      color: var(--accent);
+      border-color: rgba(61, 214, 198, 0.3);
+      background: var(--accent-dim);
+    }
+    .chip.warn {
+      color: var(--warn);
+      border-color: rgba(240, 180, 41, 0.35);
+      background: var(--warn-dim);
+    }
+
+    .footer-note {
+      margin-top: 24px;
+      text-align: center;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .footer-note code {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      background: var(--accent-dim);
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="header">
+      <div class="eyebrow">Why KAIRO</div>
+      <h1>Built for operators who treat automation as money-critical</h1>
+      <p>
+        TradingView signals become real exchange orders through one fail-closed
+        execution path — with an AI copilot that watches the desk but never holds the keys.
+      </p>
+    </header>
+
+    <div class="grid">
+      <!-- 1. Fail-closed gates -->
+      <section class="card core">
+        <div class="card-head">
+          <span class="mono-badge" aria-hidden="true">⛨</span>
+          <h2>Fail-closed safety gates</h2>
+        </div>
+        <p>
+          Every order passes a deterministic, precedence-ordered gate chain —
+          kill switch, notional cap, trading state, idempotency. If a check fails
+          or data is missing, <strong>no order is placed</strong>, and KAIRO records
+          exactly which gate fired.
+        </p>
+        <div class="chip-row">
+          <span class="chip accent">safety in code, never AI prose</span>
+        </div>
+      </section>
+
+      <!-- 2. Single chokepoint -->
+      <section class="card core">
+        <div class="card-head">
+          <span class="mono-badge" aria-hidden="true">1×</span>
+          <h2>One audited execution path</h2>
+        </div>
+        <p>
+          All orders flow through a single audited chokepoint. Every money-safety
+          invariant lives in one place above the exchange adapter — there is no
+          side door to a venue.
+        </p>
+        <div class="chip-row">
+          <span class="chip">single chokepoint</span>
+          <span class="chip accent">closes are never blocked</span>
+        </div>
+      </section>
+
+      <!-- 3. Demo-first -->
+      <section class="card core">
+        <div class="card-head">
+          <span class="mono-badge" aria-hidden="true">⏻</span>
+          <h2>Demo-first, deliberate live arming</h2>
+        </div>
+        <p>
+          Every strategy starts in the exchange sandbox. Real money moves only when
+          <strong>two independent controls agree</strong>: the strategy is set to Live
+          <em>and</em> the global kill switch is explicitly released.
+        </p>
+        <div class="chip-row">
+          <span class="chip">demo by default</span>
+          <span class="chip">no implicit demo→live</span>
+        </div>
+      </section>
+
+      <!-- 4. WAL + UNKNOWN -->
+      <section class="card">
+        <div class="card-head">
+          <span class="mono-badge" aria-hidden="true">WAL</span>
+          <h2>Never invents success</h2>
+        </div>
+        <p>
+          Orders are journaled <strong>before</strong> the exchange call, and an
+          uncertain outcome becomes <strong>UNKNOWN</strong> — never a fabricated fill or
+          a guessed "flat." Reconciliation resolves it against the real venue state,
+          and a restart replays the write-ahead log instead of losing alerts.
+        </p>
+        <div class="chip-row">
+          <span class="chip">PLANNED → SUBMITTED → FILLED</span>
+          <span class="chip">restart-safe</span>
+        </div>
+      </section>
+
+      <!-- 5. Self-hosted -->
+      <section class="card">
+        <div class="card-head">
+          <span class="mono-badge" aria-hidden="true">⌂</span>
+          <h2>Self-hosted, fully yours</h2>
+        </div>
+        <p>
+          Your server, your exchange keys, your ledgers — dedicated infrastructure,
+          not shared multi-tenant plumbing. Services bind to loopback only; the sole
+          public surface is a Tailscale Funnel URL you control.
+        </p>
+        <div class="chip-row">
+          <span class="chip">your keys never leave</span>
+          <span class="chip accent">127.0.0.1</span>
+        </div>
+      </section>
+
+      <!-- 6. TV → exchange -->
+      <section class="card">
+        <div class="card-head">
+          <span class="mono-badge" aria-hidden="true">TV</span>
+          <h2>TradingView in, exchange out</h2>
+        </div>
+        <p>
+          The alert carries only the signal — <strong>buy, sell, or close</strong>.
+          Venue, sizing, leverage, and mode all come from your strategy file, so the
+          same alert shape works on every exchange and a webhook can never
+          fat-finger a size.
+        </p>
+        <div class="chip-row">
+          <span class="chip">strategy owns sizing &amp; routing</span>
+        </div>
+      </section>
+
+      <!-- 7. AI copilot -->
+      <section class="card advisory">
+        <div class="card-head">
+          <span class="mono-badge" aria-hidden="true">AI</span>
+          <h2>An AI copilot that can't touch money</h2>
+        </div>
+        <p>
+          Ask it anything over Telegram — positions, P&amp;L, arming, what happened
+          with the last alert. It holds no exchange credentials, computes no sizes,
+          and can at most say <strong>proceed or skip</strong>. If the AI is slow or
+          down, execution continues deterministically.
+        </p>
+        <div class="chip-row">
+          <span class="chip warn">proceed | skip</span>
+          <span class="chip">fails open</span>
+        </div>
+      </section>
+
+      <!-- 8. Crypto derivatives -->
+      <section class="card">
+        <div class="card-head">
+          <span class="mono-badge" aria-hidden="true">⇄</span>
+          <h2>Crypto derivatives, multi-venue</h2>
+        </div>
+        <p>
+          Built for perps and leverage from day one, through a unified CCXT adapter.
+          Run strategies across OKX, Bybit, Binance, Bitget, KuCoin, Gate, Hyperliquid,
+          and Coinbase — each strategy picks its own venue.
+        </p>
+        <div class="chip-row">
+          <span class="chip accent">OKX</span>
+          <span class="chip">Bybit</span>
+          <span class="chip">Hyperliquid</span>
+          <span class="chip">…</span>
+        </div>
+      </section>
+
+      <!-- 9. Audit trail + dashboard -->
+      <section class="card">
+        <div class="card-head">
+          <span class="mono-badge" aria-hidden="true">≡</span>
+          <h2>Everything on the record</h2>
+        </div>
+        <p>
+          Every alert, gate decision, and order is permanently journaled, and P&amp;L
+          lives in an append-only lifetime ledger. The Summary Dashboard shows strategy
+          cards, positions, equity, health, and every signal's decision — and when live
+          data and the ledger disagree, <strong>the ledger wins</strong>.
+        </p>
+        <div class="chip-row">
+          <span class="chip">append-only P&amp;L</span>
+          <span class="chip">every decision explainable</span>
+        </div>
+      </section>
+    </div>
+
+    <p class="footer-note">
+      KAIRO runs on <code>dedicated, self-hosted infrastructure</code> —
+      your own server between your signals and your money, not a multi-tenant SaaS.
+    </p>
+  </div>
+</body>
+</html>
