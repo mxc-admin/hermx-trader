@@ -144,6 +144,11 @@
             "type": {
               "type": "string",
               "enum": ["swap", "spot", "future", "futures", "margin", "option"]
+            },
+            "asset": {
+              "comment": "Optional explicit BASE+QUOTE display/matching symbol (e.g. BTCUSDT). Takes precedence over deriving it from inst_id.",
+              "type": "string",
+              "pattern": "^[A-Z0-9]+$"
             }
           }
         },

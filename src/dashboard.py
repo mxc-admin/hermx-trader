@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -235,25 +236,40 @@ ASSET_META = {
 _INSTRUMENT_TYPE_SUFFIXES = {"SWAP", "FUTURES", "FUTURE", "PERP", "SPOT", "MARGIN", "OPTION"}
 
 
-def strategy_asset(row) -> str:
-    """BASE+QUOTE asset symbol for a strategy card (e.g. ``BTCUSDT``).
-
-    v3 dropped the explicit ``asset`` field; derive it from the canonical
-    ``instrument.inst_id`` (OKX-native ``BTC-USDT-SWAP`` or CCXT-unified
-    ``BTC/USDT:USDT``). A still-present top-level ``asset`` is honored.
-    """
-    explicit = str((row or {}).get("asset") or "").strip().upper()
-    if explicit:
-        return explicit
-    inst = (row or {}).get("instrument") or {}
-    inst_id = str(inst.get("inst_id") or (row or {}).get("inst_id") or "")
-    if not inst_id:
-        return ""
+def _derive_asset_from_inst_id(inst_id: str) -> str:
     core = inst_id.split(":", 1)[0].replace("/", "-")
     parts = [p for p in core.split("-") if p]
     if len(parts) >= 3 and parts[-1].upper() in _INSTRUMENT_TYPE_SUFFIXES:
         parts = parts[:-1]
     return "".join(parts).upper()
+
+
+def strategy_asset(row) -> str:
+    """BASE+QUOTE asset symbol for a strategy card (e.g. ``BTCUSDT``).
+
+    Precedence: explicit ``instrument.asset`` -> legacy top-level ``asset`` ->
+    derived from the canonical ``instrument.inst_id`` (OKX-native
+    ``BTC-USDT-SWAP`` or CCXT-unified ``BTC/USDT:USDT``). A diverging explicit
+    ``instrument.asset`` is honored but warned (log-and-continue).
+    """
+    inst = (row or {}).get("instrument")
+    inst_raw = inst if isinstance(inst, dict) else {}
+    inst_asset = str(inst_raw.get("asset") or "").strip().upper()
+    inst_id = str(inst_raw.get("inst_id") or (row or {}).get("inst_id") or "")
+    if inst_asset:
+        derived = _derive_asset_from_inst_id(inst_id) if inst_id else ""
+        if derived and inst_asset != derived:
+            logging.warning(
+                "instrument.asset %s diverges from inst_id-derived %s (%s)",
+                inst_asset, derived, inst_id,
+            )
+        return inst_asset
+    explicit = str((row or {}).get("asset") or "").strip().upper()
+    if explicit:
+        return explicit
+    if not inst_id:
+        return ""
+    return _derive_asset_from_inst_id(inst_id)
 
 
 def load_strategy_files():

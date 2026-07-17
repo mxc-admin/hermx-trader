@@ -118,11 +118,19 @@ def validate_strategy_alert(normalized: dict) -> tuple[bool, dict | None, str | 
     strategy = _wr.STRATEGIES.get(strategy_id)
     if not strategy:
         return False, None, "unknown_strategy_id"
-    if str(strategy.get("asset") or "").upper() != str(normalized.get("symbol") or "").upper():
-        return False, strategy, "strategy_symbol_mismatch"
     if canonical_timeframe(strategy.get("timeframe")) != canonical_timeframe(normalized.get("timeframe")):
         return False, strategy, "strategy_timeframe_mismatch"
-    # Every strategy file with a matching symbol+timeframe is active; the per-strategy
+    # Matching is strategy_id-first: a symbol that disagrees with the strategy's
+    # asset is a SOFT warning (ok=True, third element carries the warning), never a
+    # quarantine — execution routes on the strategy file's own instrument block, so
+    # the alert symbol cannot redirect an order. Closes especially must never block.
+    if str(strategy.get("asset") or "").upper() != str(normalized.get("symbol") or "").upper():
+        logging.warning(
+            "strategy_symbol_mismatch (soft): alert symbol %s != strategy asset %s for %s",
+            normalized.get("symbol"), strategy.get("asset"), strategy_id,
+        )
+        return True, strategy, "strategy_symbol_mismatch"
+    # Every strategy file with a matching id+timeframe is active; the per-strategy
     # execution_mode (demo/live) decides sandbox vs real venue, not whether it submits.
     return True, strategy, None
 

@@ -32,11 +32,13 @@ def test_valid_strategy_match(wr):
     assert strategy["timeframe"] == "2h"
 
 
-def test_symbol_mismatch_quarantined(wr):
+def test_symbol_mismatch_is_soft_warning(wr):
+    # Matching is strategy_id-only: a symbol that disagrees with the strategy's
+    # asset still matches (ok=True); the third element carries the soft warning.
     ok, strategy, error = _validate(wr, "strategy/symbol_mismatch.json")
-    assert ok is False
+    assert ok is True
     assert error == "strategy_symbol_mismatch"
-    assert strategy is not None  # matched the id, but asset disagrees
+    assert strategy is not None
 
 
 def test_timeframe_mismatch_quarantined(wr):
@@ -99,7 +101,6 @@ def test_build_record_malformed_bad_side_rejected(wr):
 
 def test_build_record_mismatches_quarantined_202(wr):
     for rel_path, reason in [
-        ("strategy/symbol_mismatch.json", "strategy_symbol_mismatch"),
         ("strategy/timeframe_mismatch.json", "strategy_timeframe_mismatch"),
         ("strategy/unknown_strategy_id.json", "unknown_strategy_id"),
     ]:
@@ -108,6 +109,29 @@ def test_build_record_mismatches_quarantined_202(wr):
         assert record["mode"] == "strategy_alert_quarantine", rel_path
         assert record["quarantined"] is True
         assert record["reason"] == reason
+
+
+def test_build_record_open_symbol_mismatch_executes_with_warning(wr, monkeypatch):
+    monkeypatch.setattr(wr.ExecutorFactory, "available", lambda: False)
+    status, record = wr.build_record(load_alert("strategy/symbol_mismatch.json"), RECEIVED_AT)
+    assert status == 200
+    assert record["mode"] == "strategy_file_trial"
+    assert record.get("quarantined") is not True
+    assert record["strategy_warning"] == "strategy_symbol_mismatch"
+    # Execution routes on the strategy file's own instrument, not the alert symbol.
+    assert record["execution_readiness"]["inst_id"] == "BTC-USDT-SWAP"
+
+
+def test_build_record_close_symbol_mismatch_never_blocks(wr, monkeypatch):
+    monkeypatch.setattr(wr.ExecutorFactory, "available", lambda: False)
+    alert = load_alert("strategy/btcusdt_close.json")
+    alert["symbol"] = "ETHUSDT"  # disagrees with the strategy's BTCUSDT asset
+    status, record = wr.build_record(alert, RECEIVED_AT)
+    assert status == 200
+    assert record["mode"] == "webhook_close"
+    assert record["close_only"] is True
+    assert record.get("quarantined") is not True
+    assert record["strategy_warning"] == "strategy_symbol_mismatch"
 
 
 def test_build_record_duplicate_detected(wr):

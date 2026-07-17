@@ -119,6 +119,64 @@ def test_wrong_schema_version_rejected():
     assert not _is_valid(v3)
 
 
+def test_v2_instrument_accepts_optional_asset():
+    v2 = json.loads(json.dumps(V2_TWIN))
+    v2["instrument"]["asset"] = "BTCUSDT"
+    assert _is_valid(v2)
+
+
+@pytest.mark.parametrize("bad", ["btc-usdt", "btcusdt", "BTC/USDT", ""])
+def test_v2_instrument_asset_bad_pattern_rejected(bad):
+    v2 = json.loads(json.dumps(V2_TWIN))
+    v2["instrument"]["asset"] = bad
+    assert not _is_valid(v2)
+
+
+# --------------------------------------------------------------------------- #
+# strategy_asset precedence: instrument.asset -> top-level asset -> derive     #
+# --------------------------------------------------------------------------- #
+
+
+def test_strategy_asset_instrument_asset_wins():
+    m = _module()
+    row = {
+        "instrument": {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap", "asset": "XBTUSDT"},
+        "asset": "LEGACY",
+    }
+    assert m.strategy_asset(row) == "XBTUSDT"
+
+
+def test_strategy_asset_legacy_top_level_next():
+    m = _module()
+    row = {"asset": "ethusdt", "instrument": {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap"}}
+    assert m.strategy_asset(row) == "ETHUSDT"
+
+
+def test_strategy_asset_derives_from_inst_id_last():
+    m = _module()
+    assert m.strategy_asset({"instrument": {"exchange": "okx", "inst_id": "BTC/USDT:USDT", "type": "swap"}}) == "BTCUSDT"
+    assert m.strategy_asset({"instrument": {"exchange": "okx", "inst_id": "SOL-USDT-SWAP", "type": "swap"}}) == "SOLUSDT"
+
+
+def test_strategy_asset_divergence_warns_but_honors(caplog):
+    import logging
+
+    m = _module()
+    row = {"instrument": {"exchange": "okx", "inst_id": "BTC-USDT-SWAP", "type": "swap", "asset": "ETHUSDT"}}
+    with caplog.at_level(logging.WARNING):
+        assert m.strategy_asset(row) == "ETHUSDT"
+    assert any("diverges" in r.message for r in caplog.records)
+
+
+def test_dashboard_strategy_asset_same_precedence():
+    import dashboard as d
+
+    row = {"instrument": {"inst_id": "BTC-USDT-SWAP", "asset": "XBTUSDT"}, "asset": "LEGACY"}
+    assert d.strategy_asset(row) == "XBTUSDT"
+    assert d.strategy_asset({"asset": "ethusdt"}) == "ETHUSDT"
+    assert d.strategy_asset({"instrument": {"inst_id": "BTC/USDT:USDT"}}) == "BTCUSDT"
+
+
 # --------------------------------------------------------------------------- #
 # Loader shim: v2 instrument is canonicalized, no legacy key injection         #
 # --------------------------------------------------------------------------- #

@@ -1406,6 +1406,7 @@ def _build_close_record(payload: dict, normalized: dict, received_at_override: s
         "dedupe": dedupe,
         "latency": latency,
         "strategy_config": strategy_config,
+        "strategy_warning": strategy_error,
         "close_only": True,
         "okx_execution": result,
     }
@@ -1542,6 +1543,7 @@ def build_record(payload: dict, received_at_override: str | None = None) -> tupl
                 "chart_type": strategy_config.get("chart_type") or normalized.get("chart_type"),
             },
             "strategy_config": strategy_config,
+            "strategy_warning": strategy_error,
             "strategy_decision": decision,
             "decision": decision,
             "policies": {},

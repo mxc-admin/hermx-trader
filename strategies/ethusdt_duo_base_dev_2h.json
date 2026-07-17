@@ -5,6 +5,7 @@
   "indicator": "mxc duo-base v2.5",
   "timeframe": "2h",
   "instrument": {
+    "asset": "ETHUSDT",     
     "exchange": "okx",
     "inst_id": "ETH-USDT-SWAP",
     "type": "swap"

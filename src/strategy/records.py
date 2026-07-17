@@ -55,26 +55,43 @@ def strategy_instrument(row: dict) -> dict:
 _INSTRUMENT_TYPE_SUFFIXES = {"SWAP", "FUTURES", "FUTURE", "PERP", "SPOT", "MARGIN", "OPTION"}
 
 
+def _derive_asset_from_inst_id(inst_id: str) -> str:
+    core = inst_id.split(":", 1)[0].replace("/", "-")  # drop settle ccy, unify sep
+    parts = [p for p in core.split("-") if p]
+    if len(parts) >= 3 and parts[-1].upper() in _INSTRUMENT_TYPE_SUFFIXES:
+        parts = parts[:-1]
+    return "".join(parts).upper()
+
+
 def strategy_asset(strategy: dict) -> str:
     """PURE: the BASE+QUOTE asset symbol for a strategy (e.g. ``BTCUSDT``).
 
-    The v3 strategy shape dropped the explicit ``asset`` field; the symbol is now
-    derived from the canonical ``instrument.inst_id``. An OKX-native id
-    (``BTC-USDT-SWAP``) or a CCXT-unified id (``BTC/USDT:USDT``) both resolve to
-    ``BTCUSDT`` so the alert-symbol match (uppercased, separators stripped) keeps
-    working. A still-present top-level ``asset`` is honored as an override.
+    Precedence: explicit ``instrument.asset`` -> legacy top-level ``asset`` ->
+    derived from the canonical ``instrument.inst_id`` (OKX-native
+    ``BTC-USDT-SWAP`` and CCXT-unified ``BTC/USDT:USDT`` both resolve to
+    ``BTCUSDT``, matching the alert-symbol normalization). An explicit
+    ``instrument.asset`` that diverges from the derivation is honored but warned
+    (log-and-continue).
     """
+    inst = (strategy or {}).get("instrument")
+    inst_raw = inst if isinstance(inst, dict) else {}
+    inst_id = str(inst_raw.get("inst_id") or "")
+    inst_asset = str(inst_raw.get("asset") or "").strip().upper()
+    if inst_asset:
+        derived = _derive_asset_from_inst_id(inst_id) if inst_id else ""
+        if derived and inst_asset != derived:
+            logging.warning(
+                "instrument.asset %s diverges from inst_id-derived %s (%s)",
+                inst_asset, derived, inst_id,
+            )
+        return inst_asset
     explicit = str((strategy or {}).get("asset") or "").strip().upper()
     if explicit:
         return explicit
     inst_id = str((strategy_instrument(strategy) or {}).get("inst_id") or "")
     if not inst_id:
         return ""
-    core = inst_id.split(":", 1)[0].replace("/", "-")  # drop settle ccy, unify sep
-    parts = [p for p in core.split("-") if p]
-    if len(parts) >= 3 and parts[-1].upper() in _INSTRUMENT_TYPE_SUFFIXES:
-        parts = parts[:-1]
-    return "".join(parts).upper()
+    return _derive_asset_from_inst_id(inst_id)
 
 
 def strategy_budget_usd(strategy: dict) -> float:
