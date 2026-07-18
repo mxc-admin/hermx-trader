@@ -1,8 +1,8 @@
 'use client'
 import type { CSSProperties } from 'react'
 import { useState, useCallback } from 'react'
-import type { Strategy, LivePosition, PnlPoint } from '../lib/types'
-import { money, num, pct, sideColor, sideKind } from '../lib/format'
+import type { Strategy, LivePosition, PnlPoint, StrategyOverride } from '../lib/types'
+import { age, money, num, pct, sideColor, sideKind } from '../lib/format'
 import { Badge } from './Badge'
 import { setStrategyMode } from '../lib/api'
 
@@ -10,6 +10,7 @@ interface StrategyCardProps {
   strategy: Strategy
   position?: LivePosition
   liveEnabled: boolean
+  override?: StrategyOverride
   onModeChange?: () => void
 }
 
@@ -86,7 +87,7 @@ function ModePill({
   )
 }
 
-export function StrategyCard({ strategy, position, liveEnabled, onModeChange }: StrategyCardProps) {
+export function StrategyCard({ strategy, position, liveEnabled, override, onModeChange }: StrategyCardProps) {
   const sym = strategy.asset ?? ''
   const side = (position?.side ?? 'FLAT').toUpperCase()
   const isLive = side !== 'FLAT'
@@ -138,6 +139,23 @@ export function StrategyCard({ strategy, position, liveEnabled, onModeChange }: 
   const handleModeChange = useCallback(
     async (mode: Mode) => {
       if (!strategy.strategy_id) return
+      if (
+        mode === 'live' &&
+        effectiveMode !== 'live' &&
+        !window.confirm(`Switch ${sym} to LIVE? Real-money orders will be submitted.`)
+      ) {
+        return
+      }
+      if (
+        mode === 'pause' &&
+        effectiveMode !== 'pause' &&
+        isLive &&
+        !window.confirm(
+          `${sym} has an open position. Pause stops new orders but does NOT close it. Continue?`,
+        )
+      ) {
+        return
+      }
       setPending(true)
       setModeError(null)
       try {
@@ -149,7 +167,7 @@ export function StrategyCard({ strategy, position, liveEnabled, onModeChange }: 
         setPending(false)
       }
     },
-    [strategy.strategy_id, onModeChange],
+    [strategy.strategy_id, effectiveMode, isLive, sym, onModeChange],
   )
 
   // Card shell uses the shared .panel class (background + border + radius).
@@ -212,6 +230,13 @@ export function StrategyCard({ strategy, position, liveEnabled, onModeChange }: 
         <p style={{ fontSize: 11, color: 'var(--negative)', margin: 0 }}>{modeError}</p>
       )}
 
+      {/* Live-override provenance: when the operator armed this strategy. */}
+      {effectiveMode === 'live' && override?.set_at && (
+        <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0, textAlign: 'right' }}>
+          live since {age(override.set_at)}
+        </p>
+      )}
+
       {/* Config strip */}
       <div>
         <span className="metric-label">Strategy config</span>
@@ -248,7 +273,14 @@ export function StrategyCard({ strategy, position, liveEnabled, onModeChange }: 
       {/* Equity curve: cumulative realized net over closed episodes (closed-only;
           UPnL stays a separate scalar above). */}
       <div>
-        <span className="metric-label">PnL curve (closed)</span>
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+          <span className="metric-label">PnL curve (closed)</span>
+          {typeof strategy.accounting_start_at === 'number' && (
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              P&L since {new Date(strategy.accounting_start_at).toISOString().slice(0, 10)}
+            </span>
+          )}
+        </div>
         <Sparkline points={pnl?.pnl_series ?? []} />
       </div>
     </section>

@@ -161,6 +161,11 @@ def _inst_id_to_ccxt_symbol(inst_id: str | None) -> str | None:
     return text
 
 
+# Public name for the unified-symbol join (dashboard snapshots + drift detection key
+# both dialects — venue "SOL-USDC-SWAP" and strategy "SOL/USDC:USDC" — through this).
+inst_id_to_ccxt_symbol = _inst_id_to_ccxt_symbol
+
+
 def _ccxt_symbol_to_inst_id(symbol: str | None) -> str | None:
     text = str(symbol or "").strip().upper()
     if not text:
@@ -218,8 +223,12 @@ def detect_position_drift(executor, journal_positions: dict, venue: str, mode: s
 
     Returns a list of ``{inst_id, journal_qty, venue_qty, drift, venue, mode}`` for
     every instrument (in either set) where ``abs(venue_qty - journal_qty) >
-    POSITION_DRIFT_EPS``. A venue read that raises degrades to ``[]`` (logs a warning) so
-    a drift check can NEVER crash startup or a render cycle.
+    POSITION_DRIFT_EPS``. Journal keys (strategy-format, e.g. ``SOL/USDC:USDC``) and
+    venue keys (venue-format, e.g. ``SOL-USDC-SWAP``) are joined through
+    :func:`inst_id_to_ccxt_symbol` so the same position never double-reports as
+    journal-open-venue-flat + venue-open-journal-unknown. A venue read that raises
+    degrades to ``[]`` (logs a warning) so a drift check can NEVER crash startup or a
+    render cycle.
     """
     try:
         venue_rows = executor.get_positions() or []
@@ -230,20 +239,28 @@ def detect_position_drift(executor, journal_positions: dict, venue: str, mode: s
         )
         return []
     venue_view: dict = {}
+    venue_names: dict = {}
     for row in venue_rows:
         inst = (row or {}).get("inst_id")
         if inst is None:
             continue
-        venue_view[inst] = _to_float(row.get("pos"), 0.0) or 0.0
-    journal_view = {k: (_to_float(v, 0.0) or 0.0) for k, v in (journal_positions or {}).items()}
+        key = _inst_id_to_ccxt_symbol(inst) or inst
+        venue_view[key] = _to_float(row.get("pos"), 0.0) or 0.0
+        venue_names[key] = inst
+    journal_view: dict = {}
+    journal_names: dict = {}
+    for k, v in (journal_positions or {}).items():
+        key = _inst_id_to_ccxt_symbol(k) or k
+        journal_view[key] = _to_float(v, 0.0) or 0.0
+        journal_names[key] = k
     drifts: list = []
-    for inst in set(venue_view) | set(journal_view):
-        jq = journal_view.get(inst, 0.0)
-        vq = venue_view.get(inst, 0.0)
+    for key in set(venue_view) | set(journal_view):
+        jq = journal_view.get(key, 0.0)
+        vq = venue_view.get(key, 0.0)
         drift = vq - jq
         if abs(drift) > POSITION_DRIFT_EPS:
             drifts.append({
-                "inst_id": inst,
+                "inst_id": journal_names.get(key) or venue_names.get(key) or key,
                 "journal_qty": jq,
                 "venue_qty": vq,
                 "drift": drift,

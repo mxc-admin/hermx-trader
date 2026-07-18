@@ -322,6 +322,64 @@ def test_strategy_live_snapshot_fail_closed_when_not_armed(dash, monkeypatch, ca
     assert "HERMX_LIVE_TRADING" in capsys.readouterr().err
 
 
+class _HealthExecutor:
+    """Offline executor whose health() serves canned position rows (ok=True path)."""
+
+    def __init__(self, positions):
+        self._positions = positions
+
+    def health(self):
+        return {"ok": True, "positions": self._positions, "generated_at": "2026-07-18T00:00:00Z", "account": {}}
+
+
+def test_strategy_live_snapshot_joins_hyperliquid_inst_dialects(dash, monkeypatch):
+    """Adapter reports venue-format instId (SOL-USDC-SWAP); strategy file uses ccxt
+    format (SOL/USDC:USDC). The unified-symbol join must match them — not report FLAT —
+    while the positions dict still emits the strategy-format inst_id."""
+    dash_mod, _core, root = dash
+    _write_strategy(
+        root / "strategies", "hl1", asset="SOLUSDC",
+        instrument={"exchange": "hyperliquid", "inst_id": "SOL/USDC:USDC", "type": "swap"},
+    )
+    monkeypatch.setattr(dash_mod, "okx_swap_tickers", lambda: {})
+    positions = [{"instId": "SOL-USDC-SWAP", "pos": -0.2, "avgPx": 150.0}]
+    monkeypatch.setattr(
+        dash_mod, "_dashboard_executor",
+        lambda config, simulated_trading=True: (_HealthExecutor(positions), None),
+    )
+    _bust_caches(dash_mod)
+
+    snap = dash_mod.strategy_live_snapshot(
+        {"instrument": {"exchange": "hyperliquid", "inst_id": "SOL/USDC:USDC"}}, "demo")
+
+    assert snap["ok"] is True
+    row = snap["positions"]["SOLUSDC"]
+    assert row["side"] == "SHORT"
+    assert row["pos"] == -0.2
+    assert row["inst_id"] == "SOL/USDC:USDC"
+
+
+def test_okx_live_snapshot_native_inst_id_still_matches(dash, monkeypatch):
+    """No-regression: an OKX-native instId (BTC-USDT-SWAP) on both sides still joins."""
+    dash_mod, _core, root = dash
+    _write_strategy(root / "strategies", "s1")  # template: BTCUSDT / BTC-USDT-SWAP
+    monkeypatch.setattr(dash_mod, "okx_swap_tickers", lambda: {})
+    positions = [{"instId": "BTC-USDT-SWAP", "pos": 1.5, "avgPx": 60000.0}]
+    monkeypatch.setattr(
+        dash_mod, "_dashboard_executor",
+        lambda config, simulated_trading=True: (_HealthExecutor(positions), None),
+    )
+    _bust_caches(dash_mod)
+
+    snap = dash_mod.okx_live_snapshot({}, simulated_trading=True)
+
+    assert snap["ok"] is True
+    row = snap["positions"]["BTCUSDT"]
+    assert row["side"] == "LONG"
+    assert row["pos"] == 1.5
+    assert row["inst_id"] == "BTC-USDT-SWAP"
+
+
 def test_order_history_reconcile_uses_strategy_venue_and_mode(dash, monkeypatch):
     """Ledger reconcile is fed the strategy's OWN (venue, mode), never okx/demo."""
     dash_mod, _core, _root = dash

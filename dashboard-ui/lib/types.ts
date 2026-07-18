@@ -310,6 +310,13 @@ export interface LedgerHealth {
   >
 }
 
+/** reconcile_health field — read-only ledger reconcile lag (model.py P1-2). */
+export interface ReconcileHealth {
+  max_recorded_at_ms?: number | null
+  reconcile_lag_ms?: number | null
+  recorded_at_rows_pct?: number | null
+}
+
 /** freshness field — true data age vs. the refresh interval. */
 export interface Freshness {
   generated_at?: string | null
@@ -330,10 +337,20 @@ export interface HermesAdvisor {
   ok?: boolean
 }
 
+/** strategy_overrides[sid] — control-state.json override entry. */
+export interface StrategyOverride {
+  mode?: string // "pause" | "demo" | "live"
+  execution_mode?: string
+  submit_orders?: boolean
+  set_at?: string
+}
+
 export interface ApiPayload {
   generated_at?: string
   source_counts?: SourceCounts
-  strategy_overrides?: Record<string, unknown>
+  strategy_overrides?: Record<string, StrategyOverride>
+  /** Global emergency gate: "active" | "reducing" (closes always pass). */
+  trading_state?: string
   backfill?: unknown
   strategies?: Strategy[]
   portfolio?: Portfolio
@@ -344,6 +361,7 @@ export interface ApiPayload {
   executor?: ExecutorHealth
   hermes?: HermesAdvisor
   ledger_health?: LedgerHealth
+  reconcile_health?: ReconcileHealth | null
   freshness?: Freshness
   open_orders?: PanelWithStats<OpenOrder>
   reconcile_alerts?: PanelWithStats<ReconcileAlert>

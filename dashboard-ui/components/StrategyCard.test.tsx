@@ -29,6 +29,7 @@ function renderCard(props: Partial<Parameters<typeof StrategyCard>[0]> = {}) {
       strategy={props.strategy ?? makeStrategy()}
       position={props.position}
       liveEnabled={props.liveEnabled ?? false}
+      override={props.override}
       onModeChange={props.onModeChange}
     />,
   )
@@ -37,6 +38,7 @@ function renderCard(props: Partial<Parameters<typeof StrategyCard>[0]> = {}) {
 beforeEach(() => {
   mockSetMode.mockReset()
   mockSetMode.mockResolvedValue(undefined)
+  vi.spyOn(window, 'confirm').mockReturnValue(true)
 })
 
 describe('StrategyCard mode toggle', () => {
@@ -107,6 +109,75 @@ describe('StrategyCard mode toggle', () => {
     renderCard({ strategy: makeStrategy({ strategy_id: undefined }) })
     fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
     expect(mockSetMode).not.toHaveBeenCalled()
+  })
+})
+
+describe('StrategyCard live-transition confirm', () => {
+  it('asks for confirmation before switching into live and proceeds on accept', async () => {
+    renderCard({ liveEnabled: true })
+    fireEvent.click(screen.getByRole('button', { name: 'Live' }))
+
+    expect(window.confirm).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(window.confirm).mock.calls[0][0]).toMatch(/LIVE/)
+    await waitFor(() => expect(mockSetMode).toHaveBeenCalledWith('strat-1', 'live'))
+  })
+
+  it('makes no call when the live confirmation is dismissed', () => {
+    vi.mocked(window.confirm).mockReturnValue(false)
+    renderCard({ liveEnabled: true })
+    fireEvent.click(screen.getByRole('button', { name: 'Live' }))
+
+    expect(window.confirm).toHaveBeenCalledTimes(1)
+    expect(mockSetMode).not.toHaveBeenCalled()
+  })
+
+  it('does not re-confirm when already live', async () => {
+    renderCard({ strategy: makeStrategy({ effective_mode: 'live' }), liveEnabled: true })
+    fireEvent.click(screen.getByRole('button', { name: 'Live' }))
+
+    expect(window.confirm).not.toHaveBeenCalled()
+    await waitFor(() => expect(mockSetMode).toHaveBeenCalledWith('strat-1', 'live'))
+  })
+
+  it('confirms pause when an open position exists and blocks on dismiss', () => {
+    vi.mocked(window.confirm).mockReturnValue(false)
+    renderCard({ position: { side: 'LONG', upl: 1.5 } })
+    fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+
+    expect(window.confirm).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(window.confirm).mock.calls[0][0]).toMatch(/open position/)
+    expect(mockSetMode).not.toHaveBeenCalled()
+  })
+
+  it('pauses without confirm when flat', async () => {
+    renderCard()
+    fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+
+    expect(window.confirm).not.toHaveBeenCalled()
+    await waitFor(() => expect(mockSetMode).toHaveBeenCalledWith('strat-1', 'pause'))
+  })
+})
+
+describe('StrategyCard provenance and accounting window', () => {
+  it('shows "live since" when live with an override set_at', () => {
+    renderCard({
+      strategy: makeStrategy({ effective_mode: 'live' }),
+      liveEnabled: true,
+      override: { mode: 'live', set_at: new Date(Date.now() - 3600_000).toISOString() },
+    })
+    expect(screen.getByText(/live since 1h ago/)).toBeInTheDocument()
+  })
+
+  it('shows the P&L-since caption when accounting_start_at is set', () => {
+    renderCard({
+      strategy: makeStrategy({ accounting_start_at: Date.parse('2026-07-01T00:00:00Z') }),
+    })
+    expect(screen.getByText('P&L since 2026-07-01')).toBeInTheDocument()
+  })
+
+  it('omits the P&L-since caption when accounting_start_at is null', () => {
+    renderCard({ strategy: makeStrategy({ accounting_start_at: null }) })
+    expect(screen.queryByText(/P&L since/)).not.toBeInTheDocument()
   })
 })
 

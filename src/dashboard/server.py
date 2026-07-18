@@ -261,6 +261,11 @@ class Handler(BaseHTTPRequestHandler):
                 _dash._clear_strategy_override(sid)  # idempotent: no-op if no override existed
                 resp["mode"] = "clear"
             else:
+                # Server-side live lock: the client pill is advisory only. Never
+                # accept a live override while the global kill switch is engaged.
+                if mode == "live" and not _dash.live_trading_enabled()[0]:
+                    self._send_control_error(403, "live mode locked: HERMX_LIVE_TRADING is not enabled")
+                    return
                 if not _dash._set_strategy_override(sid, mode):
                     self._send_control_error(400, "failed to set override")
                     return

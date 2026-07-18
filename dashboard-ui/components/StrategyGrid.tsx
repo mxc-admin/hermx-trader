@@ -6,6 +6,7 @@ export function StrategyGrid() {
   const { data, health, refresh } = useDashboardContext()
   const strategies = data?.strategies ?? []
   const positions = data?.okx_live?.positions ?? {}
+  const overrides = data?.strategy_overrides ?? {}
   const liveEnabled = health?.arm?.live_trading_enabled ?? false
 
   if (strategies.length === 0) {
@@ -24,6 +25,7 @@ export function StrategyGrid() {
           strategy={strategy}
           position={strategy.asset ? positions[strategy.asset] : undefined}
           liveEnabled={liveEnabled}
+          override={strategy.strategy_id ? overrides[strategy.strategy_id] : undefined}
           onModeChange={refresh}
         />
       ))}

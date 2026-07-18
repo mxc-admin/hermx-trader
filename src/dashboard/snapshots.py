@@ -42,6 +42,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from executors.ccxt_adapter import inst_id_to_ccxt_symbol
+
 
 def load_json(path: Path, default):
     if not path.exists():
@@ -270,12 +272,20 @@ def strategy_live_snapshot(strategy_config, mode):
         if not bool(payload.get("ok")):
             snapshot["error"] = str(payload.get("error") or "executor_health_failed")
         else:
-            by_inst = {row.get("instId"): row for row in (payload.get("positions") or [])}
+            # Unified-symbol join: venue rows key by their own instId dialect
+            # (SOL-USDC-SWAP) while strategy files use ccxt format (SOL/USDC:USDC);
+            # converting BOTH sides makes the lookup dialect-agnostic. The emitted
+            # inst_id stays strategy-format (from strategy_inst_id, below).
+            by_inst = {}
+            for row in payload.get("positions") or []:
+                key = inst_id_to_ccxt_symbol(row.get("instId") or "")
+                if key:
+                    by_inst[key] = row
             public_marks = _dash.mark_prices(config)
             positions = {}
             for sym in _dash._venue_symbols(venue):
                 inst = _dash.strategy_inst_id(config, sym)
-                row = by_inst.get(inst) or {}
+                row = by_inst.get(inst_id_to_ccxt_symbol(inst)) or {}
                 pos_qty = _dash.as_float(row.get("pos")) or 0.0
                 side = "FLAT"
                 if pos_qty > 0:
@@ -418,12 +428,18 @@ def okx_live_snapshot(config, simulated_trading=True):
         if not bool(payload.get("ok")):
             snapshot["error"] = str(payload.get("error") or "executor_health_failed")
         else:
-            by_inst = {row.get("instId"): row for row in (payload.get("positions") or [])}
+            # Unified-symbol join (same pattern as strategy_live_snapshot): convert
+            # BOTH sides so venue-dialect instIds still match strategy-format ids.
+            by_inst = {}
+            for row in payload.get("positions") or []:
+                key = inst_id_to_ccxt_symbol(row.get("instId") or "")
+                if key:
+                    by_inst[key] = row
             public_marks = _dash.mark_prices(config)
             positions = {}
             for sym in _dash.trial_symbols(config):
                 inst = _dash.strategy_inst_id(config, sym)
-                row = by_inst.get(inst) or {}
+                row = by_inst.get(inst_id_to_ccxt_symbol(inst)) or {}
                 pos_qty = _dash.as_float(row.get("pos")) or 0.0
                 side = "FLAT"
                 if pos_qty > 0:

@@ -1,4 +1,5 @@
 'use client'
+import Link from 'next/link'
 import { useDashboardContext } from '../../components/DashboardProvider'
 import { Badge } from '../../components/Badge'
 import { StatCard } from '../../components/StatCard'
@@ -94,9 +95,9 @@ export default function HealthPage() {
         </div>
       </section>
 
-      <a href="/" className="font-mono text-sm" style={{ color: 'var(--border-focus)' }}>
+      <Link href="/" className="font-mono text-sm" style={{ color: 'var(--border-focus)' }}>
         ← Back to dashboard
-      </a>
+      </Link>
     </main>
   )
 }

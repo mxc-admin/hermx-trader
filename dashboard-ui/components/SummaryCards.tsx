@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react'
 import { StatCard } from './StatCard'
 import { useDashboardContext } from './DashboardProvider'
 import { envBreakdown, money } from '../lib/format'
+import { deriveSystemStatus } from '../lib/systemStatus'
 
 // Mirrors src/dashboard.py:summary_cards() — four at-a-glance status cards.
 type Kind = 'good' | 'bad' | 'warn' | 'muted'
@@ -34,22 +35,24 @@ export function SummaryCards() {
   const unattributed = data?.portfolio?.unattributed
   const positions = data?.okx_live?.positions ?? {}
   const executor = data?.executor
-  const arm = health?.arm ?? {}
 
-  // Card 1 — system status.
-  const liveStrategies = arm.live_strategies ?? 0
+  // Card 1 — system status (shared ARMED predicate with ArmingBanner).
+  const status = deriveSystemStatus(health?.arm)
   let sysLabel: string
   let sysKind: Kind
-  if (arm.armed && liveStrategies > 0) {
+  if (status.kind === 'armed') {
     sysLabel = 'ARMED'
     sysKind = 'good'
-  } else if (strategies.length > 0) {
+  } else if (status.kind === 'demo') {
     sysLabel = 'DEMO'
     sysKind = 'warn'
   } else {
     sysLabel = 'DISARMED'
     sysKind = 'bad'
   }
+  const sysSub = `${strategies.length} strategies active${
+    status.killSwitchEngaged ? ' · kill switch ON' : ''
+  }`
 
   // Card 2 — strategies.
   const demoCount = strategies.filter(
@@ -119,7 +122,7 @@ export function SummaryCards() {
         <StatCard
           label="SYSTEM STATUS"
           value={sysLabel}
-          sub={`${strategies.length} strategies active`}
+          sub={sysSub}
           accentColor={kindColor(sysKind)}
           valueColor={kindColor(sysKind)}
         />

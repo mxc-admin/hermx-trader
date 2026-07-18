@@ -403,8 +403,9 @@ def _bust(dash_mod):
     dash_mod._MODEL_CACHE["model"] = None
 
 
-def test_post_valid_mode_writes_override(dash):
+def test_post_valid_mode_writes_override(dash, monkeypatch):
     dash_mod, _strategies_dir, _root = dash
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "true")
     with _serve(dash_mod) as port:
         status, data = _request(port, "POST", "/api/control/strategy/dash-demo",
                                  body={"mode": "live"})
@@ -414,6 +415,25 @@ def test_post_valid_mode_writes_override(dash):
     overrides = dash_mod._load_control_state()["strategy_overrides"]
     assert overrides["dash-demo"]["mode"] == "live"
     assert overrides["dash-demo"]["execution_mode"] == "live"
+
+
+def test_post_live_mode_locked_returns_403_when_kill_switch_engaged(dash, monkeypatch):
+    # Server-side live lock: the UI disables the Live pill client-side, but the
+    # endpoint itself must refuse a live override while HERMX_LIVE_TRADING is off.
+    dash_mod, _strategies_dir, _root = dash
+    monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
+    with _serve(dash_mod) as port:
+        status, data = _request(port, "POST", "/api/control/strategy/dash-demo",
+                                 body={"mode": "live"})
+    assert status == 403
+    assert "HERMX_LIVE_TRADING" in json.loads(data)["error"]
+    assert dash_mod._load_control_state().get("strategy_overrides", {}) == {}
+
+    # pause/demo overrides stay writable while locked.
+    with _serve(dash_mod) as port:
+        status, _ = _request(port, "POST", "/api/control/strategy/dash-demo",
+                             body={"mode": "demo"})
+    assert status == 200
 
 
 def test_delete_clears_override(dash):
@@ -610,8 +630,9 @@ def test_post_accounting_start_null_clears(dash):
     assert "dash-demo" not in dash_mod._load_control_state().get("accounting_windows", {})
 
 
-def test_post_mode_and_accounting_together(dash):
+def test_post_mode_and_accounting_together(dash, monkeypatch):
     dash_mod, _strategies_dir, _root = dash
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "true")
     with _serve(dash_mod) as port:
         status, data = _request(port, "POST", "/api/control/strategy/dash-demo",
                                  body={"mode": "live", "accounting_start_at": 123})

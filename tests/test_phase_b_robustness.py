@@ -139,6 +139,27 @@ def test_detect_position_drift_exception_returns_empty():
     assert detect_position_drift(ex, {"BTC-USDT-SWAP": 1.0}, "okx", "demo") == []
 
 
+def test_detect_position_drift_unifies_inst_dialects_no_phantom_drift():
+    # Journal keys strategy-format (SOL/USDC:USDC), Hyperliquid venue rows venue-format
+    # (SOL-USDC-SWAP): the unified-symbol join must see ONE instrument in sync -> no
+    # phantom double drift (journal-open-venue-flat + venue-open-journal-unknown).
+    ex = _FakePosExecutor([{"inst_id": "SOL-USDC-SWAP", "pos": -0.2}])
+    assert detect_position_drift(ex, {"SOL/USDC:USDC": -0.2}, "hyperliquid", "live") == []
+
+
+def test_detect_position_drift_cross_dialect_real_drift_single_row():
+    # A genuine quantity divergence across dialects reports exactly once, keyed by the
+    # journal's strategy-format inst_id (journal keys stay strategy-format).
+    ex = _FakePosExecutor([{"inst_id": "SOL-USDC-SWAP", "pos": -0.5}])
+    drifts = detect_position_drift(ex, {"SOL/USDC:USDC": -0.2}, "hyperliquid", "live")
+    assert len(drifts) == 1
+    d = drifts[0]
+    assert d["inst_id"] == "SOL/USDC:USDC"
+    assert d["journal_qty"] == -0.2
+    assert d["venue_qty"] == -0.5
+    assert d["drift"] == pytest.approx(-0.3)
+
+
 def test_drift_emits_reconcile_mismatch(monkeypatch):
     # The webhook wiring logs each drift AND emits RECONCILE_MISMATCH.
     emitted = []

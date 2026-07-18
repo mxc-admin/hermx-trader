@@ -56,36 +56,60 @@ export async function fetchHealth(): Promise<HealthPayload> {
   return fetchJson<HealthPayload>('/health')
 }
 
-export async function setStrategyMode(
-  strategyId: string,
-  mode: 'pause' | 'demo' | 'live' | 'clear',
+async function mutateJson(
+  label: string,
+  path: string,
+  method: 'POST' | 'DELETE',
+  body?: unknown,
 ): Promise<void> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
   let res: Response
   try {
-    res = await fetch(`${API_BASE}/api/control/strategy/${encodeURIComponent(strategyId)}`, {
-      method: 'POST',
+    res = await fetch(`${API_BASE}${path}`, {
+      method,
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json',
         ...authHeaders(),
       },
-      body: JSON.stringify({ mode }),
+      body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
       cache: 'no-store',
     })
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
-      throw new Error(`setStrategyMode timed out`)
+      throw new Error(`${label} timed out`)
     }
-    throw new Error(`setStrategyMode failed: ${(err as Error).message}`)
+    throw new Error(`${label} failed: ${(err as Error).message}`)
   } finally {
     clearTimeout(timer)
   }
   if (!res.ok) {
     let detail = ''
     try { detail = await res.text() } catch { /* ignore */ }
-    throw new Error(`setStrategyMode ${res.status}: ${detail}`)
+    throw new Error(`${label} ${res.status}: ${detail}`)
   }
+}
+
+export async function setStrategyMode(
+  strategyId: string,
+  mode: 'pause' | 'demo' | 'live' | 'clear',
+): Promise<void> {
+  return mutateJson(
+    'setStrategyMode',
+    `/api/control/strategy/${encodeURIComponent(strategyId)}`,
+    'POST',
+    { mode },
+  )
+}
+
+/** Enter the global reduce-only emergency state (closes always pass). */
+export async function setTradingState(state: 'active' | 'reducing'): Promise<void> {
+  return mutateJson('setTradingState', '/api/control/trading-state', 'POST', { state })
+}
+
+/** Restore normal trading (DELETE resets trading_state to "active"). */
+export async function clearTradingState(): Promise<void> {
+  return mutateJson('clearTradingState', '/api/control/trading-state', 'DELETE')
 }
