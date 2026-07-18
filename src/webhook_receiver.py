@@ -125,6 +125,8 @@ from control_state import (  # noqa: E402  F401
     symbol_pause_info,
     pause_symbol,
     set_strategy_override,
+    set_strategy_account,
+    set_strategy_risk,
     clear_strategy_override,
     set_accounting_start,
     clear_accounting_start,

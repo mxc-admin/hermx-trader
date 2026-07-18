@@ -235,6 +235,15 @@ class ExecutionService:
         if trading_state == "reducing" and not readiness.get("close_only"):
             return _blocked("trading_state_reducing:reversal_blocked", "trading_state")
 
+        # Gate 5b -- per-strategy risk_state (split control model). "reduce" blocks
+        # every non-close order for THIS strategy while its account (execution_mode)
+        # is left untouched, so a later close still routes to the correct venue. A
+        # close_only record ALWAYS passes (never-block-a-close, same invariant as
+        # the kill switch / symbol pause / global trading_state).
+        risk_state = str(readiness.get("risk_state") or "").strip().lower()
+        if risk_state == "reduce" and not readiness.get("close_only"):
+            return _blocked("risk_state_reduce:open_blocked", "strategy_risk_state")
+
         # Gate 6 -- reinvest equity stop. A reinvest-sized strategy whose equity
         # (seed budget + realized net P&L) is depleted to <= 0 must not OPEN new
         # risk: its tradable capital is gone. ``equity_usd`` is set by readiness

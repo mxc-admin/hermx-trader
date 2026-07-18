@@ -319,12 +319,15 @@ def strategy_card(strategy, okx_live, alerts, okx_live_by_mode=None, exch_live_b
     # effective_mode (pause/demo/live) is annotated upstream in render(); fall back to
     # the file's execution_mode if a caller passes an un-annotated strategy.
     mode = (strategy.get("effective_mode") or strategy.get("execution_mode") or "demo").lower()
+    # Account-honest read: okx_account_source (execution_mode-derived) decides WHICH
+    # account is queried; the display mode only styles the badge. A risk-reduced
+    # ("pause") live strategy still reads its live account.
+    account = (strategy.get("okx_account_source") or ("live" if mode == "live" else "demo")).lower()
     # Phase 0.5: read positions from THIS strategy's own (venue, mode) account. Prefer
     # the per-env map; fall back to the legacy mode-only map, then to the single
-    # snapshot passed in (legacy callers). A live strategy reads its venue's live
-    # account; demo/pause read that venue's demo sandbox.
+    # snapshot passed in (legacy callers).
     if exch_live_by_env or okx_live_by_mode:
-        okx_live = _dash._snapshot_for_env(exch_live_by_env, okx_live_by_mode, _dash._strategy_venue(strategy), mode)
+        okx_live = _dash._snapshot_for_env(exch_live_by_env, okx_live_by_mode, _dash._strategy_venue(strategy), account)
     live = (okx_live.get("positions") or {}).get(sym) or {}
     _mode_labels = {"pause": "Pause", "demo": "Demo", "live": "Live"}
     mode_label = _mode_labels.get(mode, mode.title())
@@ -337,7 +340,7 @@ def strategy_card(strategy, okx_live, alerts, okx_live_by_mode=None, exch_live_b
     # on FLAT and is bounded by the exchange's 100-row history). Total equity adds UPnL.
     budget_seed = as_float((strategy.get("capital") or {}).get("budget_usd") or strategy.get("budget_usd")) or 0.0
     upl = as_float(live.get("upl")) or 0.0
-    mode_key = "live" if mode == "live" else "demo"  # ledger mode column is demo|live
+    mode_key = "live" if account == "live" else "demo"  # ledger mode column is demo|live
     accounting_start = strategy.get("accounting_start_at")
     if accounting_start is None:
         accounting_start = _dash._accounting_start_for(strategy.get("strategy_id"))
@@ -826,7 +829,9 @@ def render():
         _s = dict(_s)
         _s["effective_mode"] = _dash._effective_strategy_mode(_s, _overrides)
         _s["venue"] = _dash._strategy_venue(_s)
-        _s["okx_account_source"] = "live" if _s["effective_mode"] == "live" else "demo"
+        # Account-honest (split control model): execution_mode-derived, never the
+        # "pause" display mode -- mirrors api_payload's annotation.
+        _s["okx_account_source"] = _dash._effective_strategy_account(_s, _overrides)
         strategies.append(_s)
     strategy_alerts = model.get("strategy_alerts") or []
     source_line = (

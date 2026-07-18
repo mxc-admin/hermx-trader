@@ -2,16 +2,18 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import type { Strategy } from '../lib/types'
 
-// Mock the API module so handleModeChange's network call is observable and
+// Mock the API module so the control handlers' network calls are observable and
 // controllable (resolve / reject / hang) without hitting a real backend.
 vi.mock('../lib/api', () => ({
-  setStrategyMode: vi.fn(),
+  setStrategyRisk: vi.fn(),
+  setStrategyAccount: vi.fn(),
 }))
 
-import { setStrategyMode } from '../lib/api'
+import { setStrategyRisk, setStrategyAccount } from '../lib/api'
 import { StrategyCard } from './StrategyCard'
 
-const mockSetMode = vi.mocked(setStrategyMode)
+const mockSetRisk = vi.mocked(setStrategyRisk)
+const mockSetAccount = vi.mocked(setStrategyAccount)
 
 function makeStrategy(overrides: Partial<Strategy> = {}): Strategy {
   return {
@@ -19,6 +21,7 @@ function makeStrategy(overrides: Partial<Strategy> = {}): Strategy {
     asset: 'BTCUSDT',
     name: 'BTC Trend',
     effective_mode: 'demo',
+    okx_account_source: 'demo',
     ...overrides,
   }
 }
@@ -36,90 +39,110 @@ function renderCard(props: Partial<Parameters<typeof StrategyCard>[0]> = {}) {
 }
 
 beforeEach(() => {
-  mockSetMode.mockReset()
-  mockSetMode.mockResolvedValue(undefined)
+  mockSetRisk.mockReset()
+  mockSetRisk.mockResolvedValue(undefined)
+  mockSetAccount.mockReset()
+  mockSetAccount.mockResolvedValue(undefined)
   vi.spyOn(window, 'confirm').mockReturnValue(true)
 })
 
-describe('StrategyCard mode toggle', () => {
-  it('disables the Live button and never calls setStrategyMode when liveEnabled is false', () => {
+describe('StrategyCard split controls', () => {
+  it('disables the Live account button and never calls the API when liveEnabled is false', () => {
     renderCard({ liveEnabled: false })
-    // Locked live button is exposed via its explanatory aria-label, not "Live".
     const live = screen.getByRole('button', {
-      name: 'Live mode — requires HERMX_LIVE_TRADING=true',
+      name: 'Live account — requires HERMX_LIVE_TRADING=true',
     })
     expect(live).toBeDisabled()
 
     fireEvent.click(live)
-    expect(mockSetMode).not.toHaveBeenCalled()
+    expect(mockSetAccount).not.toHaveBeenCalled()
   })
 
-  it('calls setStrategyMode with the strategy_id and clicked mode', async () => {
+  it('calls setStrategyRisk with the strategy_id and clicked risk state', async () => {
     renderCard({ strategy: makeStrategy({ strategy_id: 'strat-42' }) })
-    fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reduce' }))
 
-    await waitFor(() => expect(mockSetMode).toHaveBeenCalledTimes(1))
-    expect(mockSetMode).toHaveBeenCalledWith('strat-42', 'pause')
+    await waitFor(() => expect(mockSetRisk).toHaveBeenCalledTimes(1))
+    expect(mockSetRisk).toHaveBeenCalledWith('strat-42', 'reduce')
+    expect(mockSetAccount).not.toHaveBeenCalled() // risk never touches the account
   })
 
-  it('invokes onModeChange after a successful mode change', async () => {
+  it('calls setStrategyAccount when flipping demo -> live', async () => {
+    renderCard({ liveEnabled: true })
+    fireEvent.click(screen.getByRole('button', { name: 'Live' }))
+
+    await waitFor(() => expect(mockSetAccount).toHaveBeenCalledTimes(1))
+    expect(mockSetAccount).toHaveBeenCalledWith('strat-1', 'live')
+    expect(mockSetRisk).not.toHaveBeenCalled() // account never touches risk
+  })
+
+  it('invokes onModeChange after a successful control change', async () => {
     const onModeChange = vi.fn()
     renderCard({ onModeChange })
-    fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reduce' }))
 
     await waitFor(() => expect(onModeChange).toHaveBeenCalledTimes(1))
   })
 
-  it('disables all mode buttons while a request is pending (no double-submit)', async () => {
+  it('disables all control buttons while a request is pending (no double-submit)', async () => {
     // A never-resolving promise keeps the component in the pending state.
     let resolve!: () => void
-    mockSetMode.mockReturnValue(new Promise<void>((r) => { resolve = r }))
+    mockSetRisk.mockReturnValue(new Promise<void>((r) => { resolve = r }))
 
     renderCard({ liveEnabled: true })
-    const pause = screen.getByRole('button', { name: 'Pause' })
+    const reduce = screen.getByRole('button', { name: 'Reduce' })
     const demo = screen.getByRole('button', { name: 'Demo' })
     const live = screen.getByRole('button', { name: 'Live' })
 
-    fireEvent.click(pause)
+    fireEvent.click(reduce)
 
-    await waitFor(() => expect(pause).toBeDisabled())
+    await waitFor(() => expect(reduce).toBeDisabled())
     expect(demo).toBeDisabled()
     expect(live).toBeDisabled()
 
     // A second click while pending must not enqueue another request.
-    fireEvent.click(demo)
-    expect(mockSetMode).toHaveBeenCalledTimes(1)
+    fireEvent.click(live)
+    expect(mockSetAccount).not.toHaveBeenCalled()
+    expect(mockSetRisk).toHaveBeenCalledTimes(1)
 
     resolve()
-    await waitFor(() => expect(pause).not.toBeDisabled())
+    await waitFor(() => expect(reduce).not.toBeDisabled())
   })
 
   it('surfaces the error message and clears pending state on rejection', async () => {
-    mockSetMode.mockRejectedValue(new Error('setStrategyMode 500: boom'))
+    mockSetRisk.mockRejectedValue(new Error('setStrategyRisk 500: boom'))
     renderCard()
-    const pause = screen.getByRole('button', { name: 'Pause' })
-    fireEvent.click(pause)
+    const reduce = screen.getByRole('button', { name: 'Reduce' })
+    fireEvent.click(reduce)
 
-    expect(await screen.findByText('setStrategyMode 500: boom')).toBeInTheDocument()
+    expect(await screen.findByText('setStrategyRisk 500: boom')).toBeInTheDocument()
     // Pending cleared → buttons interactive again.
-    await waitFor(() => expect(pause).not.toBeDisabled())
+    await waitFor(() => expect(reduce).not.toBeDisabled())
   })
 
   it('makes no call when strategy_id is missing', () => {
     renderCard({ strategy: makeStrategy({ strategy_id: undefined }) })
-    fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
-    expect(mockSetMode).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Reduce' }))
+    expect(mockSetRisk).not.toHaveBeenCalled()
+  })
+
+  it('makes no call when the clicked state is already current', () => {
+    renderCard({ override: { risk_state: 'reduce' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Reduce' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Demo' }))
+    expect(mockSetRisk).not.toHaveBeenCalled()
+    expect(mockSetAccount).not.toHaveBeenCalled()
   })
 })
 
-describe('StrategyCard live-transition confirm', () => {
-  it('asks for confirmation before switching into live and proceeds on accept', async () => {
+describe('StrategyCard confirms', () => {
+  it('asks for confirmation before switching to the live account and proceeds on accept', async () => {
     renderCard({ liveEnabled: true })
     fireEvent.click(screen.getByRole('button', { name: 'Live' }))
 
     expect(window.confirm).toHaveBeenCalledTimes(1)
     expect(vi.mocked(window.confirm).mock.calls[0][0]).toMatch(/LIVE/)
-    await waitFor(() => expect(mockSetMode).toHaveBeenCalledWith('strat-1', 'live'))
+    await waitFor(() => expect(mockSetAccount).toHaveBeenCalledWith('strat-1', 'live'))
   })
 
   it('makes no call when the live confirmation is dismissed', () => {
@@ -128,42 +151,71 @@ describe('StrategyCard live-transition confirm', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Live' }))
 
     expect(window.confirm).toHaveBeenCalledTimes(1)
-    expect(mockSetMode).not.toHaveBeenCalled()
+    expect(mockSetAccount).not.toHaveBeenCalled()
   })
 
-  it('does not re-confirm when already live', async () => {
-    renderCard({ strategy: makeStrategy({ effective_mode: 'live' }), liveEnabled: true })
-    fireEvent.click(screen.getByRole('button', { name: 'Live' }))
+  it('confirms an account flip when an open position exists and blocks on dismiss', () => {
+    vi.mocked(window.confirm).mockReturnValue(false)
+    renderCard({
+      strategy: makeStrategy({ okx_account_source: 'live' }),
+      override: { execution_mode: 'live' },
+      liveEnabled: true,
+      position: { side: 'LONG', upl: 1.5 },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Demo' }))
 
-    expect(window.confirm).not.toHaveBeenCalled()
-    await waitFor(() => expect(mockSetMode).toHaveBeenCalledWith('strat-1', 'live'))
+    expect(window.confirm).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(window.confirm).mock.calls[0][0]).toMatch(/does NOT move/)
+    expect(mockSetAccount).not.toHaveBeenCalled()
   })
 
-  it('confirms pause when an open position exists and blocks on dismiss', () => {
+  it('confirms risk reduce when an open position exists and blocks on dismiss', () => {
     vi.mocked(window.confirm).mockReturnValue(false)
     renderCard({ position: { side: 'LONG', upl: 1.5 } })
-    fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reduce' }))
 
     expect(window.confirm).toHaveBeenCalledTimes(1)
     expect(vi.mocked(window.confirm).mock.calls[0][0]).toMatch(/open position/)
-    expect(mockSetMode).not.toHaveBeenCalled()
+    expect(mockSetRisk).not.toHaveBeenCalled()
   })
 
-  it('pauses without confirm when flat', async () => {
+  it('reduces without confirm when flat', async () => {
     renderCard()
-    fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reduce' }))
 
     expect(window.confirm).not.toHaveBeenCalled()
-    await waitFor(() => expect(mockSetMode).toHaveBeenCalledWith('strat-1', 'pause'))
+    await waitFor(() => expect(mockSetRisk).toHaveBeenCalledWith('strat-1', 'reduce'))
+  })
+})
+
+describe('StrategyCard state derivation', () => {
+  it('shows Reduce pressed when the override carries risk_state=reduce', () => {
+    renderCard({ override: { risk_state: 'reduce', execution_mode: 'live' }, liveEnabled: true })
+    expect(screen.getByRole('button', { name: 'Reduce' })).toHaveAttribute('aria-pressed', 'true')
+    // The landmine, UI edition: risk reduce must NOT drop the account to demo.
+    expect(screen.getByRole('button', { name: 'Live' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('maps a legacy "pause" effective_mode (no risk_state) to Reduce', () => {
+    renderCard({ strategy: makeStrategy({ effective_mode: 'pause' }) })
+    expect(screen.getByRole('button', { name: 'Reduce' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('derives the account from okx_account_source when no override exists', () => {
+    renderCard({
+      strategy: makeStrategy({ effective_mode: 'pause', okx_account_source: 'live' }),
+      liveEnabled: true,
+    })
+    expect(screen.getByRole('button', { name: 'Live' })).toHaveAttribute('aria-pressed', 'true')
   })
 })
 
 describe('StrategyCard provenance and accounting window', () => {
-  it('shows "live since" when live with an override set_at', () => {
+  it('shows "live since" when the account is live with an override set_at', () => {
     renderCard({
-      strategy: makeStrategy({ effective_mode: 'live' }),
+      strategy: makeStrategy({ effective_mode: 'live', okx_account_source: 'live' }),
       liveEnabled: true,
-      override: { mode: 'live', set_at: new Date(Date.now() - 3600_000).toISOString() },
+      override: { mode: 'live', execution_mode: 'live', set_at: new Date(Date.now() - 3600_000).toISOString() },
     })
     expect(screen.getByText(/live since 1h ago/)).toBeInTheDocument()
   })
@@ -182,22 +234,24 @@ describe('StrategyCard provenance and accounting window', () => {
 })
 
 describe('StrategyCard accessibility', () => {
-  it('groups the mode toggle with an accessible name', () => {
+  it('groups both controls with accessible names', () => {
     renderCard()
-    expect(screen.getByRole('group', { name: 'Trading mode' })).toBeInTheDocument()
+    expect(screen.getByRole('group', { name: 'Risk state' })).toBeInTheDocument()
+    expect(screen.getByRole('group', { name: 'Account' })).toBeInTheDocument()
   })
 
-  it('reflects the current mode via aria-pressed', () => {
-    renderCard({ strategy: makeStrategy({ effective_mode: 'demo' }), liveEnabled: true })
+  it('reflects the current states via aria-pressed', () => {
+    renderCard({ liveEnabled: true })
+    expect(screen.getByRole('button', { name: 'Active' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'Reduce' })).toHaveAttribute('aria-pressed', 'false')
     expect(screen.getByRole('button', { name: 'Demo' })).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getByRole('button', { name: 'Pause' })).toHaveAttribute('aria-pressed', 'false')
     expect(screen.getByRole('button', { name: 'Live' })).toHaveAttribute('aria-pressed', 'false')
   })
 
   it('exposes the lock reason on the disabled Live button via aria-label', () => {
     renderCard({ liveEnabled: false })
     expect(
-      screen.getByRole('button', { name: 'Live mode — requires HERMX_LIVE_TRADING=true' }),
+      screen.getByRole('button', { name: 'Live account — requires HERMX_LIVE_TRADING=true' }),
     ).toBeDisabled()
   })
 })

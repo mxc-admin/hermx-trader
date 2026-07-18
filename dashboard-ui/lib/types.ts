@@ -88,7 +88,10 @@ export interface Strategy {
   capital?: Capital
   execution_mode?: string // "demo" | "live"
   submit_orders?: boolean // false = Pause (no orders submitted); default true
-  effective_mode?: string // "pause" | "demo" | "live" — resolved by backend
+  effective_mode?: string // "pause" | "demo" | "live" — resolved by backend (display)
+  /** Account-honest source ("demo" | "live") — execution_mode-derived; a
+   * risk-reduced ("pause") live strategy stays "live" here. */
+  okx_account_source?: string
   leverage?: number
   margin_mode?: string // "isolated" | "cross"
   notes?: string
@@ -337,11 +340,13 @@ export interface HermesAdvisor {
   ok?: boolean
 }
 
-/** strategy_overrides[sid] — control-state.json override entry. */
+/** strategy_overrides[sid] — control-state.json override entry (split model:
+ * execution_mode = ACCOUNT, risk_state = RISK; independent axes). */
 export interface StrategyOverride {
-  mode?: string // "pause" | "demo" | "live"
-  execution_mode?: string
-  submit_orders?: boolean
+  mode?: string // derived display label: "pause" | "demo" | "live"
+  execution_mode?: string // "demo" | "live" — written only by account controls
+  risk_state?: string // "active" | "reduce" — written only by risk controls
+  submit_orders?: boolean // legacy; migrated away on load
   set_at?: string
 }
 

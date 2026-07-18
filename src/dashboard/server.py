@@ -234,13 +234,15 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps({"ok": False, "error": message}, ensure_ascii=False).encode("utf-8")
         self.send_bytes(status, body, "application/json; charset=utf-8")
 
-    def _apply_strategy_control(self, sid, mode, accounting_field=None):
-        """Apply a strategy-mode override and/or an accounting-window change.
+    def _apply_strategy_control(self, sid, mode, accounting_field=None,
+                                risk_state=None, execution_mode=None):
+        """Apply strategy-control changes: legacy 3-mode override, split-model
+        ``risk_state``/``execution_mode`` fields, and/or an accounting-window change.
 
         ``accounting_field`` is a 3-state marker for the Phase-3 accounting window:
         - None  -> body carried no ``accounting_start_at`` key; leave the window alone.
         - the sentinel ("__clear__", None) or an int -> set/clear the window.
-        At least one of ``mode`` or ``accounting_field`` must be actionable."""
+        At least one field must be actionable."""
         import dashboard as _dash
         sid = (sid or "").strip()
         if not sid:
@@ -249,6 +251,13 @@ class Handler(BaseHTTPRequestHandler):
         known = {s.get("strategy_id") for s in _dash.active_strategies()}
         if sid not in known:
             self._send_control_error(404, f"unknown strategy_id: {sid}")
+            return
+        # Validate BEFORE any write so a partially-valid body mutates nothing.
+        if risk_state and risk_state not in _dash._VALID_RISK_STATES:
+            self._send_control_error(400, "risk_state must be one of: active, reduce")
+            return
+        if execution_mode and execution_mode not in _dash._VALID_EXECUTION_ACCOUNTS:
+            self._send_control_error(400, "execution_mode must be one of: demo, live")
             return
         resp = {"ok": True, "strategy_id": sid}
         # Mode override (optional when only the accounting window is being set).
@@ -270,6 +279,21 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_control_error(400, "failed to set override")
                     return
                 resp["mode"] = mode
+        # Split-model fields (account and risk are independent axes).
+        if execution_mode:
+            # Same server-side live lock as mode=live above.
+            if execution_mode == "live" and not _dash.live_trading_enabled()[0]:
+                self._send_control_error(403, "live mode locked: HERMX_LIVE_TRADING is not enabled")
+                return
+            if not _dash._set_strategy_account(sid, execution_mode):
+                self._send_control_error(400, "failed to set execution_mode")
+                return
+            resp["execution_mode"] = execution_mode
+        if risk_state:
+            if not _dash._set_strategy_risk(sid, risk_state):
+                self._send_control_error(400, "failed to set risk_state")
+                return
+            resp["risk_state"] = risk_state
         # Accounting window (Phase 3). accounting_field is (kind, value): "set"/"clear".
         if accounting_field is not None:
             kind, value = accounting_field
@@ -281,8 +305,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_control_error(400, "failed to set accounting_start_at")
                 return
             resp["accounting_start_at"] = start_ms
-        if "mode" not in resp and "accounting_start_at" not in resp:
-            self._send_control_error(400, "no actionable field (mode or accounting_start_at)")
+        if not (set(resp) & {"mode", "execution_mode", "risk_state", "accounting_start_at"}):
+            self._send_control_error(400, "no actionable field (mode, execution_mode, risk_state or accounting_start_at)")
             return
         self.send_bytes(200, json.dumps(resp, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
@@ -319,6 +343,8 @@ class Handler(BaseHTTPRequestHandler):
             length = 0
         raw = self.rfile.read(length) if length > 0 else b""
         mode = ""
+        risk_state = ""
+        execution_mode = ""
         accounting_field = None
         if raw:
             try:
@@ -328,6 +354,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             body = body or {}
             mode = str(body.get("mode") or "").strip().lower()
+            risk_state = str(body.get("risk_state") or "").strip().lower()
+            execution_mode = str(body.get("execution_mode") or "").strip().lower()
             # Phase 3: accounting_start_at is optional. Present-and-null clears the
             # window; an int (ms epoch) sets it; a non-int/non-null is rejected.
             if "accounting_start_at" in body:
@@ -340,7 +368,8 @@ class Handler(BaseHTTPRequestHandler):
                     accounting_field = ("set", raw_val)
                 else:
                     accounting_field = ("invalid", None)
-        self._apply_strategy_control(sid, mode, accounting_field)
+        self._apply_strategy_control(sid, mode, accounting_field,
+                                     risk_state=risk_state, execution_mode=execution_mode)
 
     def do_DELETE(self):
         path = urlparse(self.path).path

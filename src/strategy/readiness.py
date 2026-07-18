@@ -75,18 +75,26 @@ def build_strategy_execution_readiness(record: dict) -> dict:
     strategy = record.get("strategy_config") or {}
     # Runtime override from control-state.json (set_strategy_override / dashboard UI).
     # Checked live per-signal so no restart is needed when the operator changes mode.
-    # An override carries BOTH execution_mode and submit_orders (see _STRATEGY_MODE_FLAGS).
+    # Split control model: an override carries execution_mode (ACCOUNT) and/or
+    # risk_state (RISK) -- two independent axes (load_control_state migrates legacy
+    # pause/submit_orders entries to this shape).
     _cs_ov = strategy_override(record.get("strategy_id") or (strategy or {}).get("strategy_id"))
     # execution_mode is operative: ``sandbox`` is True for demo and False ONLY for live.
     # The resolved ``simulated_trading`` (= sandbox) and the ``execution_mode`` flow into
     # readiness so the ExecutionService gate can require HERMX_LIVE_TRADING for live
     # submissions and the adapter sandboxes accordingly.
     execution_mode = effective_execution_mode(strategy, override=_cs_ov)
+    # risk_state rides alongside the account: "reduce" blocks opens/reversals at the
+    # ExecutionService gate (strategy_risk_state) while closes always pass. It never
+    # rewrites execution_mode, so a paused live strategy still closes on the live venue.
+    risk_state = "reduce" if str(_cs_ov.get("risk_state") or "").lower() == "reduce" else "active"
     # submit_orders gates actual submission. Absent in the file -> default True (the
-    # historical "submit" posture); Pause sets it False (validate+ledger, no order).
+    # historical "submit" posture); file-level False still disarms (validate+ledger).
+    # An explicit ACCOUNT override ("go trade demo/live") supersedes the file's
+    # legacy disarm flag -- same arming the pre-split demo/live overrides carried.
     submit_orders = bool((strategy or {}).get("submit_orders", True))
-    if "submit_orders" in _cs_ov:
-        submit_orders = bool(_cs_ov["submit_orders"])
+    if _cs_ov.get("execution_mode"):
+        submit_orders = True
     sandbox = (execution_mode != "live")  # demo -> True; live -> False
     # submit_orders is the submission gate: Pause -> False (no orders to either venue);
     # Demo/Live -> True. execution_mode then decides sandbox vs real account.
@@ -173,6 +181,7 @@ def build_strategy_execution_readiness(record: dict) -> dict:
         "mode": "strategy_file_live_order_enabled" if live_allowed else "strategy_file_trial_no_order",
         "live_execution_enabled": live_allowed,
         "execution_mode": execution_mode,
+        "risk_state": risk_state,
         "simulated_trading": sandbox,
         "execution_policy": f"strategy_file:{normalized.get('strategy_id')}",
         "execution_policy_label": strategy.get("name") or normalized.get("strategy_id"),

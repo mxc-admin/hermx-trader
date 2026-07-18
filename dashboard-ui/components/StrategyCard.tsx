@@ -4,7 +4,7 @@ import { useState, useCallback } from 'react'
 import type { Strategy, LivePosition, PnlPoint, StrategyOverride } from '../lib/types'
 import { age, money, num, pct, sideColor, sideKind } from '../lib/format'
 import { Badge } from './Badge'
-import { setStrategyMode } from '../lib/api'
+import { setStrategyAccount, setStrategyRisk } from '../lib/api'
 
 interface StrategyCardProps {
   strategy: Strategy
@@ -14,31 +14,37 @@ interface StrategyCardProps {
   onModeChange?: () => void
 }
 
-const MODES = ['pause', 'demo', 'live'] as const
-type Mode = typeof MODES[number]
+// Split control model: two INDEPENDENT per-strategy axes. Risk (active|reduce)
+// blocks opens/reversals at the execution gate — closes always pass — and never
+// rewrites the account; Account (demo|live) selects sandbox vs real venue.
+type RiskState = 'active' | 'reduce'
+type Account = 'demo' | 'live'
 
-function ModePill({
+interface SegmentedOption<T extends string> {
+  value: T
+  label: string
+  color: string
+  locked?: boolean
+  lockLabel?: string
+}
+
+function SegmentedControl<T extends string>({
+  groupLabel,
+  options,
   current,
-  liveEnabled,
   onSelect,
   pending,
 }: {
-  current: Mode
-  liveEnabled: boolean
-  onSelect: (m: Mode) => void
+  groupLabel: string
+  options: SegmentedOption<T>[]
+  current: T
+  onSelect: (v: T) => void
   pending: boolean
 }) {
-  const modeLabel: Record<Mode, string> = { pause: 'Pause', demo: 'Demo', live: 'Live' }
-  const modeColor: Record<Mode, string> = {
-    pause: 'var(--text-muted)',
-    demo: 'var(--text-primary)',
-    live: 'var(--positive)',
-  }
-
   return (
     <div
       role="group"
-      aria-label="Trading mode"
+      aria-label={groupLabel}
       style={{
         display: 'inline-flex',
         border: '1px solid var(--border-dim)',
@@ -49,28 +55,25 @@ function ModePill({
         flexShrink: 0,
       }}
     >
-      {MODES.map((m) => {
-        const isActive = current === m
-        const isLocked = m === 'live' && !liveEnabled
+      {options.map((opt, i) => {
+        const isActive = current === opt.value
         return (
           <button
-            key={m}
-            title={isLocked ? 'Requires HERMX_LIVE_TRADING=true' : undefined}
-            aria-label={
-              isLocked ? 'Live mode — requires HERMX_LIVE_TRADING=true' : undefined
-            }
+            key={opt.value}
+            title={opt.locked ? 'Requires HERMX_LIVE_TRADING=true' : undefined}
+            aria-label={opt.locked ? opt.lockLabel : undefined}
             aria-pressed={isActive}
-            disabled={isLocked || pending}
-            onClick={() => !isLocked && onSelect(m)}
+            disabled={opt.locked || pending}
+            onClick={() => !opt.locked && onSelect(opt.value)}
             style={{
               padding: '8px 14px',
               fontSize: 13,
               fontWeight: isActive ? 700 : 400,
               background: isActive ? 'var(--bg-hover, rgba(255,255,255,0.08))' : 'transparent',
-              color: isActive ? modeColor[m] : isLocked ? 'var(--text-muted)' : 'var(--text-secondary)',
+              color: isActive ? opt.color : opt.locked ? 'var(--text-muted)' : 'var(--text-secondary)',
               border: 'none',
-              borderLeft: m !== 'pause' ? '1px solid var(--border-dim)' : 'none',
-              cursor: isLocked ? 'not-allowed' : 'pointer',
+              borderLeft: i !== 0 ? '1px solid var(--border-dim)' : 'none',
+              cursor: opt.locked ? 'not-allowed' : 'pointer',
               display: 'inline-flex',
               alignItems: 'center',
               gap: 4,
@@ -78,8 +81,8 @@ function ModePill({
               transition: 'background 0.15s',
             }}
           >
-            {isLocked && <span aria-hidden="true" style={{ fontSize: 12 }}>🔒</span>}
-            {modeLabel[m]}
+            {opt.locked && <span aria-hidden="true" style={{ fontSize: 12 }}>🔒</span>}
+            {opt.label}
           </button>
         )
       })}
@@ -92,7 +95,17 @@ export function StrategyCard({ strategy, position, liveEnabled, override, onMode
   const side = (position?.side ?? 'FLAT').toUpperCase()
   const isLive = side !== 'FLAT'
 
-  const effectiveMode = (strategy.effective_mode ?? 'demo') as Mode
+  const effectiveMode = strategy.effective_mode ?? 'demo'
+  // Risk posture: the override's risk_state; legacy "pause" display maps to reduce.
+  const riskState: RiskState =
+    override?.risk_state === 'reduce' || (!override?.risk_state && effectiveMode === 'pause')
+      ? 'reduce'
+      : 'active'
+  // Account: execution_mode-honest (okx_account_source), never the "pause" display.
+  const account: Account =
+    (override?.execution_mode ?? strategy.okx_account_source ?? strategy.execution_mode) === 'live'
+      ? 'live'
+      : 'demo'
   const [pending, setPending] = useState(false)
   const [modeError, setModeError] = useState<string | null>(null)
 
@@ -136,30 +149,12 @@ export function StrategyCard({ strategy, position, liveEnabled, override, onMode
   const uplColor =
     upl > 0 ? 'var(--positive)' : upl < 0 ? 'var(--negative)' : 'var(--text-muted)'
 
-  const handleModeChange = useCallback(
-    async (mode: Mode) => {
-      if (!strategy.strategy_id) return
-      if (
-        mode === 'live' &&
-        effectiveMode !== 'live' &&
-        !window.confirm(`Switch ${sym} to LIVE? Real-money orders will be submitted.`)
-      ) {
-        return
-      }
-      if (
-        mode === 'pause' &&
-        effectiveMode !== 'pause' &&
-        isLive &&
-        !window.confirm(
-          `${sym} has an open position. Pause stops new orders but does NOT close it. Continue?`,
-        )
-      ) {
-        return
-      }
+  const submitControl = useCallback(
+    async (mutate: () => Promise<void>) => {
       setPending(true)
       setModeError(null)
       try {
-        await setStrategyMode(strategy.strategy_id, mode)
+        await mutate()
         onModeChange?.()
       } catch (e) {
         setModeError((e as Error).message)
@@ -167,7 +162,47 @@ export function StrategyCard({ strategy, position, liveEnabled, override, onMode
         setPending(false)
       }
     },
-    [strategy.strategy_id, effectiveMode, isLive, sym, onModeChange],
+    [onModeChange],
+  )
+
+  const handleRiskChange = useCallback(
+    (next: RiskState) => {
+      if (!strategy.strategy_id || next === riskState) return
+      if (
+        next === 'reduce' &&
+        isLive &&
+        !window.confirm(
+          `${sym} has an open position. Reduce blocks new orders but does NOT close it (closes still pass). Continue?`,
+        )
+      ) {
+        return
+      }
+      void submitControl(() => setStrategyRisk(strategy.strategy_id!, next))
+    },
+    [strategy.strategy_id, riskState, isLive, sym, submitControl],
+  )
+
+  const handleAccountChange = useCallback(
+    (next: Account) => {
+      if (!strategy.strategy_id || next === account) return
+      if (
+        next === 'live' &&
+        !window.confirm(`Switch ${sym} to the LIVE account? Real-money orders will be submitted.`)
+      ) {
+        return
+      }
+      // An account flip never moves an existing position between venues.
+      if (
+        isLive &&
+        !window.confirm(
+          `${sym} has an open position on the ${account.toUpperCase()} account. Switching to ${next.toUpperCase()} does NOT move or close it. Continue?`,
+        )
+      ) {
+        return
+      }
+      void submitControl(() => setStrategyAccount(strategy.strategy_id!, next))
+    },
+    [strategy.strategy_id, account, isLive, sym, submitControl],
   )
 
   // Card shell uses the shared .panel class (background + border + radius).
@@ -208,11 +243,31 @@ export function StrategyCard({ strategy, position, liveEnabled, override, onMode
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          <ModePill
-            current={effectiveMode}
-            liveEnabled={liveEnabled}
-            onSelect={handleModeChange}
+          <SegmentedControl<Account>
+            groupLabel="Account"
+            current={account}
+            onSelect={handleAccountChange}
             pending={pending}
+            options={[
+              { value: 'demo', label: 'Demo', color: 'var(--text-primary)' },
+              {
+                value: 'live',
+                label: 'Live',
+                color: 'var(--positive)',
+                locked: !liveEnabled,
+                lockLabel: 'Live account — requires HERMX_LIVE_TRADING=true',
+              },
+            ]}
+          />
+          <SegmentedControl<RiskState>
+            groupLabel="Risk state"
+            current={riskState}
+            onSelect={handleRiskChange}
+            pending={pending}
+            options={[
+              { value: 'active', label: 'Active', color: 'var(--text-primary)' },
+              { value: 'reduce', label: 'Reduce', color: 'var(--warning, #e2b93d)' },
+            ]}
           />
           {isLive ? (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
@@ -231,7 +286,7 @@ export function StrategyCard({ strategy, position, liveEnabled, override, onMode
       )}
 
       {/* Live-override provenance: when the operator armed this strategy. */}
-      {effectiveMode === 'live' && override?.set_at && (
+      {account === 'live' && override?.set_at && (
         <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0, textAlign: 'right' }}>
           live since {age(override.set_at)}
         </p>

@@ -54,6 +54,7 @@ __all__ = [
     "_alerts_rows",
     "_build_dashboard_model",
     "_dashboard_executor",
+    "_effective_strategy_account",
     "_effective_strategy_mode",
     "_executor_venue_mode",
     "_ledger_net_realized",
@@ -300,30 +301,57 @@ def is_strategy_active(strategy) -> bool:
 
 
 _VALID_STRATEGY_MODES = frozenset({"pause", "demo", "live"})
-# Flag mapping must stay in sync with webhook_receiver._STRATEGY_MODE_FLAGS.
-# ``submit_orders`` gates submission (pause = off); ``execution_mode`` selects the
-# account (demo sandbox vs live real).
-_STRATEGY_MODE_FLAGS = {
-    "pause": {"execution_mode": "demo", "submit_orders": False},
-    "demo":  {"execution_mode": "demo", "submit_orders": True},
-    "live":  {"execution_mode": "live", "submit_orders": True},
-}
 # Legacy UI-mode label remap: old control-state.json may carry "shadow" or "paper".
 # "shadow" was the old pause concept (validate+ledger, no orders) -> "pause";
 # "paper" was the sandbox-submit concept -> "demo".
 _LEGACY_STRATEGY_MODE_ALIASES = {"shadow": "pause", "paper": "demo"}
+# Split control model (must stay in sync with control_state.py -- the receiver-side
+# writer of the SAME control-state.json): execution_mode (ACCOUNT, demo|live) is
+# written only by account controls; risk_state (active|reduce) only by risk controls.
+# "pause" maps to risk_state=reduce and leaves execution_mode untouched, so pausing
+# a live strategy can never lie its closes onto the demo venue.
+_VALID_EXECUTION_ACCOUNTS = frozenset({"demo", "live"})
+_VALID_RISK_STATES = frozenset({"active", "reduce"})
+
+
+def _migrate_strategy_override(entry: dict) -> dict:
+    """Normalize one override entry to the split model, in place. MIRROR of
+    control_state._migrate_strategy_override -- dual-writer sync: legacy labels
+    remap; pause/shadow -> risk_state=reduce keeping the stored execution_mode
+    (pre-split pause forced demo; unrecoverable, kept fail-safe); demo/live ->
+    risk_state=active; submit_orders dropped (the risk gate replaces it); display
+    ``mode`` recomputed (reduce -> pause, else the account). Never arms."""
+    mode = entry.get("mode")
+    mode = _LEGACY_STRATEGY_MODE_ALIASES.get(mode, mode)
+    risk = str(entry.get("risk_state") or "").lower()
+    if risk not in _VALID_RISK_STATES:
+        risk = "reduce" if mode == "pause" else "active"
+    acct = str(entry.get("execution_mode") or "").lower()
+    if acct not in _VALID_EXECUTION_ACCOUNTS:
+        acct = mode if mode in _VALID_EXECUTION_ACCOUNTS else ""
+    entry.pop("submit_orders", None)
+    entry["risk_state"] = risk
+    if acct:
+        entry["execution_mode"] = acct
+    else:
+        entry.pop("execution_mode", None)
+    if risk == "reduce":
+        entry["mode"] = "pause"
+    elif acct:
+        entry["mode"] = acct
+    else:
+        entry.pop("mode", None)
+    return entry
 
 
 def _normalize_override_modes(overrides: dict) -> dict:
-    """Remap legacy override 'mode' labels (shadow -> pause, paper -> demo) in-place.
-    Only the display label is touched; execution_mode/submit_orders flags are left as-is."""
+    """Normalize every override entry to the split model in-place (legacy label
+    remap + risk_state/execution_mode migration)."""
     if not isinstance(overrides, dict):
         return overrides
     for entry in overrides.values():
         if isinstance(entry, dict):
-            alias = _LEGACY_STRATEGY_MODE_ALIASES.get(entry.get("mode"))
-            if alias:
-                entry["mode"] = alias
+            _migrate_strategy_override(entry)
     return overrides
 
 
@@ -365,21 +393,58 @@ def _save_control_state(state: dict) -> None:
                 pass
 
 
-def _set_strategy_override(strategy_id: str, mode: str) -> bool:
-    """Set a per-strategy execution-mode override. Read-modify-write of control-state.
-    Mirrors webhook_receiver.set_strategy_override (same flag mapping + entry shape)."""
+def _mutate_strategy_override(strategy_id: str, mutate) -> bool:
+    """Shared read-modify-write for one override entry (mirror of
+    control_state._mutate_strategy_override -- dual-writer sync): load, apply
+    ``mutate`` to a copy of the existing entry so unrelated axes are preserved,
+    re-normalize, stamp set_at, save."""
     sid = str(strategy_id or "").strip()
-    mode = str(mode or "").strip().lower()
-    if not sid or mode not in _VALID_STRATEGY_MODES:
+    if not sid:
         return False
     now = datetime.now(timezone.utc).isoformat()
     state = _load_control_state()
     overrides = state.get("strategy_overrides") if isinstance(state.get("strategy_overrides"), dict) else {}
-    overrides[sid] = {"mode": mode, **_STRATEGY_MODE_FLAGS[mode], "set_at": now}
+    entry = dict(overrides.get(sid)) if isinstance(overrides.get(sid), dict) else {}
+    mutate(entry)
+    entry["set_at"] = now
+    _migrate_strategy_override(entry)
+    overrides[sid] = entry
     state["strategy_overrides"] = overrides
     state["updated_at"] = now
     _save_control_state(state)
     return True
+
+
+def _set_strategy_account(strategy_id: str, account: str) -> bool:
+    """Set the strategy's ACCOUNT override ('demo'|'live'). Never touches risk_state.
+    Mirrors control_state.set_strategy_account."""
+    account = str(account or "").strip().lower()
+    if account not in _VALID_EXECUTION_ACCOUNTS:
+        return False
+    return _mutate_strategy_override(strategy_id, lambda e: e.update(execution_mode=account))
+
+
+def _set_strategy_risk(strategy_id: str, risk: str) -> bool:
+    """Set the strategy's RISK posture override ('active'|'reduce'). Never touches
+    execution_mode. Mirrors control_state.set_strategy_risk."""
+    risk = str(risk or "").strip().lower()
+    if risk not in _VALID_RISK_STATES:
+        return False
+    return _mutate_strategy_override(strategy_id, lambda e: e.update(risk_state=risk))
+
+
+def _set_strategy_override(strategy_id: str, mode: str) -> bool:
+    """Transitional 3-mode compat writer with split semantics (mirrors
+    control_state.set_strategy_override): 'pause' -> risk_state=reduce with
+    execution_mode UNTOUCHED; 'demo'/'live' -> execution_mode set + risk_state=active."""
+    sid = str(strategy_id or "").strip()
+    mode = str(mode or "").strip().lower()
+    mode = _LEGACY_STRATEGY_MODE_ALIASES.get(mode, mode)
+    if not sid or mode not in _VALID_STRATEGY_MODES:
+        return False
+    if mode == "pause":
+        return _set_strategy_risk(sid, "reduce")
+    return _mutate_strategy_override(sid, lambda e: e.update(execution_mode=mode, risk_state="active"))
 
 
 def _clear_strategy_override(strategy_id: str) -> bool:
@@ -556,6 +621,7 @@ from dashboard.model import (  # noqa: E402  re-export shim
     dashboard_model,
     _build_dashboard_model,
     _effective_strategy_mode,
+    _effective_strategy_account,
     _strategy_pnl_contract,
     _ledger_net_realized,
     portfolio_contract,

@@ -383,8 +383,9 @@ def _active_env_keys(strategies, overrides):
     keys = []
     for s in _dash.active_strategies(strategies):
         venue = _dash._strategy_venue(s)
-        mode = _dash._effective_strategy_mode(s, overrides)
-        key = f"{venue}:{'live' if mode == 'live' else 'demo'}"
+        # Account-honest env: a risk-reduced ("pause"-displayed) live strategy still
+        # trades/settles on the LIVE account, so its env must be venue:live.
+        key = f"{venue}:{_dash._effective_strategy_account(s, overrides)}"
         if key not in keys:
             keys.append(key)
     return keys
@@ -597,17 +598,38 @@ def _build_dashboard_model() -> DashboardModel:
 
 
 def _effective_strategy_mode(strategy: dict, overrides: dict) -> str:
-    """Resolve a strategy's effective UI mode (pause/demo/live).
+    """Resolve a strategy's effective UI mode (pause/demo/live) -- DISPLAY only.
 
-    An override (control-state.json) wins; otherwise derive from the strategy file:
-    ``submit_orders`` explicitly False -> "pause", else ``execution_mode``."""
+    An override (control-state.json) wins: risk_state=reduce shows "pause", else
+    the override's account/label. Otherwise derive from the strategy file:
+    ``submit_orders`` explicitly False -> "pause", else ``execution_mode``.
+    Account-scoped reads (which venue account to query) must use
+    _effective_strategy_account instead -- "pause" is not an account."""
     sid = (strategy or {}).get("strategy_id") or ""
     ov = (overrides or {}).get(sid)
-    if isinstance(ov, dict) and ov.get("mode"):
-        return str(ov["mode"]).lower()
+    if isinstance(ov, dict):
+        if str(ov.get("risk_state") or "").lower() == "reduce":
+            return "pause"
+        if ov.get("mode"):
+            return str(ov["mode"]).lower()
+        if ov.get("execution_mode"):
+            return str(ov["execution_mode"]).lower()
     if (strategy or {}).get("submit_orders") is False:
         return "pause"
     return str((strategy or {}).get("execution_mode") or "demo").lower()
+
+
+def _effective_strategy_account(strategy: dict, overrides: dict) -> str:
+    """Resolve a strategy's operative ACCOUNT ("demo"|"live"): the override's
+    execution_mode if set, else the file's. Split control model: risk actions never
+    rewrite the account, so a risk-reduced live strategy still reads (and closes on)
+    the LIVE venue account. Mirrors strategy.readiness.effective_execution_mode."""
+    sid = (strategy or {}).get("strategy_id") or ""
+    ov = (overrides or {}).get(sid)
+    mode = str((strategy or {}).get("execution_mode") or "demo").lower()
+    if isinstance(ov, dict) and ov.get("execution_mode"):
+        mode = str(ov["execution_mode"]).lower()
+    return "live" if mode == "live" else "demo"
 
 
 def _strategy_pnl_contract(strategy, accounting_start_at, by_env, by_mode) -> StrategyPnlContract:
@@ -626,7 +648,10 @@ def _strategy_pnl_contract(strategy, accounting_start_at, by_env, by_mode) -> St
     import dashboard as _dash
     sid = strategy.get("strategy_id")
     venue = _dash._strategy_venue(strategy)
-    mode = (strategy.get("effective_mode") or strategy.get("execution_mode") or "demo").lower()
+    # Account-scoped: prefer the annotated okx_account_source (execution_mode-honest;
+    # a risk-reduced live strategy stays "live") over the display effective_mode.
+    mode = (strategy.get("okx_account_source") or strategy.get("effective_mode")
+            or strategy.get("execution_mode") or "demo").lower()
     mode_key = "live" if mode == "live" else "demo"  # ledger mode column is demo|live
     budget = _dash.as_float((strategy.get("capital") or {}).get("budget_usd") or strategy.get("budget_usd")) or 0.0
     # Open UPnL from the strategy's own environment snapshot (Phase 0.5 per-env read).
@@ -872,8 +897,10 @@ def api_payload():
         s["effective_mode"] = _dash._effective_strategy_mode(s, _overrides)
         # Phase 0.5: this strategy's own environment -- venue + which account (demo/live)
         # its positions are read from. The React UI keys per-strategy reads off these.
+        # Account-honest: derived from execution_mode (never the "pause" display mode),
+        # so a risk-reduced live strategy keeps reading the live account.
         s["venue"] = _dash._strategy_venue(s)
-        s["okx_account_source"] = "live" if s["effective_mode"] == "live" else "demo"
+        s["okx_account_source"] = _dash._effective_strategy_account(s, _overrides)
         s["env_key"] = f"{s['venue']}:{s['okx_account_source']}"
         # Phase 3: accounting window + ledger-backed P&L contract (additive; the React
         # UI adopts it in Phase 4). closed_* come from the durable ledger scoped to the

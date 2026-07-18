@@ -104,6 +104,36 @@ export async function setStrategyMode(
   )
 }
 
+/** Split control model: set the per-strategy RISK posture. "reduce" blocks
+ * opens/reversals at the execution gate; closes always pass. Never touches
+ * the account (execution_mode). */
+export async function setStrategyRisk(
+  strategyId: string,
+  riskState: 'active' | 'reduce',
+): Promise<void> {
+  return mutateJson(
+    'setStrategyRisk',
+    `/api/control/strategy/${encodeURIComponent(strategyId)}`,
+    'POST',
+    { risk_state: riskState },
+  )
+}
+
+/** Split control model: set the per-strategy ACCOUNT (demo sandbox vs live
+ * venue). Never touches the risk posture. Live requires HERMX_LIVE_TRADING
+ * server-side (403 otherwise). */
+export async function setStrategyAccount(
+  strategyId: string,
+  executionMode: 'demo' | 'live',
+): Promise<void> {
+  return mutateJson(
+    'setStrategyAccount',
+    `/api/control/strategy/${encodeURIComponent(strategyId)}`,
+    'POST',
+    { execution_mode: executionMode },
+  )
+}
+
 /** Enter the global reduce-only emergency state (closes always pass). */
 export async function setTradingState(state: 'active' | 'reducing'): Promise<void> {
   return mutateJson('setTradingState', '/api/control/trading-state', 'POST', { state })

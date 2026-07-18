@@ -17,16 +17,17 @@ dashboard tests reload dashboard/dashboard_core against their own temp root and
 exercise the real Handler over a loopback ThreadingHTTPServer on an ephemeral
 port. No network, no exchange, nothing can arm a real submission.
 
-Flag mapping under test (must stay identical in both modules):
-    pause -> {execution_mode: demo, submit_orders: False}
-    demo  -> {execution_mode: demo, submit_orders: True}
-    live  -> {execution_mode: live, submit_orders: True}
+Split-model mapping under test (must stay identical in both modules):
+    pause -> {risk_state: reduce} -- execution_mode UNTOUCHED (account never lied)
+    demo  -> {execution_mode: demo, risk_state: active}
+    live  -> {execution_mode: live, risk_state: active}
 
-``submit_orders`` is the submission gate: Pause validates+ledgers but submits NO
-order to either venue; Demo and Live both submit, and ``execution_mode`` selects the
-sandbox vs the real account. The legacy UI labels are accepted and normalized for
-backward compatibility with control-state.json written before the rename: "shadow"
-was the old pause concept -> "pause"; "paper" was the sandbox-submit concept -> "demo".
+``risk_state=reduce`` blocks opens/reversals at the ExecutionService gate
+(strategy_risk_state) while close_only submissions always pass; ``execution_mode``
+selects the sandbox vs the real account and is only ever written by account
+controls. The legacy UI labels are accepted and normalized for backward
+compatibility with control-state.json written before the rename: "shadow" was the
+old pause concept -> "pause" (risk reduce); "paper" -> "demo".
 """
 from __future__ import annotations
 
@@ -89,9 +90,11 @@ def _strategy_record(strategy_id: str, *, execution_mode: str, submit_orders: bo
 @pytest.mark.parametrize(
     "mode,expected",
     [
-        ("pause", {"execution_mode": "demo", "submit_orders": False}),
-        ("demo", {"execution_mode": "demo", "submit_orders": True}),
-        ("live", {"execution_mode": "live", "submit_orders": True}),
+        # pause is a RISK action: risk_state=reduce, execution_mode untouched (absent
+        # here because no prior account override exists -- the file value governs).
+        ("pause", {"execution_mode": None, "risk_state": "reduce"}),
+        ("demo", {"execution_mode": "demo", "risk_state": "active"}),
+        ("live", {"execution_mode": "live", "risk_state": "active"}),
     ],
 )
 def test_set_strategy_override_roundtrip(wr, mode, expected):
@@ -99,9 +102,10 @@ def test_set_strategy_override_roundtrip(wr, mode, expected):
 
     entry = _read_control_state(wr)["strategy_overrides"]["strat-A"]
     assert entry["mode"] == mode
-    assert entry["execution_mode"] == expected["execution_mode"]
-    # 3-mode model stores BOTH the account (execution_mode) and the submission gate.
-    assert entry["submit_orders"] == expected["submit_orders"]
+    assert entry.get("execution_mode") == expected["execution_mode"]
+    assert entry["risk_state"] == expected["risk_state"]
+    # Retired submission gate: the risk gate replaced submit_orders in overrides.
+    assert "submit_orders" not in entry
     assert "set_at" in entry  # timestamped for the operator UI
 
 
@@ -163,11 +167,15 @@ def test_load_control_state_missing_field_defaults_to_empty(wr):
     assert wr.load_control_state()["strategy_overrides"] == {}
 
 
-@pytest.mark.parametrize("legacy,expected", [("shadow", "pause"), ("pause", "pause"), ("paper", "demo")])
-def test_load_control_state_remaps_legacy_label(wr, legacy, expected):
+@pytest.mark.parametrize(
+    "legacy,expected,expected_risk",
+    [("shadow", "pause", "reduce"), ("pause", "pause", "reduce"), ("paper", "demo", "active")],
+)
+def test_load_control_state_remaps_legacy_label(wr, legacy, expected, expected_risk):
     # Backward compat: a control-state.json written before the rename may carry a
-    # legacy "mode". On load the label normalizes: shadow -> pause, paper -> demo,
-    # pause stays pause. Only the display label is touched, not execution_mode.
+    # legacy "mode". On load the entry migrates to the split model: shadow/pause ->
+    # risk_state=reduce, paper -> demo+active. The stored execution_mode is KEPT
+    # (a pre-split pause forced demo; unrecoverable, kept fail-safe).
     state = wr.default_control_state()
     state["strategy_overrides"] = {
         "strat-A": {"mode": legacy, "execution_mode": "demo", "set_at": "x"},
@@ -177,23 +185,26 @@ def test_load_control_state_remaps_legacy_label(wr, legacy, expected):
     entry = wr.load_control_state()["strategy_overrides"]["strat-A"]
     assert entry["mode"] == expected
     assert entry["execution_mode"] == "demo"
+    assert entry["risk_state"] == expected_risk
 
 
 @pytest.mark.parametrize(
-    "legacy,expected_mode,expected_flags",
+    "legacy,expected_mode,expected_entry",
     [
-        ("shadow", "pause", {"execution_mode": "demo", "submit_orders": False}),
-        ("paper", "demo", {"execution_mode": "demo", "submit_orders": True}),
+        # shadow -> pause: a risk action -- no account is written (file governs).
+        ("shadow", "pause", {"execution_mode": None, "risk_state": "reduce"}),
+        ("paper", "demo", {"execution_mode": "demo", "risk_state": "active"}),
     ],
 )
-def test_set_strategy_override_accepts_legacy_label(wr, legacy, expected_mode, expected_flags):
-    # Legacy input labels normalize on write: shadow -> pause, paper -> demo, and the
-    # corresponding execution_mode/submit_orders flags are stored.
+def test_set_strategy_override_accepts_legacy_label(wr, legacy, expected_mode, expected_entry):
+    # Legacy input labels normalize on write: shadow -> pause, paper -> demo, with
+    # split-model semantics (pause = risk reduce, account untouched).
     assert wr.set_strategy_override("strat-A", legacy) is True
     entry = _read_control_state(wr)["strategy_overrides"]["strat-A"]
     assert entry["mode"] == expected_mode
-    assert entry["execution_mode"] == expected_flags["execution_mode"]
-    assert entry["submit_orders"] == expected_flags["submit_orders"]
+    assert entry.get("execution_mode") == expected_entry["execution_mode"]
+    assert entry["risk_state"] == expected_entry["risk_state"]
+    assert "submit_orders" not in entry
 
 
 # ===========================================================================
@@ -234,14 +245,17 @@ def test_readiness_demo_override_downgrades_live_file(wr):
     assert rd["live_execution_enabled"] is True
 
 
-def test_readiness_pause_override_disables_submission(wr):
-    # File says demo + submit; pause override -> demo account, submission OFF.
+def test_readiness_pause_override_sets_risk_reduce_not_disarm(wr):
+    # Split model: pause is a RISK action. The account stays the file's (demo),
+    # submission stays ARMED (closes must pass), and risk_state=reduce is baked so
+    # the ExecutionService gate blocks the open, not the arming flag.
     wr.set_strategy_override("strat-A", "pause")
     rd = wr.build_strategy_execution_readiness(
         _strategy_record("strat-A", execution_mode="demo", submit_orders=True)
     )
     assert rd["execution_mode"] == "demo"
-    assert rd["live_execution_enabled"] is False
+    assert rd["live_execution_enabled"] is True
+    assert rd["risk_state"] == "reduce"
     assert rd["simulated_trading"] is True
 
 
@@ -541,6 +555,73 @@ def test_api_payload_remaps_legacy_shadow_override_to_pause(dash):
     row = next(s for s in payload["strategies"] if s["strategy_id"] == "dash-demo")
     assert row["effective_mode"] == "pause"
     assert payload["strategy_overrides"]["dash-demo"]["mode"] == "pause"
+
+
+# ===========================================================================
+# Section 3b — split-model fields on the dashboard endpoint (dual-writer parity)
+# ===========================================================================
+
+def test_post_risk_state_reduce_writes_risk_only(dash):
+    dash_mod, _strategies_dir, _root = dash
+    with _serve(dash_mod) as port:
+        status, data = _request(port, "POST", "/api/control/strategy/dash-demo",
+                                 body={"risk_state": "reduce"})
+    assert status == 200
+    assert json.loads(data)["risk_state"] == "reduce"
+    entry = dash_mod._load_control_state()["strategy_overrides"]["dash-demo"]
+    assert entry["risk_state"] == "reduce"
+    assert "execution_mode" not in entry  # risk action never writes the account
+
+
+def test_post_pause_mode_preserves_prior_live_account(dash, monkeypatch):
+    # Dashboard-writer variant of the landmine: pause must not demote live -> demo.
+    dash_mod, _strategies_dir, _root = dash
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "true")
+    with _serve(dash_mod) as port:
+        status, _ = _request(port, "POST", "/api/control/strategy/dash-demo",
+                             body={"mode": "live"})
+        assert status == 200
+        status, _ = _request(port, "POST", "/api/control/strategy/dash-demo",
+                             body={"mode": "pause"})
+        assert status == 200
+    entry = dash_mod._load_control_state()["strategy_overrides"]["dash-demo"]
+    assert entry["execution_mode"] == "live"
+    assert entry["risk_state"] == "reduce"
+    assert entry["mode"] == "pause"
+
+
+def test_post_execution_mode_live_locked_when_kill_switch_off(dash, monkeypatch):
+    dash_mod, _strategies_dir, _root = dash
+    monkeypatch.delenv("HERMX_LIVE_TRADING", raising=False)
+    with _serve(dash_mod) as port:
+        status, data = _request(port, "POST", "/api/control/strategy/dash-demo",
+                                 body={"execution_mode": "live"})
+    assert status == 403
+    assert "HERMX_LIVE_TRADING" in json.loads(data)["error"]
+    assert dash_mod._load_control_state().get("strategy_overrides", {}) == {}
+
+
+def test_post_execution_mode_and_risk_state_together(dash, monkeypatch):
+    dash_mod, _strategies_dir, _root = dash
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "true")
+    with _serve(dash_mod) as port:
+        status, data = _request(port, "POST", "/api/control/strategy/dash-demo",
+                                 body={"execution_mode": "live", "risk_state": "reduce"})
+    assert status == 200
+    resp = json.loads(data)
+    assert resp["execution_mode"] == "live"
+    assert resp["risk_state"] == "reduce"
+    entry = dash_mod._load_control_state()["strategy_overrides"]["dash-demo"]
+    assert (entry["execution_mode"], entry["risk_state"]) == ("live", "reduce")
+
+
+def test_post_invalid_risk_state_returns_400(dash):
+    dash_mod, _strategies_dir, _root = dash
+    with _serve(dash_mod) as port:
+        status, _ = _request(port, "POST", "/api/control/strategy/dash-demo",
+                             body={"risk_state": "bogus"})
+    assert status == 400
+    assert dash_mod._load_control_state().get("strategy_overrides", {}) == {}
 
 
 # ===========================================================================
