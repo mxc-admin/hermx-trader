@@ -11,8 +11,10 @@ It does NOT re-implement the reconcile. The dashboard's ``dashboard_model()`` al
 iterates the DISTINCT ``(venue, mode)`` pairs across the strategy set (Phase 0.5) and
 calls ``pnl_ledger.reconcile_from_order_history(rows, venue, mode)`` for each — venue
 and mode correct, never the OKX-demo literal (#20 / #20a). So this job simply GETs the
-dashboard ``/api`` route, which builds the model and drives that reconcile as a side
-effect. Reusing the shipped, tested feed avoids duplicating executor/credential
+dashboard ``/api`` route: the GET serves the cached model and stamps viewer presence,
+and the dashboard's background loop then rebuilds the model (driving that reconcile)
+within one active tick (~15s) while the stamp is fresh — else within the idle rebuild
+interval. Reusing the shipped, tested feed avoids duplicating executor/credential
 handling in a cron and keeps the (venue, mode) resolution in exactly one place.
 
 This is the LEDGER reconcile — distinct from, and NOT gated by, the receiver's
@@ -37,9 +39,10 @@ import hermx_gate_lib as g  # noqa: E402
 def main() -> int:
     ops = g.import_hermx_ops()
     secret = ops._load_secret()
-    # GET /api forces dashboard_model() to rebuild, which reconciles every distinct
-    # (venue, mode) account's order history into the ledger. The MODEL_CACHE TTL means
-    # a build within the last few seconds is reused — harmless for a periodic cron.
+    # GET /api stamps presence; the dashboard's refresh loop rebuilds within one
+    # active tick (~15s) while the stamp is fresh, reconciling every distinct
+    # (venue, mode) account's order history into the ledger. The GET itself only
+    # serves the cached model — harmless for a periodic cron.
     api, err = ops._get_json(ops.DASHBOARD_BASE, "/api", secret=secret)
     if not isinstance(api, dict):
         # Fail-open: an unreachable/again-later dashboard is the health watchdog's

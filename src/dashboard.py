@@ -200,6 +200,12 @@ _MODEL_CACHE = {"expires_at": 0.0, "model": None}
 # Single-flight lock: serializes cold synchronous builds (first /api request)
 # with the background refresh loop so only one thread pays the ~15s build cost.
 _MODEL_BUILD_LOCK = threading.Lock()
+# Presence stamp: epoch seconds of the last authenticated model-serving /api GET
+# (0.0 = never). The refresh loop rebuilds every tick while the stamp is fresher
+# than ACTIVE_WINDOW_SECONDS, else backs off to one build per IDLE_REBUILD_SECONDS.
+_LAST_API_HIT = 0.0
+ACTIVE_WINDOW_SECONDS = float(os.environ.get("HERMX_DASHBOARD_ACTIVE_WINDOW_SECONDS") or 90)
+IDLE_REBUILD_SECONDS = float(os.environ.get("HERMX_DASHBOARD_IDLE_REBUILD_SECONDS") or 300)
 OKX_LIVE_CACHE_TTL_SECONDS = 5
 _OKX_LIVE_CACHE = {"expires_at": 0.0, "snapshot": None}
 OKX_ORDER_HISTORY_CACHE_TTL_SECONDS = 15
@@ -714,6 +720,7 @@ STATIC_MIME_TYPES = {
 from dashboard.server import (  # noqa: E402  re-export shim
     Handler,
     _refresh_dashboard_cache_loop,
+    _should_rebuild,
 )
 
 

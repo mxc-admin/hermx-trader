@@ -175,6 +175,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         static_ready = _dash.STATIC_DIR.is_dir()
         if path in {"/dashboard/api", "/dashboard/api/", "/api", "/shadow/dashboard/api"}:
+            # Presence stamp (auth already passed above): the refresh loop keys its
+            # active/idle rebuild cadence off this. Serving stays cache-only.
+            _dash._LAST_API_HIT = time.time()
             payload = _dash.api_payload()
             self.send_bytes(200, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
         elif path in {"/health", "/shadow/health"}:
@@ -395,21 +398,46 @@ class Handler(BaseHTTPRequestHandler):
 DASHBOARD_REFRESH_INTERVAL_SECONDS = 15
 
 
+def _should_rebuild(now: float, last_hit: float, last_build: float,
+                    active_window: float = None, idle_rebuild: float = None) -> bool:
+    """True if the background loop should rebuild the model now.
+
+    Active (an authenticated /api GET stamped _LAST_API_HIT within
+    active_window): rebuild every tick. Idle: rebuild only when the last build
+    is older than idle_rebuild — or has never happened (last_build <= 0)."""
+    import dashboard as _dash
+    if active_window is None:
+        active_window = _dash.ACTIVE_WINDOW_SECONDS
+    if idle_rebuild is None:
+        idle_rebuild = _dash.IDLE_REBUILD_SECONDS
+    if last_hit > 0 and (now - last_hit) < active_window:
+        return True
+    if last_build <= 0:
+        return True
+    return (now - last_build) >= idle_rebuild
+
+
 def _refresh_dashboard_cache_loop(interval=DASHBOARD_REFRESH_INTERVAL_SECONDS):
     """Periodic background rebuild of _MODEL_CACHE so /api always has a recent
     snapshot without ever blocking on the ~15s build in steady state.
 
-    Each pass rebuilds under _MODEL_BUILD_LOCK (single-flighted with a cold
-    synchronous /api build) and swallows failures: if a build throws, the last
-    good model stays served and the exception is logged to stderr. Runs in a
-    daemon thread from __main__ only — never at import time — so unit tests
-    importing this module don't trigger network calls.
+    Each tick consults _should_rebuild: while a viewer is present (fresh
+    _LAST_API_HIT presence stamp) every tick rebuilds; otherwise builds back
+    off to one per IDLE_REBUILD_SECONDS. Rebuilds run under _MODEL_BUILD_LOCK
+    (single-flighted with a cold synchronous /api build) and swallow failures:
+    if a build throws, the last good model stays served and the exception is
+    logged to stderr. Runs in a daemon thread from __main__ only — never at
+    import time — so unit tests importing this module don't trigger network
+    calls.
     """
     import dashboard as _dash
+    last_build = 0.0
     while True:
         try:
-            with _dash._MODEL_BUILD_LOCK:
-                _dash._build_dashboard_model()
+            if _should_rebuild(time.time(), _dash._LAST_API_HIT, last_build):
+                with _dash._MODEL_BUILD_LOCK:
+                    _dash._build_dashboard_model()
+                last_build = time.time()
         except Exception as exc:  # noqa: BLE001 — refresh is best-effort; keep last good model
             print(f"[dashboard] cache refresh failed (non-fatal): {exc}", file=sys.stderr)
         time.sleep(interval)
