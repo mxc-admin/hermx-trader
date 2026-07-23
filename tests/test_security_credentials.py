@@ -99,6 +99,32 @@ def test_resolve_bybit_demo_vs_live():
     assert live["BYBIT_SECRET_KEY"] == "bybit-live-secret"
 
 
+def test_resolve_bitfinex_demo_vs_live():
+    env = {
+        "BITFINEX_API_KEY": "bitfinex-live-key",
+        "BITFINEX_SECRET_KEY": "bitfinex-live-secret",
+        "BITFINEX_PAPER_API_KEY": "bitfinex-paper-key",
+        "BITFINEX_PAPER_SECRET_KEY": "bitfinex-paper-secret",
+    }
+    demo = resolve_exchange_credentials("bitfinex", env, mode="demo")
+    assert demo["BITFINEX_API_KEY"] == "bitfinex-paper-key"
+    assert demo["BITFINEX_SECRET_KEY"] == "bitfinex-paper-secret"
+
+    live = resolve_exchange_credentials("bitfinex", env, mode="live")
+    assert live["BITFINEX_API_KEY"] == "bitfinex-live-key"
+    assert live["BITFINEX_SECRET_KEY"] == "bitfinex-live-secret"
+
+
+def test_resolve_bitfinex2_alias_maps_to_same_keys():
+    env = {
+        "BITFINEX_API_KEY": "bitfinex-live-key",
+        "BITFINEX_SECRET_KEY": "bitfinex-live-secret",
+    }
+    creds = resolve_exchange_credentials("bitfinex2", env, mode="live")
+    assert creds["BITFINEX_API_KEY"] == "bitfinex-live-key"
+    assert creds["BITFINEX_SECRET_KEY"] == "bitfinex-live-secret"
+
+
 def test_resolve_hyperliquid_live_returns_pair_when_both_present():
     env = {
         "HYPERLIQUID_WALLET_ADDRESS": "0xlive",
@@ -132,4 +158,13 @@ def test_redact_secrets_scrubs_known_values(monkeypatch):
     text = 'stderr: {"OKX_API_KEY":"real-okx-key","token":"abc"}'
     redacted = redact_secrets(text)
     assert "real-okx-key" not in redacted
+    assert "<redacted>" in redacted
+
+
+def test_redact_secrets_scrubs_bitfinex_values(monkeypatch):
+    monkeypatch.setenv("BITFINEX_API_KEY", "real-bfx-key")
+    monkeypatch.setenv("BITFINEX_SECRET_KEY", "real-bfx-secret")
+    redacted = redact_secrets("auth failed for real-bfx-key with real-bfx-secret")
+    assert "real-bfx-key" not in redacted
+    assert "real-bfx-secret" not in redacted
     assert "<redacted>" in redacted

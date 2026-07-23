@@ -10,7 +10,7 @@ HermX deliberately runs **one unified adapter, many venues via config** instead 
 
 - Post the P5-06/P5-07 CCXT cutover, `ccxt` is the *only* execution backend; the legacy `okx_demo` CLI adapter was removed (`src/executors/factory.py:4-8`). `ExecutorFactory.available() == ["ccxt"]`.
 - A new venue is a config + credential change, not new connector code — the venue-specific surface is confined to a `_client()` auth branch and a handful of normalization helpers.
-- All eight wired venues share the same order-lifecycle semantics (`execute` legs, timeout→UNKNOWN mapping, normalized query shapes), so reconciliation and the dashboard never see venue payload shapes.
+- All nine wired venues share the same order-lifecycle semantics (`execute` legs, timeout→UNKNOWN mapping, normalized query shapes), so reconciliation and the dashboard never see venue payload shapes.
 
 Position in the execution pipeline:
 
@@ -113,7 +113,7 @@ Reconciliation call sites must build the executor from the **order's own intent 
 
 `_client()` calls `resolve_exchange_credentials(exchange_id, os.environ, mode=...)` (`ccxt_adapter.py:341-342`), where `mode` is `"live"` iff `execution.simulated_trading` is falsey. `src/security/credentials.py:40-177` returns **only** the selected venue's vars, normalized to canonical names:
 
-- Every venue has a namespaced sandbox tier and a plain (live) tier, e.g. `OKX_DEMO_API_KEY` → `OKX_API_KEY`, `BYBIT_TESTNET_*` → `BYBIT_*`, `BITGET_DEMO_*`, `GATE_TESTNET_*`, `COINBASE_SANDBOX_*`, `KUCOIN_PAPER_*`.
+- Every venue has a namespaced sandbox tier and a plain (live) tier, e.g. `OKX_DEMO_API_KEY` → `OKX_API_KEY`, `BYBIT_TESTNET_*` → `BYBIT_*`, `BITGET_DEMO_*`, `GATE_TESTNET_*`, `COINBASE_SANDBOX_*`, `KUCOIN_PAPER_*`, `BITFINEX_PAPER_*` (Bitfinex's paper tier resolves for symmetry, but demo *execution* still fails closed at the adapter's sandbox gate — ccxt has no bitfinex sandbox).
 - `mode="demo"` prefers the sandbox-tier names with plain as fallback; `mode="live"` inverts the preference (`credentials.py:44-50`).
 - **Hyperliquid exception** (`credentials.py:159-175`): auth is `HYPERLIQUID_WALLET_ADDRESS` + `HYPERLIQUID_PRIVATE_KEY` (wallet-based, no API key/passphrase), and the resolver **fails closed** — the pair is returned only when *both* are present, so a partial set yields `{}` (disarmed) and can never borrow another venue's keys. The adapter passes these as ccxt's `walletAddress`/`privateKey` kwargs (`ccxt_adapter.py:373-383`).
 - `redact_secrets()` (`credentials.py:196-238`) scrubs every known credential value from error text; new venue keys must be added to its list.
@@ -155,6 +155,7 @@ How the adapter handles each gap today:
 | Binance | `trade.info.realizedPnl` — lives on **trades**, may be absent from the order row | best-effort from order `info.realizedPnl`, else `None` (`ccxt_adapter.py:55-57`) |
 | Bybit | not in order history at all; only `fetch_positions_history` (`/v5/position/closed-pnl`) | `None`, debug-logged (`ccxt_adapter.py:58-63`) |
 | Coinbase (spot) | none | `None` |
+| Bitfinex | none — `parse_order` emits no P&L or fee field | `None` |
 
 `None` is the accepted Phase-1 answer for venues without order-row P&L; Phase 2 backfill via positions-history / income endpoints is deferred (docstring at `ccxt_adapter.py:44-49`). Per the validation doc's #4: `fetch_positions_history` exists only on OKX and Bybit — do **not** build a portable P&L path on it. Consistent with the log-and-continue rule, a missing venue P&L is recorded as `None`, never coerced to a fabricated zero.
 
@@ -174,7 +175,7 @@ Hyperliquid requires a 128-bit `0x`-prefixed hex cloid; `_to_hyperliquid_cloid` 
 
 ## Supported Venues Today
 
-All eight venues are wired for authenticated execution in `_client()`. **OKX is the only live-verified venue** (real demo submit → query → close via the gated `tests/test_paper_integration.py`); the other seven are untested against a real account. Trial posture across venues: USDT perpetual swaps, sandbox/demo first, isolated margin, 2x leverage, market execution. Per-venue conditionals inside `_client()`:
+All nine venues are wired for authenticated execution in `_client()`. **OKX is the only live-verified venue** (real demo submit → query → close via the gated `tests/test_paper_integration.py`); the other eight are untested against a real account. Trial posture across venues: USDT perpetual swaps, sandbox/demo first, isolated margin, 2x leverage, market execution. Per-venue conditionals inside `_client()`:
 
 | Venue (`ccxt_exchange`) | Runtime profile | Demo credential env vars | `_client()` specifics |
 |---|---|---|---|
@@ -186,6 +187,7 @@ All eight venues are wired for authenticated execution in `_client()`. **OKX is 
 | `bitget` | `config/runtime.bitget.demo.json` | `BITGET_DEMO_API_KEY/_SECRET_KEY/_PASSPHRASE` | apiKey+secret+password (`ccxt_adapter.py:389-392`) |
 | `gate` / `gateio` | `config/runtime.gate.demo.json` | `GATE_TESTNET_API_KEY/_SECRET_KEY` | apiKey+secret; both id spellings accepted (`ccxt_adapter.py:393-395`) |
 | `coinbase` / `coinbaseadvanced` | `config/runtime.coinbase.demo.json` | `COINBASE_SANDBOX_API_KEY/_SECRET_KEY` | apiKey+secret; demo **fails closed** because ccxt's coinbase class has no `set_sandbox_mode` (`ccxt_adapter.py:396-400,404-414`) |
+| `bitfinex` / `bitfinex2` | `config/runtime.bitfinex.demo.json` | live only: `BITFINEX_API_KEY/_SECRET_KEY` (`BITFINEX_PAPER_*` resolves but cannot execute) | apiKey+secret (no passphrase); defaultType default `"swap"`; demo **fails closed** — ccxt's bitfinex `urls["test"]` is `None`, so `set_sandbox_mode(True)` raises inside the sandbox gate |
 
 Other adapter-level venue conditionals to be aware of (all keyed on `_exchange_id()`):
 
@@ -243,9 +245,9 @@ When a venue's number looks unified but isn't (the `info.pnl` vs `info.closedPnl
 - **No leverage / margin-mode management.** "Set or verify leverage / margin mode" is a canonical adapter responsibility, but `CcxtExecutor` never calls ccxt's `set_leverage`/`set_margin_mode`; `td_mode` is passed per-order (OKX-style) and `leverage` only informs the balance check. Leverage must currently be pre-set on the venue account.
 - **No post-submit close verification.** "Verify close" was likewise a listed responsibility, but after a close leg submits, `execute()` assumes `current_side = "flat"` and proceeds to the open leg without re-fetching the position (`ccxt_adapter.py:858-860`). The result mapper recognizes a `close_not_verified` leg status (`ccxt_adapter.py:971`; also handled in `src/skills/hermes_execution.py:209`) but nothing in the adapter produces it — close verification is left entirely to reconciliation.
 - **Hedge-mode `posSide` is out of scope** — the `ccxt_pos_mode` branch was removed as dead code; orders never emit `posSide` (`tests/test_ccxt_adapter.py:189-190`). One-way position mode is assumed.
-- **Realized P&L is `None` in order history for Bybit, KuCoin, Bitget, Gate, Coinbase** — Phase 1 accepts `None`; the Phase 2 backfill via `fetch_positions_history` (OKX/Bybit only) or income endpoints (Binance) is deferred (`ccxt_adapter.py:44-49,58-63`; validation doc #4).
+- **Realized P&L is `None` in order history for Bybit, KuCoin, Bitget, Gate, Coinbase, Bitfinex** — Phase 1 accepts `None`; the Phase 2 backfill via `fetch_positions_history` (OKX/Bybit only) or income endpoints (Binance) is deferred (`ccxt_adapter.py:44-49,58-63`; validation doc #4).
 - **Reduce-only close detection is derivatives-only** — spot venues (Coinbase) report `reduceOnly=None`, so reconciliation's reduce-only gate drops every spot close (validation doc N3). Spot needs a separate close signal before its history can feed `closed-trades.jsonl`.
-- **Seven of eight venues are untested against a real account**; their gated write tests have not been run. OKX is the only live-verified venue.
+- **Eight of nine venues are untested against a real account**; their gated write tests have not been run. OKX is the only live-verified venue. Bitfinex additionally has no sandbox at all, so its first gated write test can only ever run live.
 - **`get_order_history_raw` with no `inst_ids` returns `[]`** — the target list is not discovered from open positions or markets (`ccxt_adapter.py:1102-1105`); callers must supply instruments.
 - **Observe-only query verbs swallow exceptions into empty results** (`get_open_orders`, `get_positions`, `get_balance`, history verbs) — intentional fail-open for reconciliation, but it means a venue auth failure looks identical to "no data" on those paths; `health()` is the verb that surfaces the error (`ccxt_adapter.py:1273-1274`).
 - **`ORDER_PNL_IS_NET` is gross-first**: displayed P&L semantics per venue (fee-inclusion) must be empirically verified on a real close before flipping to net — one of the genuinely runtime-only facts static analysis cannot close (`.claude/rules/code-quality.md`).

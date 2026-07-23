@@ -415,6 +415,14 @@ class CcxtExecutor(BaseExecutor):
             # set_sandbox_mode() guard if ccxt's coinbase adapter has no sandbox URL.
             kwargs["apiKey"] = creds.get("COINBASE_API_KEY", "")
             kwargs["secret"] = creds.get("COINBASE_SECRET_KEY", "")
+        elif exchange_id in ("bitfinex", "bitfinex2"):
+            # Credentials applied; ccxt's bitfinex class has no sandbox URL
+            # (urls["test"] is None), so a demo request fails closed below via the
+            # set_sandbox_mode() guard — live only.
+            kwargs["apiKey"] = creds.get("BITFINEX_API_KEY", "")
+            kwargs["secret"] = creds.get("BITFINEX_SECRET_KEY", "")
+            default_type = str(self.execution_cfg.get("ccxt_default_type") or "swap")
+            kwargs.setdefault("options", {})["defaultType"] = default_type
 
         client = exchange_cls(kwargs)
 
@@ -611,6 +619,8 @@ class CcxtExecutor(BaseExecutor):
                        NotSupported, absorbed by the caller's fail-open except.
         coinbase    -> never reached (spot-only; filtered by the ``setLeverage``
                        capability gate at the call site).
+        bitfinex    -> never reached (``has["setLeverage"]`` is False; filtered by
+                       the capability gate — leverage rides per-order via ``lev``).
         anything else -> {} (safe fallback: ccxt's own default takes over, and
                        fail-open protects against a wrong default).
         """

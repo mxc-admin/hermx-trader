@@ -238,7 +238,7 @@ Ask `/hx-help <command>` for syntax, guards, and examples on any one.
   read (credential presence, resolver `OK`/`PARTIAL`/`MISSING`, precedence + adapter-wiring
   warnings, optional `--live` `fetch_balance` probe); `add`/`update`/`remove` upsert `.env`
   (backed up to `.env.bak`, `chmod 600`). Exchanges: okx, kucoin, bybit, binance, bitget,
-  gate, hyperliquid, coinbase (coinbase live/spot only — no ccxt sandbox).
+  gate, hyperliquid, coinbase, bitfinex (coinbase live/spot only, bitfinex live only — no ccxt sandbox).
 - **Guards:** the skill **never handles a credential** — each key is captured by `read -s`
   **inside the script** on the VPS, never as an argument, never echoed. Mutations run under
   `ssh -t`; `add`/`update`/`remove` need an explicit `--demo`/`--live`; `--live` needs a

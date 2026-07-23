@@ -729,6 +729,45 @@ def test_ccxt_adapter_coinbase_demo_fails_closed_without_sandbox(monkeypatch):
         ex._client()
 
 
+def test_ccxt_adapter_bitfinex_auth_kwargs(monkeypatch):
+    _install_fake_ccxt(monkeypatch, bitfinex=_FakeAuthExchange)
+    # live mode -> plain creds preferred over paper.
+    monkeypatch.setenv("HERMX_LIVE_TRADING", "true")
+    monkeypatch.setenv("BITFINEX_API_KEY", "bitfinex-live-key")
+    monkeypatch.setenv("BITFINEX_SECRET_KEY", "bitfinex-live-secret")
+    monkeypatch.setenv("BITFINEX_PAPER_API_KEY", "bitfinex-paper-key")
+    monkeypatch.setenv("BITFINEX_PAPER_SECRET_KEY", "bitfinex-paper-secret")
+
+    ex = _auth_executor("bitfinex", simulated=False)
+    client = ex._client()
+
+    assert client.captured_kwargs["apiKey"] == "bitfinex-live-key"
+    assert client.captured_kwargs["secret"] == "bitfinex-live-secret"
+    assert client.captured_kwargs["options"]["defaultType"] == "swap"
+    # Bitfinex has no passphrase; live mode never enables sandbox.
+    assert "password" not in client.captured_kwargs
+    assert "_sandbox" not in client.captured_kwargs
+
+
+def test_ccxt_adapter_bitfinex_demo_fails_closed_without_sandbox(monkeypatch):
+    # ccxt's bitfinex class inherits set_sandbox_mode but urls["test"] is None, so
+    # enabling it raises; a demo request must fail closed.
+    class _NoSandboxExchange:
+        def __init__(self, kwargs):
+            self.captured_kwargs = dict(kwargs)
+
+        def set_sandbox_mode(self, flag):
+            raise TypeError("'NoneType' object is not iterable")
+
+    _install_fake_ccxt(monkeypatch, bitfinex=_NoSandboxExchange)
+    monkeypatch.setenv("BITFINEX_PAPER_API_KEY", "bitfinex-paper-key")
+    monkeypatch.setenv("BITFINEX_PAPER_SECRET_KEY", "bitfinex-paper-secret")
+
+    ex = _auth_executor("bitfinex", simulated=True)
+    with pytest.raises(RuntimeError, match="failed to enable sandbox"):
+        ex._client()
+
+
 def test_symbol_mapping_usdc_suffix():
     # Hyperliquid quotes in USDC; the bare-suffix form must map like USDT does.
     assert _inst_id_to_ccxt_symbol("SOLUSDC") == "SOL/USDC"

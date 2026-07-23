@@ -36,6 +36,7 @@ EXCHANGE_TABLE=(
   "bitget|Bitget|BITGET_DEMO|apiKey,secret,passphrase"
   "gate|Gate.io|GATE_TESTNET|apiKey,secret"
   "coinbase|Coinbase Advanced|COINBASE_SANDBOX|apiKey,secret"
+  "bitfinex|Bitfinex|BITFINEX|apiKey,secret"
   "hyperliquid|Hyperliquid|HYPERLIQUID|wallet_address,private_key"
 )
 pick_exchange(){

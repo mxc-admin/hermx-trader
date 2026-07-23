@@ -35,7 +35,7 @@ warn()  { printf '  %s!%s %s\n' "$YELLOW" "$RESET" "$1"; }
 err()   { printf '  %sx%s %s\n' "$RED" "$RESET" "$1" >&2; }
 
 # --- Supported exchanges ------------------------------------------------------
-SUPPORTED_EXCHANGES="okx kucoin bybit binance bitget gate hyperliquid coinbase"
+SUPPORTED_EXCHANGES="okx kucoin bybit binance bitget gate hyperliquid coinbase bitfinex"
 # Exchanges whose credentials resolve but are NOT wired into the CCXT adapter yet
 # (see src/executors/ccxt_adapter.py:217 — coinbase has no ccxt sandbox; live/spot only).
 NOT_WIRED_EXCHANGES="coinbase"
@@ -80,6 +80,8 @@ get_fields() {
     hyperliquid:live) printf '%s\n' "HYPERLIQUID_WALLET_ADDRESS:wallet address (0x…):n" "HYPERLIQUID_PRIVATE_KEY:private key:y" ;;
     coinbase:demo) return 1 ;;
     coinbase:live) printf '%s\n' "COINBASE_API_KEY:API key:y" "COINBASE_SECRET_KEY:secret key:y" ;;
+    bitfinex:demo) return 1 ;;
+    bitfinex:live) printf '%s\n' "BITFINEX_API_KEY:API key:y" "BITFINEX_SECRET_KEY:secret key:y" ;;
     *) return 1 ;;
   esac
 }
@@ -319,6 +321,7 @@ cmd_list() {
   local lt; lt="$(env_get HERMX_LIVE_TRADING)"
   info "HERMX_LIVE_TRADING = ${lt:-(unset → false)}"
   info "Note: coinbase is credential-resolvable but NOT wired into the CCXT adapter (live/spot only)."
+  info "Note: bitfinex is wired but has no ccxt sandbox — demo fails closed at the adapter (live only)."
 }
 
 status_one() {
@@ -405,7 +408,7 @@ parse_mutate_args() {
     exit 2
   fi
   if ! get_fields "$MX_EX" "$MX_MODE" >/dev/null 2>&1; then
-    err "coinbase sandbox not supported in current ccxt version. Use --live for spot trading only."
+    err "$MX_EX sandbox not supported in current ccxt version. Use --live only."
     exit 1
   fi
 }

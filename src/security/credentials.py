@@ -156,6 +156,19 @@ def resolve_exchange_credentials(exchange: str, source_env: dict | None = None, 
             out["COINBASE_SECRET_KEY"] = secret_key
         return out
 
+    if key in {"bitfinex", "bitfinex2", "bitfinex_paper"}:
+        if live:
+            api_key = _pick_first(env, "BITFINEX_API_KEY", "BITFINEX_PAPER_API_KEY")
+            secret_key = _pick_first(env, "BITFINEX_SECRET_KEY", "BITFINEX_PAPER_SECRET_KEY")
+        else:
+            api_key = _pick_first(env, "BITFINEX_PAPER_API_KEY", "BITFINEX_API_KEY")
+            secret_key = _pick_first(env, "BITFINEX_PAPER_SECRET_KEY", "BITFINEX_SECRET_KEY")
+        if api_key:
+            out["BITFINEX_API_KEY"] = api_key
+        if secret_key:
+            out["BITFINEX_SECRET_KEY"] = secret_key
+        return out
+
     if key in {"hyperliquid", "hyperliquid_testnet"}:
         # Hyperliquid auth differs from the apiKey/secret/passphrase venues: it is a
         # wallet address + private key (NO passphrase). Namespaced env names mirror
@@ -227,6 +240,10 @@ def redact_secrets(text: str | None) -> str:
         "COINBASE_SECRET_KEY",
         "COINBASE_SANDBOX_API_KEY",
         "COINBASE_SANDBOX_SECRET_KEY",
+        "BITFINEX_API_KEY",
+        "BITFINEX_SECRET_KEY",
+        "BITFINEX_PAPER_API_KEY",
+        "BITFINEX_PAPER_SECRET_KEY",
         "HYPERLIQUID_WALLET_ADDRESS",
         "HYPERLIQUID_PRIVATE_KEY",
         "HYPERLIQUID_TESTNET_WALLET_ADDRESS",

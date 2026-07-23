@@ -1,6 +1,6 @@
 ---
 name: hx-exchange
-description: "Manage exchange credentials for HermX: add, update, remove, and validate API keys for OKX, KuCoin, Bybit, Binance, Bitget, Gate, Hyperliquid, Coinbase. Triggered by: '/hx-exchange list', '/hx-exchange add okx --demo', '/hx-exchange status bybit --live', '/hx-exchange remove kucoin --demo', 'add exchange credentials', 'how do I configure Bybit'."
+description: "Manage exchange credentials for HermX: add, update, remove, and validate API keys for OKX, KuCoin, Bybit, Binance, Bitget, Gate, Hyperliquid, Coinbase, Bitfinex. Triggered by: '/hx-exchange list', '/hx-exchange add okx --demo', '/hx-exchange status bybit --live', '/hx-exchange remove kucoin --demo', 'add exchange credentials', 'how do I configure Bybit'."
 version: 0.1.0
 author: HermX
 license: MIT
@@ -43,7 +43,7 @@ HermX resolves exchange credentials from `.env` via `src/security/credentials.py
 standalone `scripts/exchange.sh` manager. Your job is to:
 
 1. **Parse** the operator's request into `subcommand + exchange + env (--demo|--live)`.
-2. **Validate** the exchange against the eight supported ids before emitting anything.
+2. **Validate** the exchange against the nine supported ids before emitting anything.
 3. **Emit the correct SSH command** (interactive `ssh -t` for the mutating subcommands).
 4. **Confirm** by re-running `status` and reporting the resolver result — never a key.
 
@@ -93,7 +93,7 @@ All commands take the shape `ssh [-t] {ssh_target} 'cd {repo_dir} && bash script
 - **Does:** prompts for each field with `read -s`, previews masked values, backs up
   `.env`, upserts the vars, runs a resolver smoke test, prints the restart reminder.
   Requires an explicit `--demo`/`--live`; `--live` needs a typed
-  `yes, add live <exchange>`; coinbase `--demo` is rejected (no ccxt sandbox).
+  `yes, add live <exchange>`; coinbase/bitfinex `--demo` are rejected (no ccxt sandbox).
 - **Emit (interactive):** `ssh -t {ssh_target} 'cd {repo_dir} && bash scripts/exchange.sh add <exchange> --demo|--live'`
 - **After:** tell the operator to complete the prompts **in their SSH session**, then
   re-run `status <exchange> <same env>` to confirm `OK`.
@@ -123,6 +123,7 @@ All commands take the shape `ssh [-t] {ssh_target} 'cd {repo_dir} && bash script
 | `gate` | `GATE_TESTNET_API_KEY` / `_SECRET_KEY` | `GATE_API_KEY` / `_SECRET_KEY` | no | yes | |
 | `hyperliquid` | `HYPERLIQUID_TESTNET_WALLET_ADDRESS` + `_PRIVATE_KEY` | `HYPERLIQUID_WALLET_ADDRESS` + `_PRIVATE_KEY` | no | yes | wallet + private key (no passphrase); fails closed unless both present |
 | `coinbase` | — (not supported) | `COINBASE_API_KEY` / `_SECRET_KEY` | no | **no** | live/spot only; ccxt has no coinbase sandbox — credentials resolve but no adapter path |
+| `bitfinex` | — (not supported) | `BITFINEX_API_KEY` / `_SECRET_KEY` | no | yes | live only; ccxt has no bitfinex sandbox — demo execution fails closed at the adapter |
 
 ## Security rules
 - **Never intake a credential.** Do not ask the operator to paste a key to you, and never
@@ -136,7 +137,7 @@ All commands take the shape `ssh [-t] {ssh_target} 'cd {repo_dir} && bash script
   `yes, add live <exchange>`. Never promote to live implicitly.
 - **Adding keys ≠ arming.** State plainly that `HERMX_LIVE_TRADING` and strategy
   `execution_mode` still gate real trading; direct arming questions to [[hermx-control]].
-- **Only the eight ids exist.** Validate before emitting; reject anything else with the
+- **Only the nine ids exist.** Validate before emitting; reject anything else with the
   supported list.
 
 ## Procedure
@@ -144,8 +145,9 @@ All commands take the shape `ssh [-t] {ssh_target} 'cd {repo_dir} && bash script
 # Pure orchestration: parse → validate → emit SSH → confirm. NEVER handles a key value.
 import shlex
 
-SUPPORTED = ["okx", "kucoin", "bybit", "binance", "bitget", "gate", "hyperliquid", "coinbase"]
+SUPPORTED = ["okx", "kucoin", "bybit", "binance", "bitget", "gate", "hyperliquid", "coinbase", "bitfinex"]
 NOT_WIRED = {"coinbase"}
+NO_SANDBOX = {"coinbase", "bitfinex"}
 MUTATING  = {"add", "update", "remove"}
 
 def build(ssh_target, repo_dir, subcmd, exchange=None, env_flag=None):
@@ -157,8 +159,8 @@ def build(ssh_target, repo_dir, subcmd, exchange=None, env_flag=None):
             raise ValueError(f"unknown exchange '{exchange}'; supported: {', '.join(SUPPORTED)}")
     if subcmd in MUTATING and env_flag not in ("--demo", "--live"):
         raise ValueError("add/update/remove require an explicit --demo or --live")
-    if subcmd in MUTATING and exchange == "coinbase" and env_flag == "--demo":
-        raise ValueError("coinbase sandbox not supported in ccxt; use --live (spot only)")
+    if subcmd in MUTATING and exchange in NO_SANDBOX and env_flag == "--demo":
+        raise ValueError(f"{exchange} sandbox not supported in ccxt; use --live")
 
     # 2) assemble the remote command (NO credential ever appears here)
     parts = ["bash", "scripts/exchange.sh", subcmd]
@@ -196,9 +198,9 @@ def build(ssh_target, repo_dir, subcmd, exchange=None, env_flag=None):
   failure plainly.
 
 ## Verification checklist
-- [ ] Exchange validated against the eight ids before any SSH command was emitted.
+- [ ] Exchange validated against the nine ids before any SSH command was emitted.
 - [ ] Mutating subcommands used `ssh -t`; `list`/`status` did not.
 - [ ] No credential value appeared in any command, heredoc, echo, log, or summary.
-- [ ] `--live` intent confirmed; coinbase `--demo` rejected.
+- [ ] `--live` intent confirmed; coinbase/bitfinex `--demo` rejected.
 - [ ] A mutation was confirmed by a follow-up `status`, reporting the resolver result.
 - [ ] Reminded the operator that adding keys does not arm the system.
