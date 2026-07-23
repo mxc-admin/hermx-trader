@@ -727,8 +727,40 @@ def _enrich_execution_row_from_journal(row, result, fill):
     return row
 
 
+def _canonical_execution_cl_ord_id(raw_id, fill_id, venue, cloid_map):
+    """Canonical HermX ``cl_ord_id`` for a full execution row.
+
+    Hyperliquid echoes a hex/decimal cloid (``0x...`` — hex, not decimal-only) as
+    the ccxt ``clientOrderId`` while position episodes hold the submitted ``mxc``
+    ids, so the position click-filter's exact match needs the submit-time cloid
+    map (pnl_cloid_map) to bridge them. Resolution is exact-match only ("zero
+    events beats wrong events"): the map hit for the row's own venue wins; a
+    venue-less row ("ccxt" is the ADAPTER backend name, not a venue) resolves
+    only when the cloid maps unambiguously to a single mxc id across venues.
+    Unresolved cloids fall back to the fill-summary id (the submitted mxc id),
+    then the raw venue-echoed id.
+    """
+    text = str(raw_id or "").strip()
+    if text and (text.startswith("0x") or text.isdigit()):
+        venue_key = str(venue or "").strip().lower()
+        if venue_key and venue_key != "ccxt":
+            resolved = cloid_map.get((venue_key, text))
+        else:
+            matches = {mxc for (_ex, cloid), mxc in cloid_map.items() if cloid == text and mxc}
+            resolved = matches.pop() if len(matches) == 1 else None
+        return resolved or fill_id or raw_id
+    return raw_id or fill_id or None
+
+
 def exchange_execution_records(config, limit=500):
     import dashboard as _dash
+    # Submit-time cloid map, bulk-loaded once per call (not per row). Fail-open:
+    # an unreadable map degrades to no resolution, never a failed snapshot.
+    try:
+        from pnl_cloid_map import load_cloid_mappings
+        cloid_map = load_cloid_mappings()
+    except Exception:
+        cloid_map = {}
     # Execution outcomes live in the unified pipeline.jsonl under stage="execution". Each
     # row is {received_at, okx_execution, ...}. The service (execution/service.py) wraps
     # the adapter's normalized_result() (executors/base.py) under okx_execution.payload:
@@ -806,6 +838,12 @@ def exchange_execution_records(config, limit=500):
                 "margin_mode": None,
                 "order_id": ccxt_order.get("id") or fill.get("order_id"),
                 "client_order_id": ccxt_order.get("clientOrderId") or fill.get("client_order_id"),
+                "cl_ord_id": _canonical_execution_cl_ord_id(
+                    ccxt_order.get("clientOrderId"),
+                    fill.get("client_order_id"),
+                    adapter.get("exchange"),
+                    cloid_map,
+                ),
                 "order_status": ccxt_order.get("status") or order.get("status") or fill.get("status"),
                 "elapsed_ms": base["elapsed_ms"],
             })

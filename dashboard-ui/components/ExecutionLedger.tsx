@@ -98,9 +98,14 @@ export function ExecutionLedger() {
   const columns = [
     {
       key: 'time',
-      header: 'Time',
-      render: (row: Row) =>
-        age(str(pick(row, 'tv_time', 'submitted_at', 'received_at', 'received_colombia'))),
+      // Exec rows carry tv_time=None (backend hardcodes it), so this is
+      // effectively the intake received time — label it as such, with the raw
+      // ISO on hover (PositionsTable AgeMs pattern).
+      header: 'Received',
+      render: (row: Row) => {
+        const iso = str(pick(row, 'tv_time', 'submitted_at', 'received_at', 'received_colombia'))
+        return iso ? <span title={iso}>{age(iso)}</span> : '—'
+      },
     },
     {
       key: 'asset',

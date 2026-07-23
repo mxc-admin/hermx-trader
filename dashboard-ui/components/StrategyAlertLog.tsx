@@ -136,9 +136,11 @@ export function StrategyAlertLog() {
     {
       key: 'latency',
       header: 'Latency',
+      // Backend value is latency_seconds (model.py stamps `latency` from
+      // latency.latency_seconds) — label it as seconds, like render.py fmt_seconds.
       render: (row: Row) => {
         const v = pick(row, 'latency')
-        return v === undefined ? '—' : `${v} ms`
+        return v === undefined ? '—' : `${v} s`
       },
     },
   ]

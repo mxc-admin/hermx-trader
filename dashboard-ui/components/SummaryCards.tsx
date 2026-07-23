@@ -33,7 +33,6 @@ export function SummaryCards() {
 
   const strategies = data?.strategies ?? []
   const unattributed = data?.portfolio?.unattributed
-  const positions = data?.okx_live?.positions ?? {}
   const executor = data?.executor
 
   // Card 1 — system status (shared ARMED predicate with ArmingBanner).
@@ -63,13 +62,22 @@ export function SummaryCards() {
   ).length
   const stratKind: Kind = strategies.length > 0 ? 'good' : 'muted'
 
-  // Card 3 — open positions.
-  const open = Object.values(positions).filter(
-    (p) => (p.side ?? 'FLAT') !== 'FLAT',
-  )
-  const longs = open.filter((p) => p.side === 'LONG').length
-  const shorts = open.filter((p) => p.side === 'SHORT').length
-  const posKind: Kind = open.length > 0 ? 'good' : 'muted'
+  // Card 3 — open positions. Cross-venue truth is positions.open (Positions-First
+  // contract, side lowercase "long"/"short"); okx_live.positions (side "LONG"/
+  // "SHORT"/"FLAT") only sees the legacy OKX-demo account, so it is a fallback
+  // for old payloads without the positions contract — not a co-source.
+  let sides: string[]
+  if (data?.positions) {
+    sides = (data.positions.open ?? []).map((p) => (p.side ?? '').toUpperCase())
+  } else {
+    sides = Object.values(data?.okx_live?.positions ?? {})
+      .filter((p) => (p.side ?? 'FLAT') !== 'FLAT')
+      .map((p) => (p.side ?? '').toUpperCase())
+  }
+  const longs = sides.filter((s) => s === 'LONG').length
+  const shorts = sides.filter((s) => s === 'SHORT').length
+  const openCount = sides.length
+  const posKind: Kind = openCount > 0 ? 'good' : 'muted'
 
   // Card 4 — executor health.
   let execLabel: string
@@ -135,7 +143,7 @@ export function SummaryCards() {
         />
         <StatCard
           label="OPEN POSITIONS"
-          value={String(open.length)}
+          value={String(openCount)}
           sub={`${longs}L / ${shorts}S`}
           accentColor={kindColor(posKind)}
           valueColor={kindColor(posKind)}

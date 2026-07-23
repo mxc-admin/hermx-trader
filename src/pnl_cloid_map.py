@@ -41,6 +41,32 @@ def record_cloid_mapping(mxc_id: str, numeric_cloid: str, exchange_id: str) -> N
         f.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+def load_cloid_mappings() -> dict:
+    """Return every recorded mapping as ``{(exchange, cloid): mxc_id}``, last-wins.
+
+    Bulk companion to :func:`resolve_cloid` for readers that resolve many rows per
+    call (e.g. the dashboard execution ledger) without re-reading the file per row.
+    File order means later (newer) lines overwrite earlier ones, matching
+    ``resolve_cloid``'s newest-first semantics.
+    """
+    path = _map_path()
+    if not path.exists():
+        return {}
+    out: dict = {}
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(entry, dict) and entry.get("cloid") and entry.get("exchange"):
+                out[(str(entry["exchange"]).lower(), str(entry["cloid"]))] = entry.get("mxc_id")
+    return out
+
+
 def resolve_cloid(numeric_cloid: str | None, exchange_id: str | None) -> str | None:
     """Return the original mxc_id for a numeric cloid, or None if not found.
 

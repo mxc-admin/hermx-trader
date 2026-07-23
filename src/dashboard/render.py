@@ -764,13 +764,28 @@ def summary_cards(model):
     strat_sub = f"{demo_count} demo / {live_count_s} live"
     strat_kind = "good" if strategies else "muted"
 
-    # Card 3: Open positions
-    positions = (okx_live.get("positions") or {})
-    open_pos = {sym: p for sym, p in positions.items() if (p.get("side") or "FLAT") != "FLAT"}
-    longs = sum(1 for p in open_pos.values() if p.get("side") == "LONG")
-    shorts = sum(1 for p in open_pos.values() if p.get("side") == "SHORT")
-    if open_pos:
-        pos_label = f"{len(open_pos)} OPEN"
+    # Card 3: Open positions. Count across EVERY (venue, mode) snapshot — the
+    # okx_live singleton only sees the legacy OKX-demo account, so an HL-only
+    # open position would render as ALL FLAT. Fall back to okx_live only when
+    # the per-env snapshots are absent (old model shape).
+    by_env = model.get("exch_live_by_env") or {}
+    open_sides = []
+    if by_env:
+        for snap in by_env.values():
+            if not (snap or {}).get("ok"):
+                continue
+            for p in ((snap or {}).get("positions") or {}).values():
+                qty = _dash.as_float(p.get("pos")) or 0.0
+                if qty == 0.0:
+                    continue
+                open_sides.append("LONG" if qty > 0 else "SHORT")
+    else:
+        positions = (okx_live.get("positions") or {})
+        open_sides = [str(p.get("side")) for p in positions.values() if (p.get("side") or "FLAT") != "FLAT"]
+    longs = sum(1 for s in open_sides if s == "LONG")
+    shorts = sum(1 for s in open_sides if s == "SHORT")
+    if open_sides:
+        pos_label = f"{len(open_sides)} OPEN"
         pos_sub = f"{longs}L / {shorts}S"
         pos_kind = "good"
     else:
