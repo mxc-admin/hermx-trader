@@ -23,6 +23,9 @@ ENV_FILE="$REPO_ROOT/.env"
 OS=""               # "linux" | "macos"
 IS_VPS="false"
 PY=""               # resolved python interpreter (python3.11 preferred)
+SELECTED_EX=""      # exchange id chosen in pick_exchange (or read from .env)
+PROBE_OK="false"    # demo credential probe result (gate for strategy sizing)
+PROBE_EQUITY=""     # usable equity parsed from the probe output
 
 # Colours (fall back to empty strings if not a tty)
 if [[ -t 1 ]]; then
@@ -66,6 +69,8 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # Exchange picker (STEP 3)
 # ---------------------------------------------------------------------------
 # id | label | env prefix | comma-separated credential fields
+# Demo-capable venues only: coinbase and bitfinex have no ccxt sandbox, so a
+# demo install cannot use them (they fail closed at the adapter).
 EXCHANGE_TABLE=(
   "okx|OKX (recommended)|OKX_DEMO|apiKey,secret,passphrase"
   "binance|Binance|BINANCE_TESTNET|apiKey,secret"
@@ -73,9 +78,7 @@ EXCHANGE_TABLE=(
   "kucoin|KuCoin|KUCOIN_PAPER|apiKey,secret_bare,passphrase"
   "bitget|Bitget|BITGET_DEMO|apiKey,secret,passphrase"
   "gate|Gate.io|GATE_TESTNET|apiKey,secret"
-  "coinbase|Coinbase Advanced|COINBASE_SANDBOX|apiKey,secret"
-  "bitfinex|Bitfinex|BITFINEX|apiKey,secret"
-  "hyperliquid|Hyperliquid|HYPERLIQUID|wallet_address,private_key"
+  "hyperliquid|Hyperliquid (testnet)|HYPERLIQUID_TESTNET|wallet_address,private_key"
 )
 
 pick_exchange() {
@@ -150,6 +153,7 @@ pick_exchange() {
 
   # Exchange routing markers consumed by the runtime config selection.
   set_env "HERMX_CCXT_EXCHANGE" "$ex_id"
+  SELECTED_EX="$ex_id"
 
   # Global live-trading kill switch -- written false for every venue, so a fresh
   # install is always demo/sandbox until the operator deliberately goes live.
@@ -218,7 +222,14 @@ if [[ "$OS" == "linux" ]]; then
   else
     info "Installing python3.11, pip, git, curl via apt (needs sudo)..."
     sudo apt-get update
-    sudo apt-get install -y python3.11 python3.11-venv python3-pip curl git
+    sudo apt-get install -y python3.11 python3.11-venv python3-pip curl git || true
+    if ! have python3.11; then
+      warn "python3.11 not in the default repos — adding the deadsnakes PPA (INSTALL.md Phase 1)..."
+      sudo apt-get install -y software-properties-common
+      sudo add-apt-repository -y ppa:deadsnakes/ppa
+      sudo apt-get update
+      sudo apt-get install -y python3.11 python3.11-venv
+    fi
   fi
   # Re-resolve python after a possible install.
   if have python3.11; then PY="python3.11"; fi
@@ -273,8 +284,9 @@ if [[ "$WRITE_ENV" == "true" ]]; then
     set_env "HERMX_SECRET" "$SECRET"
     ok "Generated HERMX_SECRET (saved to .env)."
     info "Secret: $SECRET"
-    info "(Paste this exact value as the X-Webhook-Secret header in TradingView,"
-    info " and use it as the dashboard token / Bearer / Basic password.)"
+    info "(Put this exact value in the TradingView alert MESSAGE JSON as \"secret_key\" —"
+    info " the webhook URL box takes the URL only, never the secret. It is also the"
+    info " dashboard token / Bearer / Basic password.)"
   else
     warn "openssl not found — set HERMX_SECRET in .env manually."
   fi
@@ -284,6 +296,54 @@ if [[ "$WRITE_ENV" == "true" ]]; then
 else
   ok "Skipped .env configuration."
 fi
+
+# ===========================================================================
+# PHASE 2.5 — Python environment + demo credential probe (install gate)
+# ===========================================================================
+phase "PHASE 2.5: Python Environment + Demo Probe"
+
+build_venv() {
+  if [[ -x "$REPO_ROOT/.venv/bin/python" ]] && "$REPO_ROOT/.venv/bin/python" -c 'import ccxt' >/dev/null 2>&1; then
+    ok "Virtualenv already present (.venv, ccxt importable)."
+    return 0
+  fi
+  info "Creating .venv and installing requirements..."
+  "$PY" -m venv .venv
+  .venv/bin/pip install --upgrade pip >/dev/null
+  .venv/bin/pip install -r requirements.txt
+  ok "Virtualenv ready (.venv)."
+}
+
+# The probe needs .venv + ccxt, so the venv is built BEFORE strategy sizing.
+build_venv
+
+# Resolve the exchange even when Phase 2 was skipped (.env left untouched).
+if [[ -z "$SELECTED_EX" ]]; then
+  SELECTED_EX="$(grep -E '^HERMX_CCXT_EXCHANGE=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2)"
+  SELECTED_EX="${SELECTED_EX:-okx}"
+  info "Exchange from .env: $SELECTED_EX"
+fi
+
+info "Probing $SELECTED_EX demo credentials (read-only fetch_balance — gate before sizing)..."
+while true; do
+  probe_rc=0
+  probe_out="$(bash scripts/exchange.sh probe "$SELECTED_EX" --demo 2>&1)" || probe_rc=$?
+  printf '%s\n' "$probe_out"
+  if [[ $probe_rc -eq 0 ]]; then
+    PROBE_OK="true"
+    PROBE_EQUITY="$(printf '%s\n' "$probe_out" | sed -n 's/.*usable equity: \([0-9][0-9.]*\).*/\1/p' | head -1)"
+    ok "Demo credential probe PASSED."
+    break
+  fi
+  err "Demo credential probe FAILED (exit $probe_rc) — auth or credentials are wrong."
+  info "Fix in another terminal (edit .env, or: bash scripts/exchange.sh update $SELECTED_EX --demo), then retry."
+  read -r -p "  [r]etry probe / [o]verride and continue anyway / [a]bort install? [r/o/a] " probe_choice || probe_choice="a"
+  case "$probe_choice" in
+    o|O) warn "Continuing WITHOUT a passing probe — strategy sizing is unverified against the venue."; break ;;
+    a|A) err "Aborting install — demo credentials must authenticate before sizing strategies."; exit 1 ;;
+    *) ;;
+  esac
+done
 
 # ===========================================================================
 # PHASE 3 — Strategy selection
@@ -313,13 +373,136 @@ except Exception:
 PYEOF
 }
 
+# write_strategy_risk FILE BUDGET LEV — write capital.budget_usd + leverage into
+# the strategy JSON, preserving every other key (indent=2).
+write_strategy_risk() {
+  local file="$1" budget="$2" lev="$3"
+  $PY - "$file" "$budget" "$lev" <<'PYEOF'
+import json, sys
+path, budget, lev = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as fh:
+    data = json.load(fh)
+def num(s):
+    v = float(s)
+    return int(v) if v.is_integer() else v
+cap = data.get("capital")
+if not isinstance(cap, dict):
+    cap = {}
+    data["capital"] = cap
+cap["budget_usd"] = num(budget)
+data["leverage"] = num(lev)
+tmp = path + ".tmp"
+with open(tmp, "w") as fh:
+    json.dump(data, fh, indent=2, ensure_ascii=False)
+    fh.write("\n")
+import os
+os.replace(tmp, path)
+PYEOF
+}
+
+# set_reduce_only SID — mark a declined strategy reduce-only (risk_state: "reduce")
+# in control-state.json, the EXISTING split-control mechanism (ExecutionService gate
+# 5b blocks opens; close_only always passes). Prefers the production helper
+# (src/control_state.py set_strategy_risk); falls back to a JSON merge that keeps
+# every default_control_state() key so the load-time merge filter drops nothing.
+set_reduce_only() {
+  local sid="$1" py_bin="$PY"
+  [[ -x "$REPO_ROOT/.venv/bin/python" ]] && py_bin="$REPO_ROOT/.venv/bin/python"
+  "$py_bin" - "$REPO_ROOT" "$ENV_FILE" "$sid" <<'PYEOF'
+import json, os, sys, datetime
+repo, env_file, sid = sys.argv[1], sys.argv[2], sys.argv[3]
+env = {}
+try:
+    with open(env_file) as fh:
+        for raw in fh:
+            s = raw.strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            if s.startswith("export "):
+                s = s[len("export "):]
+            k, _, v = s.partition("=")
+            v = v.strip()
+            for q in ('"', "'"):
+                if len(v) >= 2 and v[0] == q and v[-1] == q:
+                    v = v[1:-1]
+            env[k.strip()] = v
+except FileNotFoundError:
+    pass
+for key in ("HERMX_ROOT", "HERMX_DATA_DIR"):
+    if env.get(key) and not os.environ.get(key):
+        os.environ[key] = env[key]
+try:
+    sys.path.insert(0, os.path.join(repo, "src"))
+    from control_state import set_strategy_risk
+    if set_strategy_risk(sid, "reduce"):
+        import webhook_receiver as _wr
+        print(str(_wr.CONTROL_STATE_FILE))
+        sys.exit(0)
+except Exception:
+    pass
+# Fallback: direct merge, same path resolution and default shape as the app
+# (webhook_receiver: DATA_DIR = HERMX_DATA_DIR or HERMX_ROOT or repo root).
+root = os.environ.get("HERMX_ROOT") or repo
+data_dir = os.environ.get("HERMX_DATA_DIR") or root
+path = os.path.join(data_dir, "control-state.json")
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+default = {
+    "version": 1,
+    "updated_at": now,
+    "mode": "shadow_only",
+    "live_trading": "paused",
+    "manual_pause": False,
+    "pause_reason": "",
+    "symbol_pauses": {},
+    "strategy_overrides": {},
+    "accounting_windows": {},
+    "trading_state": "active",
+    "notes": "Shadow control file. Dashboard/Hermes may read this. Live execution remains disabled here.",
+}
+state = {}
+if os.path.exists(path):
+    try:
+        with open(path) as fh:
+            loaded = json.load(fh)
+        if isinstance(loaded, dict):
+            state = loaded
+    except Exception:
+        state = {}
+for k, v in default.items():
+    state.setdefault(k, v)
+overrides = state.get("strategy_overrides")
+if not isinstance(overrides, dict):
+    overrides = {}
+state["strategy_overrides"] = overrides
+entry = dict(overrides.get(sid)) if isinstance(overrides.get(sid), dict) else {}
+entry["risk_state"] = "reduce"
+entry["mode"] = "pause"
+entry["set_at"] = now
+overrides[sid] = entry
+state["updated_at"] = now
+os.makedirs(data_dir, exist_ok=True)
+tmp = path + ".tmp"
+with open(tmp, "w") as fh:
+    json.dump(state, fh, indent=2, ensure_ascii=False)
+os.replace(tmp, path)
+print(path)
+PYEOF
+}
+
 shopt -s nullglob
 strategy_files=(strategies/*.json)
 shopt -u nullglob
 
+TOTAL_BUDGET=0
+TOTAL_NOTIONAL=0
+ENABLED_INSTS=""
+
 if (( ${#strategy_files[@]} == 0 )); then
   warn "No strategy files found under strategies/ — skipping."
 else
+  if [[ "$PROBE_OK" != "true" ]]; then
+    warn "Sizing strategies WITHOUT a passing demo probe (operator override)."
+  fi
   for f in "${strategy_files[@]}"; do
     # schema_version 2 strategy files: instrument + budget live in nested blocks,
     # and there is no asset/status field. Derive the display asset from the id.
@@ -328,21 +511,51 @@ else
     budget="$(json_get "$f" capital.budget_usd)"
     lev="$(json_get "$f" leverage)"
     mode="$(json_get "$f" execution_mode)"
-    submit="$(json_get "$f" submit_orders)"
     asset="$(printf '%s' "${sid%%_*}" | tr '[:lower:]' '[:upper:]')"
     echo
     info "Strategy: ${BOLD}${sid}${RESET}"
-    info "  asset=$asset  inst=$inst  budget_usd=$budget  leverage=${lev}x  execution_mode=$mode  submit_orders=$submit"
+    info "  asset=$asset  inst=$inst  budget_usd=$budget  leverage=${lev}x  execution_mode=$mode"
     if ask "Enable this strategy?" "y"; then
-      # Confirm risk params (display only; editing JSON is left to the operator).
-      if ! ask "Keep budget \$$budget and ${lev}x leverage?" "y"; then
-        warn "To change risk, edit $f directly (capital.budget_usd / leverage), then re-run."
+      # The operator MUST confirm the numbers: Enter accepts the shown current
+      # value, anything else replaces it. Both are always written back to the JSON.
+      new_budget=""
+      while true; do
+        read -r -p "  Budget USD for $sid [Enter = keep $budget]: " new_budget || new_budget=""
+        new_budget="${new_budget:-$budget}"
+        [[ "$new_budget" =~ ^[0-9]+(\.[0-9]+)?$ ]] && break
+        warn "Enter a positive number (e.g. 1500)."
+      done
+      new_lev=""
+      while true; do
+        read -r -p "  Leverage for $sid [Enter = keep ${lev}x]: " new_lev || new_lev=""
+        new_lev="${new_lev:-$lev}"
+        [[ "$new_lev" =~ ^[0-9]+(\.[0-9]+)?$ ]] && break
+        warn "Enter a positive number (e.g. 2)."
+      done
+      if write_strategy_risk "$f" "$new_budget" "$new_lev"; then
+        # Re-validate by reading the values back out of the file.
+        rb="$(json_get "$f" capital.budget_usd)"; rl="$(json_get "$f" leverage)"
+        ok "Wrote $f: budget_usd=$rb leverage=${rl}x (execution_mode stays demo)"
+      else
+        err "Failed to write risk params to $f — fix the JSON and re-run."
+        exit 1
       fi
+      TOTAL_BUDGET="$(awk "BEGIN{print $TOTAL_BUDGET + $new_budget}")"
+      TOTAL_NOTIONAL="$(awk "BEGIN{print $TOTAL_NOTIONAL + $new_budget * $new_lev}")"
+      ENABLED_INSTS="${ENABLED_INSTS:+$ENABLED_INSTS,}$inst"
       printf '%s %s %s\n' "$sid" "$asset" "$(json_get "$f" timeframe)" >> "$ENABLED_FILE"
       enabled_count=$((enabled_count + 1))
       ok "Enabled $sid"
     else
-      info "Skipped $sid (set submit_orders=false in $f to keep it inert)."
+      # Declined = reduce-only via the EXISTING control-state model: opens are
+      # blocked at the ExecutionService risk gate, closes always pass. The
+      # strategy file stays in place.
+      if cs_path="$(set_reduce_only "$sid")"; then
+        ok "$sid set reduce-only (risk_state: \"reduce\" in ${cs_path:-control-state.json})"
+        info "  Opens/reversals are blocked; closes still pass. Re-enable later from the dashboard mode pill."
+      else
+        err "Could not write reduce-only override for $sid — set it from the dashboard after install."
+      fi
     fi
   done
 fi
@@ -350,6 +563,21 @@ fi
 echo
 ok "Enabled $enabled_count strategies. Each needs one BUY + one SELL alert in TradingView."
 info "Enabled IDs saved to ENABLED_STRATEGIES.txt"
+if (( enabled_count > 0 )); then
+  info "Total allocated:  Σ budget = \$$TOTAL_BUDGET   Σ budget×leverage = \$$TOTAL_NOTIONAL"
+  if [[ -n "$PROBE_EQUITY" ]]; then
+    info "Probed demo equity: \$$PROBE_EQUITY"
+    if awk "BEGIN{exit !($TOTAL_BUDGET > $PROBE_EQUITY)}"; then
+      warn "Σ budget exceeds the probed demo equity — downsize budgets or top up the demo account."
+    elif awk "BEGIN{exit !($TOTAL_NOTIONAL > $PROBE_EQUITY)}"; then
+      warn "Σ budget×leverage exceeds the probed demo equity — margin may run out if all strategies open at once."
+    fi
+  fi
+  if [[ "$PROBE_OK" == "true" && -n "$ENABLED_INSTS" ]]; then
+    info "Checking enabled instruments exist on $SELECTED_EX demo (warn only)..."
+    bash scripts/exchange.sh probe "$SELECTED_EX" --demo --markets "$ENABLED_INSTS" || warn "Market check probe failed (non-fatal)."
+  fi
+fi
 
 # ===========================================================================
 # PHASE 4 — Tailscale
@@ -430,13 +658,25 @@ fi
 # ===========================================================================
 phase "PHASE 5: Deploy"
 
-build_venv() {
-  info "Creating .venv and installing requirements..."
-  "$PY" -m venv .venv
-  .venv/bin/pip install --upgrade pip >/dev/null
-  .venv/bin/pip install -r requirements.txt
-  ok "Virtualenv ready (.venv)."
+# Build the Next.js dashboard UI if node/npm are available; otherwise the
+# dashboard silently falls back to the legacy server-rendered HTML (dashboard.py
+# gates on dashboard-ui/out being a directory).
+build_dashboard_ui() {
+  [[ -d "$REPO_ROOT/dashboard-ui" ]] || return 0
+  if have npm; then
+    info "Building dashboard UI (npm)..."
+    if (cd "$REPO_ROOT/dashboard-ui" && { npm ci || npm install; } && npm run build); then
+      ok "Dashboard UI built (dashboard-ui/out)."
+    else
+      warn "Dashboard UI build failed — the dashboard will serve the legacy HTML fallback."
+      warn "Fix later with: cd dashboard-ui && npm ci && npm run build"
+    fi
+  else
+    warn "npm not found — the dashboard will serve the legacy HTML fallback."
+    warn "Install node+npm, then: cd dashboard-ui && npm ci && npm run build"
+  fi
 }
+build_dashboard_ui
 
 if [[ "$IS_VPS" == "true" ]]; then
   echo
@@ -555,6 +795,15 @@ info "Dashboard:    $DASH_DISPLAY"
 info "Receiver:     http://127.0.0.1:8891"
 info "Enabled:      $enabled_count strategies (ENABLED_STRATEGIES.txt)"
 info "Submit gate:  HERMX_LIVE_TRADING=false  (demo — nothing sent to live exchange)"
+
+echo
+phase "Post-install glossary (what you will see — none of these are broken)"
+info "Kill switch engaged   — EXPECTED on a demo install: HERMX_LIVE_TRADING=false only blocks live venues."
+info "DATA STALE            — a freshness label, not a dead system: a quiet market produces no new signals."
+info "Test webhooks         — open REAL positions on the demo/sandbox account; flatten with an action=\"close\" alert or the dashboard."
+info "SELL can open a short — a sell signal with no open long OPENS a short; use action \"close\" to flatten, not a counter-order."
+info "Going live            — needs BOTH execution_mode: \"live\" in the strategy JSON AND HERMX_LIVE_TRADING=true in .env."
+info "                        This installer never sets either — demo only."
 echo
 info "Next: create the TradingView alerts (INSTALL.md Phase 7) and fire a test alert."
 

@@ -8,11 +8,12 @@
 # Usage:
 #   bash scripts/exchange.sh list
 #   bash scripts/exchange.sh status <exchange> [--demo|--live]
+#   bash scripts/exchange.sh probe  <exchange> --demo|--live [--markets INST1,INST2]
 #   bash scripts/exchange.sh add    <exchange> --demo|--live
 #   bash scripts/exchange.sh update <exchange> --demo|--live
 #   bash scripts/exchange.sh remove <exchange> --demo|--live
 #
-# Subcommands: list, status, add, update, remove
+# Subcommands: list, status, probe, add, update, remove
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,6 +48,12 @@ Usage: bash scripts/exchange.sh <subcommand> <exchange> [--demo|--live]
 Subcommands:
   list                         Show every exchange × env credential status
   status <exchange> [--env]    Presence + resolver smoke test for one exchange
+  probe  <exchange> --demo|--live [--markets INST1,INST2]
+                               Read-only auth probe: fetch_balance against the
+                               chosen env (demo = sandbox/testnet, no
+                               HERMX_LIVE_TRADING needed). Prints usable
+                               equity/free margin; --markets warns on missing
+                               instruments. Exit 0 = auth OK.
   add    <exchange> --demo|--live    Prompt for and write credentials
   update <exchange> --demo|--live    Change existing credentials (blank = keep)
   remove <exchange> --demo|--live    Blank out credentials for one env
@@ -227,12 +234,17 @@ else:
 PY
 }
 
-# live_probe <exchange> — ccxt fetch_balance smoke against LIVE creds. Best-effort.
-live_probe() {
-  local ex="$1"
-  "$PYTHON" - "$ROOT" "$ENV_FILE" "$ex" <<'PY' || true
+# run_probe <exchange> <demo|live> [markets_csv] — mode-aware ccxt fetch_balance
+# probe. Demo enables the sandbox exactly like CcxtExecutor._client
+# (set_sandbox_mode(True), fail closed if the venue has no ccxt sandbox).
+# Read-only: never gated on HERMX_LIVE_TRADING, never writes anything.
+# Exit: 0 auth OK; 1 auth/client failure; 2 creds missing; 3 ccxt unavailable;
+# 4 no sandbox for demo. Missing --markets instruments only warn.
+run_probe() {
+  local ex="$1" mode="$2" markets="${3:-}"
+  "$PYTHON" - "$ROOT" "$ENV_FILE" "$ex" "$mode" "$markets" <<'PY'
 import sys
-root, env_file, exchange = sys.argv[1:4]
+root, env_file, exchange, mode, markets = sys.argv[1:6]
 sys.path.insert(0, root + "/src")
 env = {}
 try:
@@ -252,15 +264,15 @@ try:
 except FileNotFoundError:
     pass
 from security.credentials import resolve_exchange_credentials
-creds = resolve_exchange_credentials(exchange, env, mode="live")
+creds = resolve_exchange_credentials(exchange, env, mode=mode)
 if not creds:
-    print("  x no live credentials resolved — cannot probe")
-    sys.exit(0)
+    print(f"  x no {mode} credentials resolved — cannot probe")
+    sys.exit(2)
 try:
     import ccxt
 except Exception as exc:
-    print(f"  ! ccxt not importable ({exc}) — skipping probe")
-    sys.exit(0)
+    print(f"  x ccxt not importable ({exc}) — build the venv first (.venv/bin/pip install -r requirements.txt)")
+    sys.exit(3)
 try:
     if exchange == "hyperliquid":
         client = ccxt.hyperliquid({
@@ -273,11 +285,47 @@ try:
         pw = creds.get(f"{exchange.upper()}_PASSPHRASE")
         if pw:
             cfg["password"] = pw
+        if exchange in ("okx", "bybit"):
+            cfg["options"] = {"defaultType": "swap"}
         client = getattr(ccxt, exchange)(cfg)
-    client.fetch_balance()
-    print("  ✓ live fetch_balance succeeded")
 except Exception as exc:
-    print(f"  x live fetch_balance FAILED: {type(exc).__name__}")
+    print(f"  x could not build ccxt client for {exchange}: {type(exc).__name__}")
+    sys.exit(1)
+if mode == "demo":
+    if not hasattr(client, "set_sandbox_mode"):
+        print(f"  x {exchange} has no sandbox support in ccxt — demo probe impossible")
+        sys.exit(4)
+    try:
+        client.set_sandbox_mode(True)
+    except Exception as exc:
+        print(f"  x failed to enable sandbox for {exchange}: {exc}")
+        sys.exit(4)
+try:
+    bal = client.fetch_balance()
+except Exception as exc:
+    print(f"  x {mode} fetch_balance FAILED: {type(exc).__name__}: {exc}")
+    sys.exit(1)
+total = bal.get("total") if isinstance(bal.get("total"), dict) else {}
+free = bal.get("free") if isinstance(bal.get("free"), dict) else {}
+quote = next((c for c in ("USDT", "USDC", "USD") if total.get(c)), None) \
+    or next((c for c in ("USDT", "USDC", "USD") if c in total), "USDT")
+print(f"  ✓ {mode} auth OK on {exchange} (fetch_balance succeeded)")
+print(f"  ✓ usable equity: {total.get(quote) or 0} {quote} (free margin: {free.get(quote) or 0} {quote})")
+if markets:
+    want = [m.strip() for m in markets.split(",") if m.strip()]
+    try:
+        loaded = client.load_markets()
+    except Exception as exc:
+        print(f"  ! load_markets failed ({type(exc).__name__}) — market check skipped (warn only)")
+        loaded = None
+    if loaded is not None:
+        ids = set(loaded.keys()) | {str(m.get("id") or "") for m in loaded.values() if isinstance(m, dict)}
+        for inst in want:
+            if inst in ids:
+                print(f"  ✓ market present: {inst}")
+            else:
+                print(f"  ! market NOT found on {exchange} {mode}: {inst} (warn only — check the strategy inst_id)")
+sys.exit(0)
 PY
 }
 
@@ -360,11 +408,12 @@ status_one() {
       local ans=""
       read -rp "  Run live fetch_balance probe against $ex? [y/N] " ans || ans=""
       case "$ans" in
-        y|Y|yes|YES) live_probe "$ex" ;;
+        y|Y|yes|YES) run_probe "$ex" live || true ;;
         *) info "skipped live probe" ;;
       esac
     else
       info "live probe skipped (HERMX_LIVE_TRADING is not true, or no TTY)."
+      info "  (a read-only probe is always available: bash scripts/exchange.sh probe $ex --demo|--live)"
     fi
   fi
 }
@@ -387,6 +436,38 @@ cmd_status() {
     status_one "$EX" demo
     status_one "$EX" live
   fi
+}
+
+cmd_probe() {
+  shift # drop "probe"
+  local EX="" MODE="" MARKETS="" a expect_markets=0
+  for a in "$@"; do
+    if [ "$expect_markets" -eq 1 ]; then MARKETS="$a"; expect_markets=0; continue; fi
+    case "$a" in
+      --demo) MODE="demo" ;;
+      --live) MODE="live" ;;
+      --markets) expect_markets=1 ;;
+      --markets=*) MARKETS="${a#--markets=}" ;;
+      --*) err "Unknown flag: $a"; usage; exit 2 ;;
+      *) [ -z "$EX" ] && EX="$a" || { err "Unexpected argument: $a"; exit 2; } ;;
+    esac
+  done
+  validate_exchange "$EX"
+  if [ -z "$MODE" ]; then
+    err "probe requires an explicit --demo or --live."
+    exit 2
+  fi
+  if ! get_fields "$EX" "$MODE" >/dev/null 2>&1; then
+    err "$EX sandbox not supported in current ccxt version. Use --live only."
+    exit 1
+  fi
+  phase "Probe $EX — $MODE (read-only)"
+  if [ "$MODE" = "demo" ]; then
+    info "demo probe hits the sandbox/testnet — no HERMX_LIVE_TRADING gate, nothing is armed."
+  else
+    info "LIVE probe is read-only (fetch_balance only) — no orders, no keys written, nothing armed."
+  fi
+  run_probe "$EX" "$MODE" "$MARKETS"
 }
 
 # Shared arg parse for add/update/remove: requires exchange + explicit env flag.
@@ -618,6 +699,7 @@ main() {
   case "$subcmd" in
     list)          cmd_list ;;
     status)        cmd_status "$@" ;;
+    probe)         cmd_probe  "$@" ;;
     add)           cmd_add    "$@" ;;
     update)        cmd_update "$@" ;;
     remove)        cmd_remove "$@" ;;

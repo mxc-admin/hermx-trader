@@ -1,6 +1,6 @@
 ---
 name: hx-exchange
-description: "Manage exchange credentials for HermX: add, update, remove, and validate API keys for OKX, KuCoin, Bybit, Binance, Bitget, Gate, Hyperliquid, Coinbase, Bitfinex. Triggered by: '/hx-exchange list', '/hx-exchange add okx --demo', '/hx-exchange status bybit --live', '/hx-exchange remove kucoin --demo', 'add exchange credentials', 'how do I configure Bybit'."
+description: "Manage exchange credentials for HermX: add, update, remove, probe, and validate API keys for OKX, KuCoin, Bybit, Binance, Bitget, Gate, Hyperliquid, Coinbase, Bitfinex. Triggered by: '/hx-exchange list', '/hx-exchange add okx --demo', '/hx-exchange probe okx --demo', '/hx-exchange status bybit --live', '/hx-exchange remove kucoin --demo', 'add exchange credentials', 'do my demo keys work', 'how do I configure Bybit'."
 version: 0.1.0
 author: HermX
 license: MIT
@@ -54,9 +54,10 @@ The safety lives in the script and in the Python resolver, not in this skill tex
 - "rotate / change / update `<exchange>` keys" → `update`
 - "remove / delete / clear `<exchange>` keys" → `remove`
 - "are `<exchange>` keys set / valid?", "which exchanges are configured?" → `status` / `list`
+- "do the demo keys actually authenticate?", "what's the demo balance/equity?" → `probe`
 - Trigger phrases: `/hx-exchange list`, `/hx-exchange add okx --demo`,
-  `/hx-exchange status bybit --live`, `/hx-exchange remove kucoin --demo`,
-  "add exchange credentials", "how do I configure Bybit".
+  `/hx-exchange probe okx --demo`, `/hx-exchange status bybit --live`,
+  `/hx-exchange remove kucoin --demo`, "add exchange credentials", "how do I configure Bybit".
 
 Don't use for: arming/kill-switch (→ [[hermx-control]] / `/hx-emergency-stop`), strategy
 modes (→ `/hx-strategy-mode`), or anything that places or relays an order.
@@ -84,10 +85,28 @@ All commands take the shape `ssh [-t] {ssh_target} 'cd {repo_dir} && bash script
 - **Does:** per-var presence for the chosen env, the resolver smoke result
   (`OK`/`PARTIAL`/`MISSING`), a precedence warning if the opposite env is also set, an
   adapter-wired note (coinbase is not wired), and — for `--live` with
-  `HERMX_LIVE_TRADING=true` — an optional `fetch_balance` probe (prompted in the SSH
-  session). No env flag → reports both demo and live.
+  `HERMX_LIVE_TRADING=true` and a TTY — an optional interactive `fetch_balance` probe. No
+  env flag → reports both demo and live. Status only checks **presence/resolution**; to
+  verify the keys actually authenticate, use `probe` (works for demo or live, no arming
+  needed).
 - **Emit:** `ssh {ssh_target} 'cd {repo_dir} && bash scripts/exchange.sh status <exchange> [--demo|--live]'`
 - **After:** report `OK`/`PARTIAL`/`MISSING` and any precedence/wiring warning verbatim.
+
+### `probe <exchange> --demo|--live [--markets INST1,INST2]` (read-only)
+- **Does:** builds a real ccxt client from the resolved credentials and calls
+  `fetch_balance` against the chosen env. `--demo` enables the venue sandbox/testnet
+  exactly like the production adapter (`set_sandbox_mode(True)`) and needs **no**
+  `HERMX_LIVE_TRADING` — nothing is armed. `--live` is still read-only (balance read
+  only; no orders, no writes). On success prints usable equity / free margin (USDT or
+  primary quote). `--markets` additionally runs `load_markets` and **warns** (never
+  fails) on instruments the venue doesn't list.
+- **Exit codes:** `0` auth OK · `1` auth/client failure · `2` credentials missing ·
+  `3` ccxt/venv unavailable · `4` no ccxt sandbox for `--demo` (coinbase, bitfinex).
+- **Emit (plain ssh, NOT `-t` — no prompts):**
+  `ssh {ssh_target} 'cd {repo_dir} && bash scripts/exchange.sh probe <exchange> --demo|--live [--markets INST1,INST2]'`
+- **After:** report auth OK/failed, the printed equity/free margin, and any missing-market
+  warnings. A nonzero exit means the credentials do NOT work — say so plainly; never
+  soften it to "probably fine".
 
 ### `add <exchange> --demo|--live` (mutating)
 - **Does:** prompts for each field with `read -s`, previews masked values, backs up
@@ -132,7 +151,11 @@ All commands take the shape `ssh [-t] {ssh_target} 'cd {repo_dir} && bash script
 - **Never emit a key value.** No key in a command argument, heredoc, echo, log, or summary.
   Masked previews (`8b17****`) come from the script; treat them as status, not the key.
 - **Interactive mutations use `ssh -t`.** `add`/`update`/`remove` prompt with `read -s`
-  and need a TTY (the script hard-errors without one). `list`/`status` don't.
+  and need a TTY (the script hard-errors without one). `list`/`status`/`probe` don't —
+  emit them as plain `ssh`.
+- **`probe --demo` needs no arming.** It is a read-only sandbox balance read — never ask
+  the operator to set `HERMX_LIVE_TRADING` for it, and never present a probe as placing
+  an order.
 - **Live is explicit.** Confirm `--live` was intended; the script itself requires a typed
   `yes, add live <exchange>`. Never promote to live implicitly.
 - **Adding keys ≠ arming.** State plainly that `HERMX_LIVE_TRADING` and strategy
@@ -150,31 +173,34 @@ NOT_WIRED = {"coinbase"}
 NO_SANDBOX = {"coinbase", "bitfinex"}
 MUTATING  = {"add", "update", "remove"}
 
-def build(ssh_target, repo_dir, subcmd, exchange=None, env_flag=None):
+def build(ssh_target, repo_dir, subcmd, exchange=None, env_flag=None, markets=None):
     # 1) validate subcommand + exchange
-    if subcmd not in {"list", "status", "add", "update", "remove"}:
+    if subcmd not in {"list", "status", "probe", "add", "update", "remove"}:
         raise ValueError(f"unknown subcommand: {subcmd}")
     if subcmd != "list":
         if exchange not in SUPPORTED:
             raise ValueError(f"unknown exchange '{exchange}'; supported: {', '.join(SUPPORTED)}")
-    if subcmd in MUTATING and env_flag not in ("--demo", "--live"):
-        raise ValueError("add/update/remove require an explicit --demo or --live")
-    if subcmd in MUTATING and exchange in NO_SANDBOX and env_flag == "--demo":
+    if subcmd in MUTATING | {"probe"} and env_flag not in ("--demo", "--live"):
+        raise ValueError("add/update/remove/probe require an explicit --demo or --live")
+    if subcmd in MUTATING | {"probe"} and exchange in NO_SANDBOX and env_flag == "--demo":
         raise ValueError(f"{exchange} sandbox not supported in ccxt; use --live")
 
     # 2) assemble the remote command (NO credential ever appears here)
     parts = ["bash", "scripts/exchange.sh", subcmd]
     if exchange: parts.append(exchange)
     if env_flag: parts.append(env_flag)
+    if subcmd == "probe" and markets: parts += ["--markets", markets]
     remote = f"cd {shlex.quote(repo_dir)} && {' '.join(parts)}"
 
-    # 3) interactive (-t) for mutations so the script's read -s prompts get a TTY
+    # 3) interactive (-t) ONLY for mutations so the script's read -s prompts get a
+    #    TTY; probe/list/status are read-only and emit plain ssh (no -t).
     flag = "-t " if subcmd in MUTATING else ""
     return f"ssh {flag}{shlex.quote(ssh_target)} {shlex.quote(remote)}"
 
 # Example emissions:
 #   list             -> ssh hermx-vps 'cd /opt/hermx && bash scripts/exchange.sh list'
 #   status bybit --live -> ssh hermx-vps 'cd /opt/hermx && bash scripts/exchange.sh status bybit --live'
+#   probe okx --demo -> ssh hermx-vps 'cd /opt/hermx && bash scripts/exchange.sh probe okx --demo'
 #   add okx --demo   -> ssh -t hermx-vps 'cd /opt/hermx && bash scripts/exchange.sh add okx --demo'
 ```
 1. **Parse** the request → `subcommand`, `exchange`, `env_flag`. Resolve `ssh_target`
@@ -190,6 +216,9 @@ def build(ssh_target, repo_dir, subcmd, exchange=None, env_flag=None):
   the `HERMX_LIVE_TRADING` value. Note coinbase is not adapter-wired.
 - **status:** vars present (`n/total`), resolver result, precedence and wiring warnings,
   and the live-probe outcome if run. Never restate a masked value as the key.
+- **probe:** auth OK or FAILED (with the exit-code meaning), the usable equity / free
+  margin figures, and any missing-market warnings (warn-only). Nonzero exit = the keys do
+  not authenticate — report it as a failure, not UNKNOWN.
 - **add/update/remove:** confirm the operator completed the SSH prompts, report the
   post-change `status` (`OK`/`PARTIAL`/`MISSING`), relay the restart reminder
   (`sudo systemctl restart hermx-receiver hermx-dashboard`), and — for live — restate that
@@ -199,8 +228,9 @@ def build(ssh_target, repo_dir, subcmd, exchange=None, env_flag=None):
 
 ## Verification checklist
 - [ ] Exchange validated against the nine ids before any SSH command was emitted.
-- [ ] Mutating subcommands used `ssh -t`; `list`/`status` did not.
+- [ ] Mutating subcommands used `ssh -t`; `list`/`status`/`probe` did not.
 - [ ] No credential value appeared in any command, heredoc, echo, log, or summary.
-- [ ] `--live` intent confirmed; coinbase/bitfinex `--demo` rejected.
+- [ ] `--live` intent confirmed; coinbase/bitfinex `--demo` rejected (add/update/probe).
+- [ ] A demo probe was never gated on (or blamed on) `HERMX_LIVE_TRADING`.
 - [ ] A mutation was confirmed by a follow-up `status`, reporting the resolver result.
 - [ ] Reminded the operator that adding keys does not arm the system.

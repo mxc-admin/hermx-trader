@@ -40,8 +40,10 @@ to a fully operational install, interactively.
 3. **Never invent secrets, API keys, tokens, or URLs.** Ask the user for every value you do not
    already have. If the user asks you to generate a random secret, do so explicitly (e.g.
    `openssl rand -hex 32`) and show them the result.
-4. **HermX ships safe-by-default.** It defaults to **OKX demo/sandbox** with order submission
-   **disabled**. Keep it that way through this install. Do **not** enable real-money execution.
+4. **HermX ships safe-by-default and this install is demo-only.** Every strategy stays
+   `execution_mode: "demo"` and `HERMX_LIVE_TRADING=false`. Do **not** enable real-money
+   execution. **Ask** the user which exchange to use (Phase 0.2) — choose OKX only when they
+   say they have no preference, never silently.
 5. Treat the user as non-technical. Explain what each command does in one line before running it.
 6. Echo important values back to the user (webhook URL, strategy IDs, secret) and save them to
    files so they are not lost.
@@ -96,22 +98,42 @@ you have them.
 
 - [ ] A **VPS** (fresh Ubuntu 22.04 with sudo) — or are you installing **locally** on macOS?
 - [ ] **Exchange API keys** for a demo/sandbox/testnet account (see 0.2).
-- [ ] A **TradingView** account (Pro tier or higher is needed to send webhook request headers).
+- [ ] A **TradingView** account (Pro tier or higher is needed for webhook alerts; the secret
+      travels in the alert **message JSON** as `secret_key` — no custom headers are needed).
 - [ ] A **Telegram** account (optional — only if you want the natural-language operator bot).
 - [ ] An **LLM provider API key** (xAI, OpenAI, Anthropic, etc., optional — only needed for the Hermes Agent).
 
-**0.2 — Which exchange do you want to use?** HermX validates against these four:
+**0.2 — Which exchange do you want to use?** **Ask** — never pick one silently. This is a
+**demo-only** install, so only demo/sandbox/testnet-capable venues are offered:
 
 | Exchange | Status | Demo env to create keys in | `.env` variables you'll need |
 |---|---|---|---|
 | **OKX** | ✅ recommended, fully wired | OKX **Demo Trading** | `OKX_DEMO_API_KEY`, `OKX_DEMO_SECRET_KEY`, `OKX_DEMO_PASSPHRASE` |
 | KuCoin | supported | KuCoin **Sandbox** | `KUCOIN_PAPER_API_KEY`, `KUCOIN_PAPER_SECRET`, `KUCOIN_PAPER_PASSPHRASE` |
 | Bybit | supported | Bybit **Testnet** | `BYBIT_TESTNET_API_KEY`, `BYBIT_TESTNET_SECRET_KEY` |
-| Hyperliquid | accepted by schema | Hyperliquid **testnet** | (wallet-based; ask user — no preset env var) |
+| Binance | supported | Binance **Testnet** | `BINANCE_TESTNET_API_KEY`, `BINANCE_TESTNET_SECRET_KEY` |
+| Bitget | supported | Bitget **Demo** | `BITGET_DEMO_API_KEY`, `BITGET_DEMO_SECRET_KEY`, `BITGET_DEMO_PASSPHRASE` |
+| Gate.io | supported | Gate **Testnet** | `GATE_TESTNET_API_KEY`, `GATE_TESTNET_SECRET_KEY` |
+| Hyperliquid | supported | Hyperliquid **testnet** | `HYPERLIQUID_TESTNET_WALLET_ADDRESS`, `HYPERLIQUID_TESTNET_PRIVATE_KEY` |
 
-> Recommend **OKX** unless the user has a strong reason otherwise — it is the reference, fully-wired
+> Coinbase and Bitfinex are **excluded** here: ccxt has no sandbox for either, so a demo install
+> cannot use them (demo execution fails closed at the adapter).
+>
+> Pick **OKX** only when the user says they have no preference — it is the reference, fully-wired
 > backend and the shipped strategies target OKX swaps. Whichever exchange they choose, the keys must
 > come from that exchange's **demo/sandbox/testnet** environment, never a live account.
+>
+> **Hyperliquid notes (read before choosing it):**
+> - Auth is a **wallet address + private key**, not an API key. Best practice: use the **master
+>   account's public address** as `HYPERLIQUID_TESTNET_WALLET_ADDRESS` and an **API/agent wallet's
+>   private key** as `HYPERLIQUID_TESTNET_PRIVATE_KEY` (generated under API on the testnet app) —
+>   never the master key itself.
+> - If the account was created via **email login**, the embedded wallet differs from a
+>   self-custody wallet — check which address the testnet app actually shows before copying it.
+> - The **testnet faucet** only pays out to addresses that have made a (any-size) deposit on
+>   **mainnet** first — a brand-new empty wallet cannot claim faucet funds.
+> - Testnet markets are **thin**: order books can be nearly empty, so fills and marks behave
+>   nothing like mainnet. Treat Hyperliquid testnet as an auth/plumbing check, not a market sim.
 
 **0.3 — Explain the outcome.** Tell the user, in plain language:
 
@@ -285,8 +307,16 @@ BYBIT_TESTNET_API_KEY=<bybit testnet key>
 BYBIT_TESTNET_SECRET_KEY=<bybit testnet secret>
 ```
 
-If **Hyperliquid**: there is no preset env var — ask the user how their build expects the wallet/key
-to be supplied and record it. Confirm it points at **testnet**.
+If **Hyperliquid**:
+
+```text
+HYPERLIQUID_TESTNET_WALLET_ADDRESS=<master account public address (0x…)>
+HYPERLIQUID_TESTNET_PRIVATE_KEY=<API/agent wallet private key — NOT the master key>
+```
+
+Confirm both values come from **testnet** (see the Hyperliquid notes in Phase 0.2: agent key vs
+master key, email-login embedded wallets, faucet requires a prior mainnet deposit, thin testnet
+markets). The resolver fails closed unless **both** are present.
 
 > The shipped strategy files target **OKX swaps**. If the user picks a non-OKX exchange, flag that
 > they may need matching strategy `instrument` blocks before live alerts will route — note it and
@@ -332,6 +362,31 @@ pip install -r requirements.txt
 python scripts/validate_package.py    # sanity-check the package (if present)
 ```
 
+Build the dashboard UI if node/npm are available (otherwise the dashboard serves a legacy
+server-rendered HTML fallback — functional, but not the real UI):
+
+```bash
+cd dashboard-ui && npm ci && npm run build && cd ..
+# npm missing? Warn the user the dashboard falls back to legacy HTML and continue.
+```
+
+### 2.5 Demo credential probe — install gate
+
+**Before sizing any strategy**, prove the demo credentials actually authenticate. The probe is
+read-only (`fetch_balance` against the sandbox/testnet — no orders, no `HERMX_LIVE_TRADING`
+needed) and prints the account's usable equity / free margin:
+
+```bash
+bash scripts/exchange.sh probe <exchange> --demo
+# optionally check instruments too (warn-only):
+bash scripts/exchange.sh probe okx --demo --markets BTC-USDT-SWAP,ETH-USDT-SWAP
+```
+
+**Agent rule:** do **not** write strategy budgets/leverage (Phase 3) until this probe exits 0 —
+or the user explicitly says to continue despite a failed probe. On failure, fix the credentials
+(`bash scripts/exchange.sh update <exchange> --demo`) and re-probe. Record the printed equity —
+Phase 3 compares the total allocated budget against it.
+
 **✅ Verify Phase 2:**
 - `ls -l .env` shows `-rw-------` (mode 600).
 - `HERMX_SECRET` and the chosen exchange's demo credentials are filled in (non-blank).
@@ -339,6 +394,8 @@ python scripts/validate_package.py    # sanity-check the package (if present)
 - `engine-config.json` is the demo profile — confirm it carries the `strategy_engine` block:
   `grep -E '"(strategy_engine|strategies_dir|require_strategy_id)"' engine-config.json`.
 - `pip install` completed without errors.
+- `bash scripts/exchange.sh probe <exchange> --demo` exits 0 and printed usable equity
+  (or the user explicitly overrode a failure).
 
 ---
 
@@ -362,9 +419,11 @@ The repo ships **four** strategies (all OKX swaps, 2x leverage, isolated margin,
 | `solusdt_duo_base_dev_3h.json` | `solusdt_duo_base_dev_3h` | SOLUSDT | SOL-USDT-SWAP | 3h | 1500 | 2x | demo |
 | `xrpusdt_duo_base_dev_4h.json` | `xrpusdt_duo_base_dev_4h` | XRPUSDT | XRP-USDT-SWAP | 4h | 1500 | 2x | demo |
 
-> Total demo budget across all four ≈ **$6,000**. These are `schema_version: 2` strategy files — the
-> instrument and budget live in nested blocks (`instrument.inst_id`, `capital.budget_usd`); there is
-> **no `asset` or `status` field**. A strategy is inert only when its file is removed from `strategies/`.
+> Total demo budget across all four ≈ **$6,000** — the user must confirm or change these numbers
+> in 3.2. These are `schema_version: 2` strategy files — the instrument and budget live in nested
+> blocks (`instrument.inst_id`, `capital.budget_usd`); there is **no `asset` or `status` field**.
+> To keep a strategy from opening positions, set it **reduce-only** via control-state
+> (`risk_state: "reduce"`, see 3.2) — don't delete its file.
 
 Print each strategy's summary so the user sees the real values:
 
@@ -375,20 +434,50 @@ for f in strategies/*.json; do
 done
 ```
 
-### 3.2 Ask which strategies to enable
+### 3.2 Ask which strategies to enable — sizing is mandatory
 
-For **each** strategy, ask the user:
+Prerequisite: the **demo probe passed** (Phase 2.5) — do not size against an account you
+haven't authenticated to. For **each** strategy, ask the user:
 
-1. *"Do you want to enable this strategy?"* — A strategy is **enabled** when its file is present
-   in `strategies/` (and `execution_mode` decides where it routes — `demo` = sandbox). All four ship with
-   `execution_mode: "demo"`. To make one inert, remove its file from `strategies/`.
-2. *"Confirm the risk parameters for this strategy: budget `$<budget_usd>`, leverage `<leverage>x`.
-   Keep these or change them?"* — If they change `budget_usd` or `leverage`, edit the strategy JSON
-   and re-validate.
+1. *"Do you want to enable this strategy?"*
+2. **If enabled — the user MUST state the numbers.** Ask for `budget_usd` and `leverage`
+   (show the current values as the offered default; an explicit "keep 1500 / 2x" counts, silence
+   does not). **Write** the answers into the strategy JSON (`capital.budget_usd`, `leverage`)
+   preserving all other keys, keep `execution_mode: "demo"` and `margin_mode: "isolated"`:
 
-> If the user changes a value, edit the JSON in place and keep `execution_mode: "demo"`,
-> `margin_mode: "isolated"`. Remember: the master `.env` gate
-> (`HERMX_LIVE_TRADING=false`) keeps live execution disabled — demo strategies route to the sandbox.
+   ```bash
+   # Example: set budget 1000 / leverage 2 on one strategy (preserves other keys, indent=2):
+   .venv/bin/python - strategies/btcusdt_duo_base_dev_2h.json 1000 2 <<'PY'
+   import json, sys
+   path, budget, lev = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
+   data = json.load(open(path))
+   data.setdefault("capital", {})["budget_usd"] = int(budget) if budget.is_integer() else budget
+   data["leverage"] = int(lev) if lev.is_integer() else lev
+   json.dump(data, open(path, "w"), indent=2)
+   PY
+   ```
+
+3. **If declined — set it reduce-only via the existing control-state model.** Do **not** delete
+   or move the file. Write `risk_state: "reduce"` for that `strategy_id` into
+   `control-state.json` (`$HERMX_DATA_DIR/control-state.json`, default: repo root) using the
+   production helper:
+
+   ```bash
+   # From the repo root (uses src/control_state.py — the same writer the dashboard uses):
+   HERMX_SID=<strategy_id> .venv/bin/python - <<'PY'
+   import os, sys
+   sys.path.insert(0, "src")
+   from control_state import set_strategy_risk
+   print(set_strategy_risk(os.environ["HERMX_SID"], "reduce"))
+   PY
+   ```
+
+   Tell the user what this means: **opens and reversals are blocked** at the execution risk
+   gate; **closes always pass** (never-block-a-close). Re-enable later from the dashboard's
+   strategy mode pill (risk → active). `bash install.sh` does both of these steps for you.
+
+After sizing, sum the allocations and sanity-check against the probed equity from Phase 2.5:
+warn if **Σ budget** (or Σ budget×leverage) exceeds the demo account's usable equity.
 
 Then re-validate the strategy files if a validator is available:
 
@@ -425,8 +514,10 @@ printf '%s\n' \
 cat ENABLED_STRATEGIES.txt
 ```
 
-**✅ Verify Phase 3:** Every enabled strategy has `execution_mode: "demo"`;
-the user has confirmed each budget and leverage; and `ENABLED_STRATEGIES.txt` lists the IDs.
+**✅ Verify Phase 3:** Every enabled strategy has `execution_mode: "demo"` and a budget/leverage
+the user explicitly stated (written into the JSON); every declined strategy has
+`risk_state: "reduce"` in `control-state.json`; the Σ budget vs probed-equity check ran; and
+`ENABLED_STRATEGIES.txt` lists the enabled IDs.
 
 ---
 
@@ -1042,6 +1133,19 @@ Live switch:  HERMX_LIVE_TRADING=false  (demo, nothing sent to a live account)
 
 Next step: Fire a test alert from TradingView and confirm it appears in the dashboard.
 ```
+
+**Post-install glossary — show this to the user** (all of these are expected, none are broken):
+
+- **"Kill switch engaged"** — EXPECTED on a demo install: `HERMX_LIVE_TRADING=false` only blocks
+  live venues; demo/sandbox trading is unaffected.
+- **"DATA STALE"** — a freshness label, not a dead system. A quiet market produces no new
+  signals, so the last-signal timestamp ages. Check the receiver `/health` before assuming an outage.
+- **Test webhooks are real (demo) trades** — a synthetic `curl`/TradingView test opens a REAL
+  position on the demo/sandbox account. Flatten it with an `action: "close"` alert or the dashboard.
+- **SELL can open a short** — a sell signal with no open long OPENS a short position; to flatten,
+  use `action: "close"`, never a counter-order.
+- **Going live** — requires BOTH `execution_mode: "live"` in the strategy JSON AND
+  `HERMX_LIVE_TRADING=true` in `.env`. This install sets neither — demo only.
 
 ### Enabling LIVE execution later (only when the user asks)
 
